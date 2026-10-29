@@ -6,6 +6,7 @@ const Island = preload("res://scripts/art/island_factory.gd")
 const Chart = preload("res://scripts/ui/power_chart.gd")
 const MarketDesk = preload("res://scripts/ui/market_panel.gd")
 const DigitalDesk = preload("res://scripts/ui/digital_panel.gd")
+const PlanningDesk = preload("res://scripts/ui/planning_panel.gd")
 const INK := Color("102c38")
 const PANEL := Color("122e3bdd")
 const TEAL := Color("77dbc0")
@@ -19,6 +20,8 @@ const SPACING := 2.0
 var sim: RefCounted
 var camera: Camera3D
 var world: Node3D
+var terrain: Node3D
+var terrain_size := 16
 var sun_light: DirectionalLight3D
 var environment_state: Environment
 var rain_root: Node3D
@@ -78,6 +81,7 @@ var response_button: Button
 var market_panel: Control
 var market_ticker: Label
 var digital_panel: Control
+var planning_panel: Control
 var digital_ticker: Label
 var dialog_layer: Control
 var refresh_inspector := true
@@ -104,7 +108,8 @@ func _ready() -> void:
 func _setup_world() -> void:
 	world = Node3D.new()
 	add_child(world)
-	world.add_child(Island.create(GRID_SIZE,SPACING))
+	terrain = Island.create(16,SPACING)
+	world.add_child(terrain)
 	building_root = Node3D.new()
 	world.add_child(building_root)
 	cable_root = Node3D.new()
@@ -212,9 +217,69 @@ func _building_at(cell: Vector2i) -> int:
 	return -1
 
 func _is_map_cell(cell: Vector2i) -> bool:
-	return cell.x >= 1 and cell.x < 15 and cell.y >= 1 and cell.y < 15
+	return cell.x >= 1 and cell.x < sim.map_size()-1 and cell.y >= 1 and cell.y < sim.map_size()-1
+
+func _sync_terrain() -> void:
+	if terrain_size == sim.map_size():
+		return
+	terrain_size = sim.map_size()
+	terrain.queue_free()
+	terrain = Island.create(terrain_size,SPACING)
+	if terrain_size > 16:
+		# Keep the teaching town's original cell-to-world mapping unchanged.
+		terrain.position = Vector3(32,0,32)
+		Models.box(terrain,Vector3(57,0.016,7.4),Vector3(17,-0.018,-41),Color("6caeaf"),"RiverCorridor")
+		Models.box(terrain,Vector3(40,0.014,44),Vector3(22,-0.023,22),Color("98b992"),"EasternBasin")
+		for spec in [["河流走廊 · 水电选址",Vector3(13,0.15,-43)],["东部丘陵 · 抽水蓄能选址",Vector3(20,0.15,36)]]:
+			var caption := Label3D.new()
+			caption.text = spec[0]
+			caption.font = load("res://assets/fonts/NotoSansCJKsc-Regular.otf")
+			caption.font_size = 40
+			caption.pixel_size = 0.025
+			caption.outline_size = 2
+			caption.position = spec[1]
+			caption.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+			caption.modulate = Color("315d58")
+			terrain.add_child(caption)
+		for city in sim.region.cities:
+			var caption := Label3D.new()
+			caption.text = "%s · %s" % [city.name,city.specialization]
+			caption.font = load("res://assets/fonts/NotoSansCJKsc-Regular.otf")
+			caption.font_size = 48
+			caption.outline_size = 5
+			caption.pixel_size = 0.025
+			caption.position = Vector3((city.anchor.x-23.5)*SPACING,2.0,(city.anchor.y-23.5)*SPACING)
+			caption.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+			caption.no_depth_test = true
+			caption.set_meta("city_id",int(city.id))
+			terrain.add_child(caption)
+	world.add_child(terrain)
+	cam_target = Vector3.ZERO
+	zoom = 47.0
+	_update_camera()
+
+func focus_city(id: int) -> void:
+	var city: Dictionary = sim.region.city_status(id)
+	if city.is_empty():
+		return
+	cam_target = _cell_position(city.anchor)
+	zoom = 40.0
+	_update_camera()
+	if not city.building_ids.is_empty():
+		selected_id = int(city.building_ids[0])
+		selected_line = -1
+		selected_comm_line = -1
+	_update_inspector()
+	_sync_world(true)
+	_notify("%s · %s · 人口 %.0f" % [city.name,city.specialization,city.population])
 
 func _sync_world(force: bool=false) -> void:
+	_sync_terrain()
+	if sim.region.active:
+		for child in terrain.get_children():
+			if child.has_meta("city_id"):
+				var city: Dictionary = sim.region.city_status(int(child.get_meta("city_id")))
+				child.text = "%s · %s" % [city.name,city.specialization]
 	var ids: Array = []
 	for b in sim.buildings:
 		ids.append(b.id)
@@ -223,7 +288,7 @@ func _sync_world(force: bool=false) -> void:
 			model.position = _cell_position(b.cell)
 			building_root.add_child(model)
 			visuals[b.id] = model
-			var heights := {"wind":3.5,"sensor":2.7,"home":1.45,"solar":0.8,"battery":1.5,"factory":1.8,"gas":1.85,"hospital":2.0,"substation":1.8,"intertie":2.2,"control":2.0,"relay":3.2,"soc":1.6}
+			var heights := {"wind":3.5,"sensor":2.7,"home":1.45,"solar":0.8,"battery":1.5,"factory":1.8,"gas":1.85,"hospital":2.0,"substation":1.8,"intertie":2.2,"control":2.0,"relay":3.2,"soc":1.6,"nuclear":2.8,"fusion":2.5,"coal":2.8,"steam":2.5,"hydro":1.7,"cooling":2.4,"academy":1.7,"pumped_storage":1.5,"flow_battery":1.9,"hydrogen":2.2,"hvdc":2.2,"ccgt":2.2,"condenser":1.6}
 			var body := StaticBody3D.new()
 			body.set_meta("building_id",int(b.id))
 			var collision := CollisionShape3D.new()
@@ -437,8 +502,8 @@ func _process(delta: float) -> void:
 			var right := camera.global_basis.x
 			var forward := Vector3(camera.global_basis.z.x,0,camera.global_basis.z.z).normalized()
 			cam_target += (right*move.x+forward*move.y)*delta*10
-			cam_target.x = clampf(cam_target.x,-14,14)
-			cam_target.z = clampf(cam_target.z,-14,14)
+			cam_target.x = clampf(cam_target.x,-14,78 if sim.region.active else 14)
+			cam_target.z = clampf(cam_target.z,-14,78 if sim.region.active else 14)
 			_update_camera()
 	var effective_speed := 0 if _modal_open() else speed
 	sim_accum += delta * effective_speed
@@ -482,7 +547,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_ESCAPE:
-			if digital_panel.visible:
+			if planning_panel.visible:
+				planning_panel.close()
+			elif digital_panel.visible:
 				digital_panel.close()
 			elif market_panel.visible:
 				market_panel.close()
@@ -492,6 +559,9 @@ func _unhandled_input(event: InputEvent) -> void:
 				welcome.hide()
 			else:
 				_set_tool("select")
+			return
+		if event.keycode == KEY_T and planning_panel.visible:
+			planning_panel.close()
 			return
 		if event.keycode == KEY_M and market_panel.visible:
 			market_panel.close()
@@ -521,6 +591,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_H: help_modal.show()
 			KEY_M: market_panel.open()
 			KEY_N: digital_panel.open()
+			KEY_T: planning_panel.open()
 	if _modal_open():
 		return
 	if event is InputEventMouseButton:
@@ -528,7 +599,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			zoom = maxf(22,zoom-2)
 			_update_camera()
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			zoom = minf(58,zoom+2)
+			zoom = minf(135 if sim.region.active else 58,zoom+2)
 			_update_camera()
 		elif event.button_index == MOUSE_BUTTON_MIDDLE:
 			dragging = event.pressed
@@ -542,12 +613,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		var right := camera.global_basis.x
 		var forward := Vector3(camera.global_basis.z.x,0,camera.global_basis.z.z).normalized()
 		cam_target -= (right*d.x+forward*d.y)*zoom/800
-		cam_target.x = clampf(cam_target.x,-14,14)
-		cam_target.z = clampf(cam_target.z,-14,14)
+		cam_target.x = clampf(cam_target.x,-14,78 if sim.region.active else 14)
+		cam_target.z = clampf(cam_target.z,-14,78 if sim.region.active else 14)
 		_update_camera()
 
 func _modal_open() -> bool:
-	return (welcome != null and welcome.visible) or (help_modal != null and help_modal.visible) or (end_modal != null and end_modal.visible) or (market_panel != null and market_panel.visible) or (digital_panel != null and digital_panel.visible)
+	return (welcome != null and welcome.visible) or (help_modal != null and help_modal.visible) or (end_modal != null and end_modal.visible) or (market_panel != null and market_panel.visible) or (digital_panel != null and digital_panel.visible) or (planning_panel != null and planning_panel.visible)
 
 func _handle_map_click(cell: Vector2i) -> void:
 	var id := _building_at(cell)
@@ -636,7 +707,7 @@ func _update_hover() -> void:
 			marker_root.add_child(ghost)
 		ghost.position = _cell_position(cell)+Vector3.UP*0.055
 		ghost.show()
-		tooltip_label.text = "%s · 点击建造" % Sim.CATALOG[build_kind].name
+		tooltip_label.text = "%s · 点击建造" % sim.catalog[build_kind].name
 	else:
 		if ghost:
 			ghost.hide()
@@ -678,7 +749,7 @@ func _set_tool(value: String) -> void:
 	elif tool == "repair":
 		text = "抢修模式 · 点击设施或故障线路派遣队伍"
 	elif tool == "build":
-		text = "建造 %s · 点击空地放置 · 记得连接电缆" % Sim.CATALOG[build_kind].name
+		text = "建造 %s · 点击空地放置 · 记得连接电缆" % sim.catalog[build_kind].name
 	hint_label.text = text
 	mode_label.text = "建造规划" if tool == "build" else ("通信布线" if tool=="datalink" else ("电网布线" if tool == "line" else "运行视图"))
 	if communication_root:
@@ -701,8 +772,8 @@ func _toggle_pause() -> void:
 func _save() -> void:
 	_apply(sim.save_game("user://tidal_grid_save.json"))
 
-func _load() -> void:
-	var result: Variant = sim.load_game("user://tidal_grid_save.json")
+func _load(path: String="user://tidal_grid_save.json") -> void:
+	var result: Variant = sim.load_game(path)
 	_apply(result)
 	if result is Dictionary and not result.get("ok",false):
 		return
@@ -712,6 +783,7 @@ func _load() -> void:
 	chart.history.clear()
 	market_panel.hide()
 	digital_panel.hide()
+	planning_panel.hide()
 	last_finished = false
 	mission_snapshot = ""
 	sim_accum = 0.0
@@ -901,6 +973,7 @@ func _setup_ui() -> void:
 	_label(dock_head,"BUILD THE NEXT CURRENT",10,MUTED)
 	_button(dock_head,"电力设施",func(): _set_build_category("power"),Vector2(0,24))
 	_button(dock_head,"数字设施",func(): _set_build_category("digital"),Vector2(0,24))
+	_button(dock_head,"代际科技 · 区域沙盘  T",func(): planning_panel.open(),Vector2(0,24))
 	var palette := _row(dock_v,7)
 	for kind in ["gas","solar","wind","battery","substation","home","factory","sensor","intertie","control","relay","soc"]:
 		if not Sim.CATALOG.has(kind):
@@ -932,7 +1005,7 @@ func _setup_ui() -> void:
 	var footer := _column(root_ui,4)
 	footer.position = Vector2(26,875)
 	_label(footer,"青屿湾电力管理局",12,INK)
-	_label(footer,"WASD / 中键  平移\n滚轮  缩放   Q/E  旋转\n空格  暂停   M  电力市场",11,INK)
+	_label(footer,"WASD / 中键  平移\n滚轮  缩放   Q/E  旋转\n空格  暂停   M  电力市场\nT  科技与区域沙盘",11,INK)
 	hint_label = _label(root_ui,"选择设施，查看运行状态",12,INK)
 	hint_label.position = Vector2(302,752)
 	notice_label = _label(root_ui,"",15,TEAL)
@@ -957,6 +1030,8 @@ func _clear_children(node: Node) -> void:
 
 func _update_hud() -> void:
 	var t: Dictionary = sim.totals
+	if planning_panel != null and planning_panel.visible:
+		planning_panel.refresh()
 	if sim.get("digital")!=null:
 		digital_ticker.text="可信通信 %.0f%%  ·  已检测事件 %d  ·  指令队列 %d" % [100*float(t.get("comm_trusted",0)),t.get("cyber_active",0),t.get("remote_pending",0)]
 		if digital_panel.visible:
@@ -985,7 +1060,9 @@ func _update_hud() -> void:
 	var translated := {"clear":"晴朗","sunny":"晴朗","cloudy":"多云","storm":"风暴","windy":"海风"}
 	weather_label.text = "沿海试点 · "+str(translated.get(sim.weather,sim.weather))
 	research_button.text = ["↗ 遥测研究 · ¥16k","↗ 自愈研究 · ¥32k","✓ 数字化研究完成"][mini(2,int(sim.research_level))]
-	research_button.disabled = sim.research_level >= 2
+	research_button.disabled = sim.research_level >= 2 or (sim.evolution.heritage and not sim.evolution.has_technology("scada"))
+	for kind in build_buttons:
+		build_buttons[kind].disabled = not sim.evolution.can_build(kind).ok
 	response_button.disabled = sim.research_level < 2
 	var mission_text := str(sim.objectives)
 	if mission_text != mission_snapshot:
@@ -1060,12 +1137,13 @@ func _update_inspector() -> void:
 	if b.is_empty():
 		inspector_box.add_theme_constant_override("separation",4)
 		_label(inspector_box,"调度控制台",12,TEAL)
-		_label(inspector_box,"一座岛，一张网",22)
+		_label(inspector_box,"八座城，一张网" if sim.region.active else "一座岛，一张网",22)
 		var sep := HSeparator.new()
 		inspector_box.add_child(sep)
 		_stat(inspector_box,"联网设施","%d 座" % sim.buildings.size())
 		_stat(inspector_box,"电力线路","%d 条" % sim.lines.size())
 		_stat(inspector_box,"数字化等级","L%d" % sim.research_level,TEAL)
+		_button(inspector_box,"代际科技与区域规划  T",func(): planning_panel.open(),Vector2(0,30))
 		_stat(inspector_box,"抢修队伍","%d / 2 作业" % sim.totals.get("crews_busy",0))
 		_stat(inspector_box,"风暴预报","%.1f 小时后" % sim.totals.get("storm_in",6),ORANGE)
 		_stat(inspector_box,"瞬时发电","%.2f MW" % sim.totals.get("generation",0))
@@ -1101,14 +1179,15 @@ func _update_inspector() -> void:
 	if b.kind in ["sensor","control","relay","soc"]:
 		_button(inspector_box,"⌁ 打开数字电网运行中心",func(): digital_panel.open(); digital_panel._select_device(int(b.id)),Vector2(0,34))
 		_button(inspector_box,"⌁ 从这里铺设通信链路",func(): overlay="comm"; _set_tool("datalink"); connection_start=int(b.id); _sync_world(true),Vector2(0,34))
-	if b.kind == "battery":
+	if sim.evolution.is_storage(str(b.kind)):
 		_stat(inspector_box,"储存能量","%.2f MWh" % b.get("energy",0),TEAL)
 		_button(inspector_box,"⇄ 储能策略与电价",func(): market_panel.open(); market_panel.tabs.current_tab=2,Vector2(0,32))
-	if b.kind == "intertie":
+	if sim.evolution.is_terminal(str(b.kind)):
 		_stat(inspector_box,"外网进口","%.2f MW" % b.get("import_mw",0),TEAL)
 		_stat(inspector_box,"富余外售","%.2f MW" % b.get("export_mw",0),ORANGE)
 		_button(inspector_box,"⇄ 打开电力交易中心",func(): market_panel.open(),Vector2(0,32))
-	var data: Dictionary = Sim.CATALOG.get(b.kind,{})
+	_button(inspector_box,"运行边界与精细控制  T",func(): planning_panel.open(); planning_panel.select_facility(int(b.id)),Vector2(0,32))
+	var data: Dictionary = sim.catalog.get(b.kind,{})
 	_paragraph(inspector_box,str(data.get("description","")),MUTED,11)
 	var id: int = b.id
 	if b.kind == "gas":
@@ -1229,7 +1308,7 @@ func _setup_modals() -> void:
 	_paragraph(h,"建造市场联络站并接线后，按 M 配置购售电、峰平谷电价、储能与锁价合约。高价会减少需求、损害满意度；合约用不完仍需付费。交易中心可推进 1 小时检查真实账单。",CREAM,13)
 	_label(h,"通信、定位与网络安全",15,ORANGE)
 	_paragraph(h,"按 N 管理独立通信网，按 4 在地图铺线。可信遥测可以定位故障，远程命令须经过路径验证；失联先巡检或派现场开关队。研究与安全中心改善自愈和检测，隔离与修补会占用时间。",CREAM,13)
-	_label(h,"WASD / 中键平移 · Q/E 旋转 · M 市场 · N 数字电网 · F5 / F9 存读档",12,MUTED)
+	_label(h,"WASD / 中键平移 · Q/E 旋转 · M 市场 · N 数字电网 · T 科技/区域 · F5 / F9 存读档",12,MUTED)
 	_button(h,"返回海湾",func(): help_modal.hide(),Vector2(0,40))
 	help_modal.hide()
 	end_modal = _modal(dialog_layer,650,350)
@@ -1240,6 +1319,9 @@ func _setup_modals() -> void:
 	digital_panel=DigitalDesk.new()
 	dialog_layer.add_child(digital_panel)
 	digital_panel.setup(self)
+	planning_panel = PlanningDesk.new()
+	dialog_layer.add_child(planning_panel)
+	planning_panel.setup(self)
 
 func _show_result(victory: bool) -> void:
 	var panel := end_modal.get_node("Dialog")
@@ -1247,7 +1329,7 @@ func _show_result(victory: bool) -> void:
 	var v := _column(panel,18)
 	_label(v,"青屿湾示范区  /  运营报告",12,TEAL)
 	_label(v,"海湾的每一盏灯，都有你的答案。" if victory else "运营资金告急",25,CREAM)
-	_paragraph(v,"你完成了建设、清洁转型、数字化和风暴恢复四项委托。青屿湾已成为智能电网示范区，接下来可以自由扩建城市。" if victory else "累计亏损已经超过应急额度。你可以继续调整电网与成本，也可以重新接手一座全新的海湾。",CREAM,14)
+	_paragraph(v,"你完成了建设、清洁转型、数字化和风暴恢复四项委托。青屿湾已成为智能电网示范区，接下来按 T 研究更多代际科技、开启八城区域沙盘，或设定长期运营目标。" if victory else "累计亏损已经超过应急额度。你可以继续调整电网与成本，也可以重新接手一座全新的海湾。",CREAM,14)
 	_stat(v,"当前资金","¥ "+_number(sim.cash))
 	_stat(v,"电网规模","%d 设施 · %d 线路" % [sim.buildings.size(),sim.lines.size()])
 	var actions := _row(v,12)
@@ -1255,8 +1337,19 @@ func _show_result(victory: bool) -> void:
 	_button(actions,"重新开始",_new_game,Vector2(250,44))
 	end_modal.show()
 
-func _new_game() -> void:
-	sim.reset(42)
+func start_heritage_game(backup_path: String="user://before_heritage.json") -> void:
+	var backup: Dictionary = sim.save_game(backup_path)
+	if not backup.ok:
+		_apply(backup)
+		return
+	_new_game(true)
+	_notify("已备份旧进度。历史开局从短距离直流供电开始，按 T 查看研究路线。")
+
+func _new_game(heritage: bool=false) -> void:
+	if heritage:
+		sim.start_heritage()
+	else:
+		sim.reset(42)
 	selected_id = -1
 	selected_line = -1
 	last_finished = false
@@ -1267,6 +1360,7 @@ func _new_game() -> void:
 	chart.history.clear()
 	market_panel.hide()
 	digital_panel.hide()
+	planning_panel.hide()
 	selected_comm_line=-1
 	speed = 1
 	sim_accum = 0.0

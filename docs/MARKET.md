@@ -67,7 +67,7 @@
 
 `scripts/sim/power_market.gd` 管理报价、电价、用户满意度、合约与账本；`grid_sim.gd` 在各连通岛内统一处理实际电力交换。`scripts/ui/market_panel.gd` 提交配置命令并显示结果，`market_chart.gd` 只绘制预测。
 
-存档当前为 **schema 3**，包含市场配置、合约剩余时间、满意度、账本及数字网络。schema 2 的市场配置保持兼容；加载 schema 1 时补充默认市场状态。市场能力属于当前实现，其他底层电力近似仍见 [架构说明](ARCHITECTURE.md)。
+存档当前为 **schema 4**，包含市场配置、合约剩余时间、满意度、账本及数字网络。schema 2/3 的市场配置保持兼容；加载 schema 1 时补充默认市场状态。市场能力属于当前实现，其他底层电力近似仍见 [架构说明](ARCHITECTURE.md)。
 
 ```sh
 /Applications/Godot.app/Contents/MacOS/Godot --headless --path . -s tests/test_market.gd --log-file /tmp/tidal-market-test.log

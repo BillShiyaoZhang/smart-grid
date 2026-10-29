@@ -40,8 +40,8 @@ func _draw_topology() -> void:
 		var b: Dictionary = sim.get_building(line.b)
 		if a.is_empty() or b.is_empty():
 			continue
-		var p := Vector2(a.cell) / 16.0 * size
-		var q := Vector2(b.cell) / 16.0 * size
+		var p := Vector2(a.cell) / float(sim.map_size()) * size
+		var q := Vector2(b.cell) / float(sim.map_size()) * size
 		var color := Color("64ccba")
 		var observation: Dictionary=sim.line_observation(int(line.id))
 		var trusted: bool=observation.get("visibility","") in ["verified","patrol"]
@@ -52,4 +52,4 @@ func _draw_topology() -> void:
 		draw_line(p,q,color,1.6,true)
 	for b in sim.buildings:
 		var color := Color("f2e8d4") if b.get("powered",false) else Color("e88c76")
-		draw_circle(Vector2(b.cell)/16.0*size,3.6,color)
+		draw_circle(Vector2(b.cell)/float(sim.map_size())*size,3.6,color)

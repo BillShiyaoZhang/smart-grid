@@ -6,6 +6,8 @@
 
 数字电网包含独立光纤/无线通信、UPS、可信遥测、延迟远程控制、现场巡检和抽象网络安全事件。操作与恢复流程见 [数字电网指南](docs/DIGITAL.md)。
 
+玩法已扩展为 **六代科技、24 项研究、29 种设施**。按 **T** 打开科技与区域规划：可选择爱迪生时代开局，管理核能配套、慢启停、保留电量和可信通信削峰，并主动开启 **48 × 48、八座城市**的动态区域。城市供电、电价、污染影响人口、产业分工与扩张，三类持续运营目标支持长期沙盘。具体边界与组合玩法见 [代际电网与区域指南](docs/GAMEPLAY.md)。
+
 ## 启动
 
 在 Godot 4.7 中导入本目录的 `project.godot`，按 **F6** 运行 `scenes/main.tscn`，或按 **F5** 运行项目。
@@ -50,6 +52,7 @@ macOS 已安装 Godot 时，也可直接双击 `run_game.command` 启动游戏�
 | 操作指南 | H |
 | 电力交易中心 / 返回电网 | M / Esc |
 | 数字电网运行中心 / 返回电网 | N / Esc |
+| 代际科技、精细调度与区域沙盘 / 返回 | T / Esc |
 | 保存游戏 | F5（运行中的游戏窗口） |
 | 读取游戏 | F9 |
 
@@ -70,6 +73,11 @@ macOS 已安装 Godot 时，也可直接双击 `run_game.command` 启动游戏�
 /Applications/Godot.app/Contents/MacOS/Godot --headless --path . -s tests/test_market_game.gd --log-file /tmp/tidal-market-game-test.log
 /Applications/Godot.app/Contents/MacOS/Godot --headless --path . -s tests/test_digital.gd --log-file /tmp/tidal-digital-test.log
 /Applications/Godot.app/Contents/MacOS/Godot --headless --path . -s tests/test_digital_game.gd --log-file /tmp/tidal-digital-game-test.log
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path . -s tests/test_evolution.gd --log-file /tmp/tidal-evolution-test.log
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path . -s tests/test_region.gd --log-file /tmp/tidal-region-test.log
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path . -s tests/test_sandbox.gd --log-file /tmp/tidal-sandbox-test.log
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path . -s tests/test_planning_game.gd --log-file /tmp/tidal-planning-game-test.log
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path . -s tests/test_dc_solver.gd --log-file /tmp/tidal-dc-solver-test.log
 ```
 
 仿真测试检查网络功率守恒、环网分流、储能能量、保护和维修、确定性、存档、任务和自动恢复；集成测试实例化真实主场景，验证界面操作、地图建造接线及模型同步。
@@ -102,6 +110,7 @@ macOS 已安装 Godot 时，也可直接双击 `run_game.command` 启动游戏�
 - `docs/ARCHITECTURE.md`：实现范围、架构、模型和玩法对应关系。
 - `docs/MARKET.md`：市场玩法、操作流程、报价与账本说明。
 - `docs/DIGITAL.md`：通信、观测、控制队列与网络事件处置。
+- `docs/GAMEPLAY.md`：历史开局、代际研究、运行约束、储能组合、动态城市与长期目标。
 
 电力模型面向玩法：保留拓扑、容量、储能和故障的战略后果，采用简化的电力计算，不作为工程设计工具。
 

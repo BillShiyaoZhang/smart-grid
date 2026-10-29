@@ -85,7 +85,7 @@ func _device(id: int) -> Dictionary:
 
 func _operational(sim: RefCounted, id: int) -> bool:
 	var building: Dictionary = sim.get_building(id)
-	if building.is_empty() or not building.online:
+	if building.is_empty() or not building.online or not bool(building.get("enabled", true)):
 		return false
 	var device := _device(id)
 	return not device.isolated and float(device.dos_remaining) <= 0.0 and float(device.recover_remaining) <= 0.0 and (building.powered or float(device.ups_remaining) > 0.000001)
@@ -97,7 +97,7 @@ func _network_signature(sim: RefCounted) -> int:
 	var parts: Array = [state.policy]
 	for building in sim.buildings:
 		var device := _device(int(building.id))
-		parts.append([int(building.id), building.kind, bool(building.online), bool(building.powered),
+		parts.append([int(building.id), building.kind, bool(building.online), bool(building.get("enabled", true)), bool(building.powered),
 			float(device.ups_remaining) > 0.000001, bool(device.isolated), bool(device.compromised),
 			float(device.dos_remaining) > 0.0, float(device.recover_remaining) > 0.0])
 	for link in links:
@@ -172,7 +172,7 @@ func _status(sim: RefCounted, id: int, private: bool = true) -> Dictionary:
 		reason = "补丁恢复中"
 	elif float(device.dos_remaining) > 0.0:
 		reason = "通信暂不可用，正在排查"
-	elif not building.online:
+	elif not building.online or not bool(building.get("enabled", true)):
 		reason = "网关随设备停机"
 	elif not building.powered and float(device.ups_remaining) <= 0.000001:
 		reason = "失电且网关 UPS 耗尽"

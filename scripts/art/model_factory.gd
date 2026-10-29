@@ -70,8 +70,204 @@ static func building(kind: String) -> Node3D:
 		"factory": _factory(root)
 		"hospital": _hospital(root)
 		"sensor": _sensor(root)
+		"dc_dynamo": _dynamo(root)
+		"steam": _steam(root)
+		"coal": _coal(root)
+		"hydro": _hydro(root)
+		"nuclear": _nuclear(root)
+		"cooling": _cooling(root)
+		"academy": _academy(root)
+		"pumped_storage": _pumped_storage(root)
+		"flow_battery": _flow_battery(root)
+		"hydrogen": _hydrogen(root)
+		"hvdc": _hvdc(root)
+		"synchronous_condenser": _condenser(root)
+		"condenser": _condenser(root)
+		"ccgt": _ccgt(root)
+		"community_battery": _community_battery(root)
+		"thermal_storage": _thermal_storage(root)
+		"fusion": _fusion(root)
 		_: _home(root)
 	return root
+
+static func _dynamo(root: Node3D) -> void:
+	box(root,Vector3(1.3,.65,1.2),Vector3(-.12,.43,0),Color("b78061"))
+	box(root,Vector3(1.42,.12,1.32),Vector3(-.12,.81,0),DARK)
+	box(root,Vector3(.8,.31,.035),Vector3(-.12,.52,.62),ORANGE)
+	for x in [-.4,-.08,.24]:
+		box(root,Vector3(.025,.36,.045),Vector3(x,.52,.65),DARK)
+	cylinder(root,.12,1.45,Vector3(.65,.82,-.46),CORAL,8)
+	var wheel := cylinder(root,.27,.16,Vector3(.6,.43,.35),METAL,12)
+	wheel.rotation.x = PI*.5
+	cylinder(root,.09,.35,Vector3(-.45,1.04,-.1),ORANGE,8)
+	box(root,Vector3(.5,.035,.035),Vector3(-.45,1.2,-.1),METAL)
+
+static func _coal(root: Node3D) -> void:
+	box(root,Vector3(1.15,1.0,1.25),Vector3(-.25,.61,0),Color("aaa69b"))
+	box(root,Vector3(1.2,.1,1.3),Vector3(-.25,1.15,0),DARK)
+	for z in [-.44,.35]:
+		cylinder(root,.15,1.8,Vector3(.58,1.0,z),CORAL,10,.11)
+		cylinder(root,.135,.18,Vector3(.58,1.6,z),CREAM,10)
+	for i in range(4):
+		box(root,Vector3(.18,.3,.025),Vector3(-.65+i*.26,.65,.64),BLUE)
+	box(root,Vector3(.7,.23,.28),Vector3(-.2,.23,.72),DARK)
+
+static func _steam(root: Node3D) -> void:
+	box(root,Vector3(1.3,.15,1.25),Vector3(0,.2,0),DARK)
+	var boiler := cylinder(root,.33,1.15,Vector3(-.1,.58,-.2),CORAL,12)
+	boiler.rotation.z = PI*.5
+	cylinder(root,.1,1.1,Vector3(.45,1.15,-.2),DARK,10)
+	var flywheel := cylinder(root,.29,.12,Vector3(-.4,.52,.49),METAL,12)
+	flywheel.rotation.x = PI*.5
+	beam(root,Vector3(-.4,.52,.55),Vector3(.45,.52,.55),.06,ORANGE)
+	box(root,Vector3(.4,.45,.38),Vector3(.47,.43,.4),CREAM)
+	beam(root,Vector3(.3,.88,-.2),Vector3(.47,.66,.4),.045,METAL)
+
+static func _ccgt(root: Node3D) -> void:
+	box(root,Vector3(1.2,.65,.75),Vector3(-.2,.46,.3),WHITE)
+	box(root,Vector3(1.29,.09,.83),Vector3(-.2,.83,.3),TEAL)
+	var turbine := cylinder(root,.23,1.15,Vector3(-.2,.41,-.46),METAL,12)
+	turbine.rotation.z = PI*.5
+	for x in [-.64,.38]:
+		cylinder(root,.1,1.45,Vector3(x,.84,-.46),CREAM,10)
+		cylinder(root,.11,.14,Vector3(x,1.43,-.46),ORANGE,10)
+	beam(root,Vector3(-.64,.4,-.4),Vector3(-.64,.4,.3),.06,TEAL)
+	for x in [-.5,-.15,.2]:
+		box(root,Vector3(.2,.25,.025),Vector3(x,.5,.69),BLUE)
+
+static func _community_battery(root: Node3D) -> void:
+	for x in [-.43,.22]:
+		box(root,Vector3(.51,.84,.6),Vector3(x,.53,0),WHITE)
+		box(root,Vector3(.53,.08,.64),Vector3(x,.99,0),TEAL)
+		box(root,Vector3(.36,.45,.025),Vector3(x,.57,.32),MINT)
+		for y in [.4,.55,.7]:
+			box(root,Vector3(.25,.018,.035),Vector3(x,y,.35),TEAL)
+	box(root,Vector3(.3,.3,.32),Vector3(.58,.29,.45),ORANGE)
+	beam(root,Vector3(-.43,.2,0),Vector3(.58,.2,.45),.025,METAL)
+
+static func _thermal_storage(root: Node3D) -> void:
+	for x in [-.45,.45]:
+		cylinder(root,.34,1.02,Vector3(x,.63,-.2),ORANGE,16)
+		cylinder(root,.35,.06,Vector3(x,1.17,-.2),WHITE,16)
+		cylinder(root,.35,.06,Vector3(x,.18,-.2),METAL,16)
+	box(root,Vector3(.8,.43,.45),Vector3(0,.35,.51),CREAM)
+	for x in [-.45,.45]:
+		beam(root,Vector3(x,.35,-.2),Vector3(x,.35,.51),.055,CORAL)
+		beam(root,Vector3(x,.35,.51),Vector3(0,.35,.51),.055,CORAL)
+
+static func _hydro(root: Node3D) -> void:
+	box(root,Vector3(1.6,.08,1.55),Vector3(0,.15,0),Color("5ba7b5"))
+	box(root,Vector3(1.65,.9,.32),Vector3(0,.63,-.12),CONCRETE)
+	box(root,Vector3(1.7,.1,.43),Vector3(0,1.1,-.12),CREAM)
+	for x in [-.55,0,.55]:
+		box(root,Vector3(.16,.67,.47),Vector3(x,.55,-.12),METAL)
+		box(root,Vector3(.21,.09,.69),Vector3(x,.26,.32),WHITE)
+	box(root,Vector3(.55,.5,.48),Vector3(-.45,.42,.55),TEAL)
+
+static func _nuclear(root: Node3D) -> void:
+	box(root,Vector3(.95,.76,1.2),Vector3(-.3,.5,0),CREAM)
+	cylinder(root,.46,.65,Vector3(.26,.47,-.1),WHITE,20)
+	var dome := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	mesh.radius = .46
+	mesh.height = .92
+	dome.mesh = mesh
+	dome.material_override = material(WHITE)
+	dome.position = Vector3(.26,.79,-.1)
+	root.add_child(dome)
+	box(root,Vector3(.53,.13,.7),Vector3(-.42,.96,0),TEAL)
+	for z in [-.43,.06,.5]:
+		cylinder(root,.065,.24,Vector3(.64,.23,z),ORANGE,8)
+	box(root,Vector3(.85,.05,.14),Vector3(.1,.18,.69),METAL)
+
+static func _cooling(root: Node3D) -> void:
+	for x in [-.43,.43]:
+		cylinder(root,.34,.65,Vector3(x,.45,0),CREAM,16,.23)
+		cylinder(root,.23,.49,Vector3(x,1.02,0),WHITE,16,.34)
+		cylinder(root,.29,.035,Vector3(x,1.28,0),DARK,16)
+	box(root,Vector3(1.5,.08,.35),Vector3(0,.18,.56),Color("5ba7b5"))
+	for x in [-.43,.43]:
+		beam(root,Vector3(x,.25,.08),Vector3(x,.25,.66),.065,TEAL)
+
+static func _academy(root: Node3D) -> void:
+	box(root,Vector3(1.35,.8,1.15),Vector3(0,.52,0),CREAM)
+	box(root,Vector3(1.45,.13,1.25),Vector3(0,.98,0),TEAL)
+	for x in [-.45,0,.45]:
+		for y in [.42,.72]:
+			box(root,Vector3(.24,.18,.03),Vector3(x,y,.59),BLUE)
+	box(root,Vector3(.28,.4,.05),Vector3(0,.34,.65),ORANGE)
+	box(root,Vector3(.7,.06,.26),Vector3(0,.18,.71),WHITE)
+	cylinder(root,.02,.8,Vector3(.64,1.42,-.44),METAL,6)
+	box(root,Vector3(.35,.18,.025),Vector3(.47,1.68,-.44),ORANGE)
+
+static func _pumped_storage(root: Node3D) -> void:
+	box(root,Vector3(1.45,.6,.65),Vector3(0,.42,-.43),CONCRETE)
+	box(root,Vector3(1.27,.04,.5),Vector3(0,.75,-.43),Color("5ba7b5"))
+	box(root,Vector3(1.4,.12,.57),Vector3(0,.18,.45),CREAM)
+	box(root,Vector3(1.24,.025,.42),Vector3(0,.26,.45),BLUE)
+	for x in [-.43,.43]:
+		beam(root,Vector3(x,.68,-.2),Vector3(x,.27,.47),.085,TEAL)
+	box(root,Vector3(.38,.37,.4),Vector3(0,.4,.12),WHITE)
+
+static func _flow_battery(root: Node3D) -> void:
+	for x in [-.46,.46]:
+		cylinder(root,.31,.95,Vector3(x,.6,-.18),WHITE,12)
+		cylinder(root,.315,.12,Vector3(x,.65,-.18),MINT,12)
+		cylinder(root,.315,.06,Vector3(x,1.1,-.18),TEAL,12)
+	box(root,Vector3(.65,.52,.45),Vector3(0,.39,.5),TEAL)
+	for x in [-.46,.46]:
+		beam(root,Vector3(x,.32,-.1),Vector3(x,.32,.5),.05,ORANGE)
+		beam(root,Vector3(x,.32,.5),Vector3(0,.32,.5),.05,ORANGE)
+
+static func _hydrogen(root: Node3D) -> void:
+	for x in [-.5,0,.5]:
+		cylinder(root,.18,.92,Vector3(x,.58,-.3),MINT,12)
+		cylinder(root,.065,.13,Vector3(x,1.1,-.3),TEAL,8)
+		beam(root,Vector3(x,.2,-.3),Vector3(x,.2,.5),.035,METAL)
+	box(root,Vector3(1.4,.5,.5),Vector3(0,.37,.42),WHITE)
+	for x in [-.47,0,.47]:
+		box(root,Vector3(.28,.27,.03),Vector3(x,.4,.69),TEAL)
+	box(root,Vector3(.45,.08,.55),Vector3(.46,.68,.4),ORANGE)
+
+static func _hvdc(root: Node3D) -> void:
+	box(root,Vector3(.9,.75,1.2),Vector3(-.36,.5,0),WHITE)
+	box(root,Vector3(.97,.09,1.28),Vector3(-.36,.94,0),BLUE)
+	for z in [-.48,0,.48]:
+		for y in [.35,.61,.87,1.13]:
+			cylinder(root,.09,.12,Vector3(.48,y,z),CREAM,8)
+		beam(root,Vector3(.48,.2,z),Vector3(.48,1.35,z),.035,METAL)
+	beam(root,Vector3(.48,1.35,-.48),Vector3(.48,1.35,.48),.05,ORANGE)
+	box(root,Vector3(.08,.14,.6),Vector3(-.36,1.05,0),TEAL)
+
+static func _condenser(root: Node3D) -> void:
+	box(root,Vector3(1.3,.18,.8),Vector3(0,.22,0),DARK)
+	var machine := cylinder(root,.35,1.2,Vector3(0,.65,0),TEAL,16)
+	machine.rotation.z = PI*.5
+	for x in [-.61,.61]:
+		var end := cylinder(root,.39,.08,Vector3(x,.65,0),METAL,16)
+		end.rotation.z = PI*.5
+	for x in [-.45,0,.45]:
+		cylinder(root,.055,.36,Vector3(x,1.16,0),CREAM,8)
+	box(root,Vector3(.45,.35,.3),Vector3(.45,.35,.56),WHITE)
+
+static func _fusion(root: Node3D) -> void:
+	cylinder(root,.71,.25,Vector3(0,.26,0),DARK,20)
+	var torus := MeshInstance3D.new()
+	var mesh := TorusMesh.new()
+	mesh.inner_radius = .3
+	mesh.outer_radius = .68
+	mesh.rings = 20
+	mesh.ring_segments = 12
+	torus.mesh = mesh
+	torus.material_override = material(TEAL,.5)
+	torus.position.y = .68
+	root.add_child(torus)
+	for i in range(8):
+		var theta := float(i)*TAU/8
+		var ring := box(root,Vector3(.16,.7,.28),Vector3(sin(theta)*.48,.67,cos(theta)*.48),ORANGE)
+		ring.rotation.y = theta
+	cylinder(root,.17,1.15,Vector3(0,.75,0),METAL,12)
+	box(root,Vector3(.6,.45,.35),Vector3(0,.35,.63),WHITE)
 
 static func _home(root: Node3D) -> void:
 	box(root, Vector3(1.1, 0.8, 1.05), Vector3(-0.1, 0.5, -0.08), CREAM)
