@@ -23,6 +23,7 @@ var cities: Array[Dictionary] = []
 var clock_hours := 0.0
 var current_hour := 8.0
 var expansion_clock := 0.0
+var map_extent := 48
 
 func reset() -> void:
 	active = false
@@ -30,12 +31,52 @@ func reset() -> void:
 	clock_hours = 0.0
 	current_hour = 8.0
 	expansion_clock = 0.0
+	map_extent = 48
+
+func seed_from_scenario(sim: RefCounted, settlements: Array) -> Dictionary:
+	if active:
+		return _result(false, "城市已经登记，不能重复建立情景人口。")
+	if settlements.is_empty() or settlements.size() > 8:
+		return _result(false, "历史情景需要一至八个城市。")
+	var extent := int(sim.map_size())
+	for entry in settlements:
+		if not entry is Dictionary or not entry.get("name") is String or entry.name.is_empty() or entry.name.length() > 80:
+			return _result(false, "情景城市名称无效。")
+		if not entry.get("anchor") is Vector2i or entry.anchor.x < 1 or entry.anchor.y < 1 or entry.anchor.x > extent - 2 or entry.anchor.y > extent - 2:
+			return _result(false, "情景城市位置超出地图。")
+		if entry.get("role") not in ROLES or not _number(entry.get("population"), 1.0, 1000000.0):
+			return _result(false, "情景城市人口或产业无效。")
+	# Registration is deliberately separate from sandbox activation: there are
+	# no surprise satellite loads, free feeders, or generated assets in a chapter.
+	reset()
+	map_extent = extent
+	active = true
+	for index in settlements.size():
+		var entry: Dictionary = settlements[index]
+		var city := _new_city(index, str(entry.name), entry.anchor, str(entry.role), float(entry.population), [])
+		city.service = 0.0
+		city.trend = "观察供电与电价"
+		cities.append(city)
+	for building in sim.buildings:
+		register_building(sim, building)
+	# Initial feedback reflects only customers that actually exist in the map.
+	for city in cities:
+		var demand := 0.0
+		var served := 0.0
+		for id in city.building_ids:
+			var building: Dictionary = sim.get_building(int(id))
+			demand += float(building.get("demand", 0.0))
+			served += float(building.get("served", 0.0))
+		city.service = clampf(served / demand, 0.0, 1.0) if demand > 0.000001 else 0.0
+	current_hour = float(sim.time_hours)
+	return _result(true, "已登记%d座情景城市，人口与供电反馈从现有街区开始。" % cities.size())
 
 func activate(sim: RefCounted) -> Dictionary:
 	if active:
 		return _result(false, "区域沙盘已经开启。")
 	if sim.buildings.size() > MAX_BUILDINGS - SETTLEMENTS.size() * 2:
 		return _result(false, "现有设施过多，请先为区域城镇保留空间。")
+	map_extent = 48
 	# Reserve every footprint before mutating the live game. Player construction
 	# near a future town moves the town's seed buildings, never overwrites it.
 	var reserved: Dictionary = {}
@@ -208,7 +249,7 @@ func _free_cell(sim: RefCounted, anchor: Vector2i, reserved: Dictionary = {}) ->
 				if maxi(absi(x), absi(y)) != radius:
 					continue
 				var cell := anchor + Vector2i(x, y)
-				if cell.x >= 1 and cell.y >= 1 and cell.x <= 46 and cell.y <= 46 and not reserved.has(cell) and sim.building_at(cell).is_empty():
+				if cell.x >= 1 and cell.y >= 1 and cell.x <= map_extent - 2 and cell.y <= map_extent - 2 and not reserved.has(cell) and sim.building_at(cell).is_empty():
 					return cell
 	return Vector2i(-1, -1)
 
@@ -355,7 +396,7 @@ func snapshot() -> Dictionary:
 		item.anchor = [city.anchor.x, city.anchor.y]
 		saved.append(item)
 	return {"active": active, "cities": saved, "clock_hours": clock_hours,
-		"current_hour": current_hour, "expansion_clock": expansion_clock}
+		"current_hour": current_hour, "expansion_clock": expansion_clock, "map_size":map_extent}
 
 func load_snapshot(data: Variant) -> bool:
 	if not valid_snapshot(data):
@@ -377,12 +418,16 @@ func load_snapshot(data: Variant) -> bool:
 	clock_hours = float(data.clock_hours)
 	current_hour = float(data.current_hour)
 	expansion_clock = float(data.expansion_clock)
+	map_extent = int(data.get("map_size", 48))
 	return true
 
 static func valid_snapshot(data: Variant, buildings_by_id: Dictionary = {}, strict_registration: bool=false) -> bool:
 	if not data is Dictionary or not data.get("active") is bool or not data.get("cities") is Array:
 		return false
-	if data.cities.size() != (8 if data.active else 0):
+	if (data.active and (data.cities.is_empty() or data.cities.size() > 8)) or (not data.active and not data.cities.is_empty()):
+		return false
+	var extent := int(data.get("map_size", 48))
+	if data.has("map_size") and (not _integer(data.map_size, 16, 48) or extent not in [16, 48]):
 		return false
 	if not _number(data.get("clock_hours"), 0.0, 1e12) or not _number(data.get("current_hour"), 0.0, 24.0) or float(data.current_hour) >= 24.0:
 		return false
@@ -398,7 +443,7 @@ static func valid_snapshot(data: Variant, buildings_by_id: Dictionary = {}, stri
 			return false
 		if not city.get("trend") is String or city.trend.length() > 160:
 			return false
-		if not city.get("anchor") is Array or city.anchor.size() != 2 or not _integer(city.anchor[0], 1, 46) or not _integer(city.anchor[1], 1, 46):
+		if not city.get("anchor") is Array or city.anchor.size() != 2 or not _integer(city.anchor[0], 1, extent - 2) or not _integer(city.anchor[1], 1, extent - 2):
 			return false
 		if not _number(city.get("base_population"), 1.0, 1000000.0) or not _number(city.get("population"), float(city.base_population) * 0.35 - 0.00001, float(city.base_population) * 3.0 + 0.00001):
 			return false

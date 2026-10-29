@@ -74,6 +74,120 @@ static func create(size: int = 16, spacing: float = 2.0) -> Node3D:
 	van.position = Vector3(road_x + 0.25, 0.04, 3.6)
 	return root
 
+static func create_for_map(spec: Dictionary, spacing: float = 2.0) -> Node3D:
+	if spec.is_empty():
+		return create(16, spacing)
+	var root := Node3D.new()
+	root.name = "HistoricalLandscape"
+	var map_size := int(spec.get("size", 16))
+	var theme := str(spec.get("theme", "city_blocks"))
+	var modern := bool(spec.get("modern", false))
+	var half := float(map_size) * spacing * 0.5
+	root.set_meta("map_id", str(spec.get("id", "")))
+	root.set_meta("map_theme", theme)
+	root.set_meta("modern", modern)
+	root.set_meta("playable_size", map_size)
+	var meadow := Color("b6c3a5")
+	var shore := Color("d5ceb3")
+	var water := Color("72b0ba")
+	if theme == "city_blocks":
+		meadow = Color("b9b9a7")
+		shore = Color("b8b6a0")
+		water = Color("81a8b3")
+	elif theme == "mountain_coast":
+		meadow = Color("a6b8a0")
+		shore = Color("d6ccb0")
+		water = Color("72b8ba")
+		if int(spec.get("chapter", 0)) == 15:
+			meadow = Color("c9c19b")
+			shore = Color("ded0a6")
+	Models.box(root, Vector3(maxf(180.0, half * 4.0), 0.2, maxf(180.0, half * 4.0)), Vector3(0, -1.5, 0), water, "WaterSurround")
+	_prism(root, _octagon(half + 1.7, 2.0), -0.75, -1.42, Color("a7bbae"), Color("8aa99d"), "Bedrock")
+	_prism(root, _octagon(half + 1.4, 1.8), -0.32, -0.88, shore, shore.darkened(0.10), "Shore")
+	_prism(root, _octagon(half + 1.05, 1.5), -0.04, -0.36, meadow, meadow.darkened(0.15), "Ground")
+	# Flat colour meshes identify real siting cells without moving building bases.
+	_cell_surface(root, spec.get("hill_cells", []), map_size, spacing, Color("a5aa8d"), -0.033, "HillTerrain")
+	_cell_surface(root, spec.get("river_cells", []), map_size, spacing, water.lightened(0.10), -0.026, "RiverTerrain")
+	var roads := Node3D.new()
+	roads.name = "StreetNetwork"
+	root.add_child(roads)
+	var road_color := Color("8e9d94") if modern else Color("afa68e")
+	var road_width := 0.80 if modern else 0.65
+	var streets_x: Array = [6, 10]
+	var streets_y: Array = [7, 11]
+	if theme == "city_blocks":
+		streets_x = [2, 6, 10, 13]
+		streets_y = [3, 7, 11, 13]
+	elif theme == "mountain_coast":
+		streets_x = [6]
+		streets_y = [7, 12]
+	for x in streets_x:
+		var at := _cell_position(Vector2i(int(x), 7), map_size, spacing)
+		Models.box(roads, Vector3(road_width, 0.025, half * 2.0), Vector3(at.x - spacing * 0.47, -0.008, 0), road_color, "Street")
+	for y in streets_y:
+		var at := _cell_position(Vector2i(6, int(y)), map_size, spacing)
+		Models.box(roads, Vector3(half * 2.0, 0.025, road_width), Vector3(0, -0.006, at.z - spacing * 0.47), road_color, "Street")
+	if modern:
+		var markings := Node3D.new()
+		markings.name = "ModernRoadMarkings"
+		root.add_child(markings)
+		var main_road := _cell_position(Vector2i(6, 7), map_size, spacing)
+		for i in range(-map_size / 2, map_size / 2):
+			Models.box(markings, Vector3(0.035, 0.009, 0.48), Vector3(main_road.x - spacing * 0.47, 0.011, float(i) * spacing), Color("e4e5c8"))
+		var van := Models.vehicle()
+		root.add_child(van)
+		van.position = main_road + Vector3(-spacing * 0.47 + 0.20, 0.025, 1.5)
+	var landscape := Node3D.new()
+	landscape.name = "LandscapeScenery"
+	root.add_child(landscape)
+	for i in range(20):
+		var along := lerpf(-half + 1.0, half - 1.0, float(i) / 19.0)
+		for side in [-1.0, 1.0]:
+			if theme == "city_blocks" and i % 3 != 0:
+				continue
+			var tree := Models.tree(i)
+			landscape.add_child(tree)
+			tree.position = Vector3(along, -0.04, side * (half + 0.3))
+			tree.scale *= 0.65 if theme == "city_blocks" else 0.85
+	if theme == "mountain_coast":
+		for i in range(9):
+			var rock := Models.rock(i)
+			landscape.add_child(rock)
+			rock.position = Vector3(half + 0.45, -0.03, lerpf(1.0, half - 1.0, float(i) / 8.0))
+			rock.scale = Vector3(3.0, 2.5 + float(i % 3), 3.0)
+		# Mountain silhouettes remain outside every playable plot.
+		for i in range(5):
+			var height := 4.5 + float(i % 3) * 1.5
+			Models.cylinder(landscape, 2.5, height, Vector3(half + 3.4, height * 0.5 - 0.2, half * 0.15 + float(i) * half * 0.17), Color("8d9f91"), 5, 0.03)
+	return root
+
+static func _cell_position(cell: Vector2i, map_size: int, spacing: float) -> Vector3:
+	var center := float(map_size - 1) * 0.5
+	return Vector3((float(cell.x) - center) * spacing, 0, (float(cell.y) - center) * spacing)
+
+static func _cell_surface(root: Node3D, cells: Array, map_size: int, spacing: float, color: Color, height: float, title: String) -> void:
+	if cells.is_empty():
+		return
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var cell_half := spacing * 0.5
+	for cell in cells:
+		var at := _cell_position(cell, map_size, spacing)
+		for corner in [Vector2(-1, -1), Vector2(1, -1), Vector2(1, 1), Vector2(-1, -1), Vector2(1, 1), Vector2(-1, 1)]:
+			vertices.append(Vector3(at.x + corner.x * cell_half, height, at.z + corner.y * cell_half))
+			normals.append(Vector3.UP)
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	var instance := MeshInstance3D.new()
+	instance.name = title
+	instance.mesh = mesh
+	instance.material_override = Models.material(color)
+	root.add_child(instance)
+
 static func _road(root: Node3D, at: Vector3, size: Vector3, horizontal: bool, curb: bool = true) -> void:
 	Models.box(root, size, at, Color("91a8a0"), "Street")
 	if curb:

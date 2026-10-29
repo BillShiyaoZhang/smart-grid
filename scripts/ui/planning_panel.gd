@@ -56,9 +56,12 @@ var era_description: Label
 var facility_modes: TabContainer
 var catalog_category: OptionButton
 var catalog_cards: Dictionary = {}
+var catalog_era_labels: Dictionary = {}
 var catalog_grid: GridContainer
 var operating_grid: GridContainer
 var scenario_actions: VBoxContainer
+var scenario_toggle: Button
+var goal_header: HBoxContainer
 var city_picker: OptionButton
 var selected_city := -1
 var city_cards: Dictionary = {}
@@ -73,6 +76,7 @@ func setup(owner_game: Node) -> void:
 	hide()
 
 func open() -> void:
+	if not game.sim.feature_enabled("research"): return
 	game._prepare_center(self)
 	refresh(true)
 	show()
@@ -138,7 +142,7 @@ func _build_technologies() -> void:
 	body.add_theme_constant_override("separation",8)
 	var scenario_row: HBoxContainer = game._row(body,12)
 	scenario_label = _text(scenario_row,"",MUTED,14)
-	game._button(scenario_row,"场景选项",func(): scenario_actions.visible=not scenario_actions.visible,Vector2(96,34))
+	scenario_toggle = game._button(scenario_row,"场景选项",func(): scenario_actions.visible=not scenario_actions.visible,Vector2(96,34))
 	scenario_actions = game._column(body,8)
 	_text(scenario_actions,"切换开局将重新建立地图；当前进度会先自动备份。",ORANGE,14)
 	game._button(scenario_actions,"从爱迪生时代重新开局（自动备份）",func(): game.start_heritage_game(),Vector2(0,36))
@@ -179,16 +183,17 @@ func _build_technologies() -> void:
 	_select_era(0)
 
 func _select_era(index: int) -> void:
+	if game!=null and game._campaign_active() and index>=5: return
 	selected_era = index
 	for i in era_buttons.size():
 		era_buttons[i].set_pressed_no_signal(i==selected_era)
 	var era: Dictionary = Evolution.ERAS[selected_era]
-	era_description.text = str(era.years)+"  ·  "+str(era.description)
+	era_description.text = (str(game.sim.campaign.chapter().years)+"  ·  本关可用技术") if game._campaign_active() else str(era.years)+"  ·  "+str(era.description)
 	for id in technology_cards:
-		technology_cards[id].visible = int(Evolution.TECHNOLOGIES[id].era)==selected_era
-	if selected_technology.is_empty() or int(Evolution.TECHNOLOGIES[selected_technology].era)!=selected_era:
+		technology_cards[id].visible = int(Evolution.TECHNOLOGIES[id].era)==selected_era and _technology_allowed(id)
+	if selected_technology.is_empty() or not _technology_allowed(selected_technology) or int(Evolution.TECHNOLOGIES[selected_technology].era)!=selected_era:
 		for id in Evolution.TECHNOLOGIES:
-			if int(Evolution.TECHNOLOGIES[id].era)==selected_era:
+			if int(Evolution.TECHNOLOGIES[id].era)==selected_era and _technology_allowed(id):
 				selected_technology = id
 				break
 	_refresh_technology_detail()
@@ -198,7 +203,11 @@ func _select_technology(id: String) -> void:
 	_refresh_technology_detail()
 
 func _refresh_technology_detail() -> void:
-	if selected_technology.is_empty():
+	if selected_technology.is_empty() or not _technology_allowed(selected_technology):
+		technology_title.text="本关技术"
+		technology_detail.text="选择本关开放的技术；其他能力将由后续章节介绍。"
+		technology_status.text=""
+		technology_action.disabled=true
 		return
 	var tech: Dictionary = Evolution.TECHNOLOGIES[selected_technology]
 	var evolution: RefCounted = game.sim.evolution
@@ -214,7 +223,7 @@ func _refresh_technology_detail() -> void:
 		if game.sim.catalog.has(kind):
 			unlocks.append(str(game.sim.catalog[kind].name))
 	technology_title.text = str(tech.name)
-	technology_detail.text = "%s · %s\n%s\n\n前置 · %s" % [tech.branch,Evolution.ERAS[int(tech.era)].years,tech.description,"起点技术" if requirements.is_empty() else "、".join(requirements)]
+	technology_detail.text = "%s · %s\n%s\n\n前置 · %s" % [tech.branch,str(game.sim.campaign.chapter().years) if game._campaign_active() else Evolution.ERAS[int(tech.era)].years,tech.description,"起点技术" if requirements.is_empty() else "、".join(requirements)]
 	if not unlocks.is_empty():
 		technology_detail.text += "\n解锁 · "+"、".join(unlocks)
 	technology_action.text = "✓ 已掌握" if complete else ("研发中 · 剩余 %.1fh" % evolution.remaining_hours if str(evolution.project)==selected_technology else "研究 · ¥%s · %.1fh" % [game._number(float(tech.cost)),tech.hours])
@@ -224,7 +233,7 @@ func _refresh_technology_detail() -> void:
 		technology_buttons[id].set_pressed_no_signal(id==selected_technology)
 
 func _research_selected() -> void:
-	if not selected_technology.is_empty():
+	if not selected_technology.is_empty() and _technology_allowed(selected_technology):
 		_commit(game.sim.research_technology(selected_technology))
 
 func _build_facilities() -> void:
@@ -301,7 +310,7 @@ func _build_facilities() -> void:
 		catalog_cards[kind] = card.get_parent()
 		_text(card,str(spec.name),CREAM,16)
 		var era_index: int = game.sim.evolution.building_era(kind)
-		_text(card,"用电侧 · 随城市发展" if kind in ["home","factory","hospital"] else "%s · %s" % [Evolution.ERAS[era_index].name,Evolution.ERAS[era_index].years],BLUE,11)
+		catalog_era_labels[kind] = _text(card,"用电侧 · 随城市发展" if kind in ["home","factory","hospital"] else "%s · %s" % [Evolution.ERAS[era_index].name,Evolution.ERAS[era_index].years],BLUE,11)
 		_text(card,str(spec.description),MUTED,12)
 		var design := "造价 ¥%s" % game._number(float(spec.price))
 		if float(spec.capacity) > 0:
@@ -322,7 +331,7 @@ func _filter_catalog() -> void:
 			category = 2
 		elif game.sim.evolution.is_generator(kind) or kind in ["gas","solar","wind"]:
 			category = 1
-		catalog_cards[kind].visible = catalog_category.selected==0 or catalog_category.selected==category
+		catalog_cards[kind].visible = (catalog_category.selected==0 or catalog_category.selected==category) and (not game._campaign_active() or game.sim.can_build(kind).ok)
 
 func _adapt_columns() -> void:
 	var narrow := size.x<1100
@@ -384,7 +393,7 @@ func _build_region() -> void:
 	city_picker.item_selected.connect(func(_index: int): selected_city=city_picker.get_selected_id(); _refresh_region())
 	city_heading.add_child(city_picker)
 	city_box = game._column(region_details,10)
-	var goal_header: HBoxContainer = game._row(region_details,12)
+	goal_header = game._row(region_details,12)
 	_text(goal_header,"长期运营目标",CREAM,18)
 	game._button(goal_header,"选择目标",func(): challenge_box.visible=not challenge_box.visible,Vector2(96,34))
 	current_goal = _text(region_details,"",TEAL,15)
@@ -398,12 +407,41 @@ func _build_region() -> void:
 		game._button(card,"设为当前目标",func(): _commit(game.sim.set_sandbox_goal(id)),Vector2(0,32))
 	challenge_box.hide()
 
+func _technology_allowed(id: String) -> bool:
+	if not game._campaign_active(): return true
+	var technology: Dictionary=Evolution.TECHNOLOGIES[id]
+	if int(technology.era)>=5: return false
+	if game.sim.campaign.can_research(id): return true
+	if id not in game.sim.evolution.unlocked: return false
+	if id=="scada": return game.sim.feature_enabled("digital")
+	if id=="regional_planning": return game.sim.feature_enabled("region") or game.sim.feature_enabled("storage_control")
+	if id=="protection": return int(game.sim.campaign.chapter_id)>=4
+	if id=="smart_storage": return int(game.sim.campaign.chapter_id)>=15
+	for kind in technology.unlocks:
+		if game.sim.can_build(kind).ok: return true
+	return false
+
 func refresh(sync_inputs: bool=false) -> void:
 	if game == null or game.sim.get("evolution") == null:
 		return
+	var campaign_active: bool=game._campaign_active()
+	if campaign_active: era_description.text=str(game.sim.campaign.chapter().years)+"  ·  本关可用技术"
+	scenario_toggle.visible=not campaign_active
+	if campaign_active: scenario_actions.hide()
+	tabs.set_tab_hidden(2,campaign_active and not game.sim.feature_enabled("region"))
+	if campaign_active and tabs.current_tab==2 and not game.sim.feature_enabled("region"): tabs.current_tab=0
+	for i in era_buttons.size():
+		era_buttons[i].visible=not campaign_active or i<5
+	if campaign_active and selected_era>=5: _select_era(0)
+	for id in technology_cards:
+		technology_cards[id].visible=int(Evolution.TECHNOLOGIES[id].era)==selected_era and _technology_allowed(id)
+	_filter_catalog()
+	for kind in catalog_era_labels:
+		var era: int=game.sim.evolution.building_era(kind)
+		catalog_era_labels[kind].text=("本关技术 · "+str(game.sim.campaign.chapter().years)) if campaign_active else ("用电侧 · 随城市发展" if kind in ["home","factory","hospital"] else "%s · %s" % [Evolution.ERAS[era].name,Evolution.ERAS[era].years])
 	funds_label.text = "可用资金  ¥%s" % game._number(float(game.sim.cash))
 	var evolution: RefCounted = game.sim.evolution
-	scenario_label.text = "历史开局：按技术解锁设施" if bool(evolution.get("heritage")) else "现代试点：继承基础设施，探索技术路线"
+	scenario_label.text = ("本关技术与设施 · "+str(game.sim.campaign.chapter().title)) if campaign_active else ("历史开局：按技术解锁设施" if bool(evolution.get("heritage")) else "现代试点：继承基础设施，探索技术路线")
 	project_label.text = "研发空闲 · 选择下一项技术"
 	if not str(evolution.project).is_empty():
 		var tech: Dictionary = Evolution.TECHNOLOGIES[evolution.project]
@@ -419,7 +457,7 @@ func refresh(sync_inputs: bool=false) -> void:
 		technology_buttons[id].text = str(tech.name)+"\n"+status
 	_refresh_technology_detail()
 	for kind in construction_buttons:
-		var result: Dictionary = evolution.can_build(kind)
+		var result: Dictionary = game.sim.can_build(kind)
 		construction_buttons[kind].disabled = not result.get("ok",false) or float(game.sim.cash)<float(game.sim.catalog[kind].price)
 		construction_buttons[kind].text = "选择建造" if result.get("ok",false) else "需要研究解锁"
 		construction_buttons[kind].tooltip_text = str(result.get("message",""))
@@ -478,6 +516,7 @@ func _refresh_facility(sync_inputs: bool) -> void:
 	enabled_input.visible = generator or storage or building.kind in ["solar","wind","cooling","academy","condenser","hvdc","intertie","sensor","control","relay","soc"]
 	flexible_input.disabled = not game.sim.evolution.has_technology("flexible_thermal")
 	flexible_input.tooltip_text = "需要研究「柔性热机控制」；更快爬坡与较低最低负荷增加运维与燃料费用。"
+	boost_input.visible = not game._campaign_active()
 	boost_input.disabled = not game.sim.evolution.has_technology("advanced_cooling")
 	boost_input.tooltip_text = "需要研究「先进热管理」；提高冷却容量，也增加耗电和维护费。"
 	protection_input.editable = game.sim.evolution.has_technology("protection")
@@ -491,7 +530,8 @@ func _refresh_facility(sync_inputs: bool) -> void:
 	peak_input.editable = game.sim.evolution.has_technology("smart_storage")
 	if not sync_inputs:
 		return
-	facility_method.select(0 if game.sim.digital.can_configure(game.sim,selected_facility) else 1)
+	facility_method.set_item_disabled(0,not game.sim.feature_enabled("remote"))
+	facility_method.select(0 if game.sim.feature_enabled("remote") and game.sim.digital.can_configure(game.sim,selected_facility) else 1)
 	enabled_input.button_pressed = bool(building.get("enabled",true))
 	dispatch_input.value = float(building.get("dispatch",1.0))*100
 	cooling_input.select(1 if building.get("cooling_mode","wet")=="dry" else 0)
@@ -506,7 +546,10 @@ func _refresh_facility(sync_inputs: bool) -> void:
 func _refresh_region() -> void:
 	var region: RefCounted = game.sim.region
 	var summary: Dictionary = region.summary()
-	expand_button.visible = not bool(region.active)
+	expand_button.visible = not bool(region.active) and not game._campaign_active()
+	goal_header.visible = not game._campaign_active()
+	current_goal.visible = not game._campaign_active()
+	if game._campaign_active(): challenge_box.hide()
 	region_map.visible = bool(region.active)
 	region_map.sim = game.sim
 	region_map.refresh()
@@ -571,6 +614,7 @@ func _apply_facility() -> void:
 
 func _choose_build(kind: String) -> void:
 	close()
+	if not game.sim.can_build(kind).ok: return
 	game.build_kind = kind
 	game._set_tool("build")
 

@@ -120,7 +120,13 @@ func can_build(kind: String) -> Dictionary:
 			return _result(false,"先研究「%s」。" % TECHNOLOGIES[id].name)
 	return _result(false,"未知设施。")
 
-func can_place(kind: String, cell: Vector2i) -> Dictionary:
+func can_place(kind: String, cell: Vector2i, map_spec: Dictionary = {}) -> Dictionary:
+	if not map_spec.is_empty():
+		if kind == "hydro" and cell not in map_spec.get("river_cells",[]):
+			return _result(false,"水电需要建在本关地图标出的河流走廊。")
+		if kind == "pumped_storage" and cell not in map_spec.get("hill_cells",[]):
+			return _result(false,"抽水蓄能需要本关地图标出的山地区域。")
+		return _result(true,"选址可用。")
 	if kind == "hydro" and (cell.x < 18 or cell.y > 5):
 		return _result(false,"径流水电需要东北水系（x≥18、y≤5）。")
 	if kind == "pumped_storage" and (cell.x < 26 or cell.y < 24):

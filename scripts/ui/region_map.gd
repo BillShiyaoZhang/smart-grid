@@ -17,7 +17,8 @@ func refresh() -> void:
 	queue_redraw()
 
 func _position(cell: Vector2i) -> Vector2:
-	return Vector2(35, 24) + Vector2(cell) / 47.0 * (size - Vector2(70, 86))
+	var extent := maxi(1, int(sim.map_size()) - 1) if sim != null else 47
+	return Vector2(35, 24) + Vector2(cell) / float(extent) * (size - Vector2(70, 86))
 
 func _draw() -> void:
 	if sim == null:
@@ -39,7 +40,8 @@ func _draw() -> void:
 	for building in sim.buildings:
 		draw_circle(_position(building.cell), 1.7, Color(0.7, 0.8, 0.7, 0.5))
 	if sim.get("region") == null or not sim.region.active:
-		draw_string(font, Vector2(25, 40), "开启区域沙盘后，七座城镇将出现在地图上", HORIZONTAL_ALIGNMENT_LEFT, -1, 15, CREAM)
+		draw_string(font, Vector2(25, 40), "现有设施与电力连接", HORIZONTAL_ALIGNMENT_LEFT, -1, 15, CREAM)
+		draw_string(font, Vector2(16, size.y - 10), "登记城市后可查看人口与供电反馈", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, MUTED)
 		return
 	for city in sim.region.cities:
 		var at := _position(city.anchor)

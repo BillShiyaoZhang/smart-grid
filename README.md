@@ -2,6 +2,8 @@
 
 使用 **Godot 4.7** 制作的 2.5D 斜视角智能电网建造经营游戏。以海湾小城为舞台，建设发电与储能设施，铺设电网，管理供需与现金流，并在风暴中恢复供电。
 
+欢迎页可进入 **「电流的足迹」全球电力史教学战役**：十五个独立情景，从1882年纽约珍珠街走到当代清洁与智能电网。顺序学习建设、调度、市场、通信、安全和恢复，通关章节可重玩，战役与沙盘分开存档。玩法与史实边界见 [战役指南](docs/CAMPAIGN.md)。
+
 已加入电力交易中心：零售电价、现货购售电、联络站、储能策略、12 小时锁价合约和运营账本。具体玩法见 [电力市场指南](docs/MARKET.md)。
 
 数字电网包含独立光纤/无线通信、UPS、可信遥测、延迟远程控制、现场巡检和抽象网络安全事件。操作与恢复流程见 [数字电网指南](docs/DIGITAL.md)。
@@ -132,4 +134,6 @@ macOS 已安装 Godot 时，也可直接双击 `run_game.command` 启动游戏�
 
 ## 跨系统回归
 
-新增五套测试：`test_dispatch_integration.gd`（混合电源、光储来源、孤岛合约与重算守恒）、`test_thermal_integration.gd`（最低负荷、辅机保障、配套与检修）、`test_city_assets.gd`（人工建设归属、拆迁与退款、旧档迁移）、`test_digital_boundaries.gd`（设施命令、观测、历史数字化与攻击边界）、`test_facility_ui.gd`（真实按钮、排队回执与失败反馈）。均可按上面的 Godot `--headless --path . -s tests/<脚本>.gd` 命令运行。当前存档为 schema 5，兼容旧版本；详细验证见 [验证记录](docs/VALIDATION.md)。
+新增五套测试：`test_dispatch_integration.gd`（混合电源、光储来源、孤岛合约与重算守恒）、`test_thermal_integration.gd`（最低负荷、辅机保障、配套与检修）、`test_city_assets.gd`（人工建设归属、拆迁与退款、旧档迁移）、`test_digital_boundaries.gd`（设施命令、观测、历史数字化与攻击边界）、`test_facility_ui.gd`（真实按钮、排队回执与失败反馈）。均可按上面的 Godot `--headless --path . -s tests/<脚本>.gd` 命令运行。当前存档为 schema 6，兼容旧版本；详细验证见 [验证记录](docs/VALIDATION.md)。
+
+战役另有 `test_campaign.gd`（十五关真实操作与途中读档继续）、`test_campaign_boundaries.gd`（年代能力、固定购电、观测与存档边界）、`test_campaign_maps.gd`（地图与城市登记）、`test_campaign_game.gd`（真实界面与顺序解锁）。图形模式运行 `tests/render_campaign.gd` 可在 `.godot/campaign-qa/ui/` 生成四种分辨率的战役截图。

@@ -23,6 +23,8 @@ var attack_kind: OptionButton
 var policy_picker: OptionButton
 var device_info: Label
 var commission_button: Button
+var telemetry_button: Button
+var response_button: Button
 var link_info: Label
 var circuit_info: Label
 var security_info: Label
@@ -146,6 +148,7 @@ func _build_network() -> void:
 	device_picker = _select(details,"选择设备",276)
 	device_picker.item_selected.connect(func(_i: int): _select_device(_picked(device_picker)))
 	device_info = _text(details,"",CREAM,400,13)
+	telemetry_button=game._button(details,"遥测研究",func(): game._research(); refresh(),Vector2(0,36))
 	commission_button = game._button(details,"投运数字网关",func():
 		var building: Dictionary=game.sim.get_building(selected_device)
 		_commit(game.sim.commission_device(selected_device,"root" if building.get("kind","") in ["sensor","control"] else "device"))
@@ -188,6 +191,7 @@ func _build_operations() -> void:
 	circuit_picker = _select(circuit_box,"电力线路",380)
 	circuit_picker.item_selected.connect(func(_i: int): selected_circuit=_picked(circuit_picker); refresh())
 	circuit_info = _text(circuit_box,"",CREAM)
+	response_button=game._button(circuit_box,"启动需求响应",func(): _commit(game.sim.demand_response()),Vector2(0,36))
 	remote_button = _primary(game._button(circuit_box,"发送远程开关指令",_remote,Vector2(0,36)))
 	game._button(circuit_box,"派现场开关队 · ¥350",func(): _commit(game.sim.field_switch(selected_circuit)),Vector2(0,36))
 	game._button(circuit_box,"巡检定位 · ¥500",func(): _commit(game.sim.patrol_line(selected_circuit)),Vector2(0,36))
@@ -276,6 +280,10 @@ func _commit(result: Dictionary) -> void:
 	message_label.text=("✓ " if result.get("ok",false) else "! ")+str(result.get("message","操作完成"))
 	message_label.add_theme_color_override("font_color",TEAL if result.get("ok",false) else ORANGE)
 func refresh(sync_inputs: bool=false) -> void:
+	telemetry_button.text=game._digital_research_caption()
+	telemetry_button.disabled=not game._digital_research_available()
+	response_button.visible=game.sim.feature_enabled("demand_response")
+	response_button.disabled=int(game.sim.research_level)<2
 	if game == null or game.sim.get("digital") == null:
 		return
 	var sim: RefCounted=game.sim

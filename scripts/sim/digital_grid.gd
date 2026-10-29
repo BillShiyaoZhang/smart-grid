@@ -50,6 +50,7 @@ func reset(sim: RefCounted, migrate: bool = false) -> void:
 	state.next_attack_in = maxf(0.0, next_attack_at - float(sim.elapsed_hours))
 
 func _digitization_available(sim: RefCounted) -> bool:
+	if sim.has_method("feature_enabled") and not sim.feature_enabled("digital"): return false
 	return not bool(sim.evolution.heritage) or sim.evolution.has_technology("scada")
 
 func sync_devices(sim: RefCounted) -> void:
@@ -538,7 +539,9 @@ func operating_cost(sim: RefCounted) -> Dictionary:
 			security += 35.0
 	return {"communication": communication, "security": security, "total": communication + security}
 
-func trigger_attack(sim: RefCounted, kind: String = "dos", target_id: int = -1, drill: bool=true) -> Dictionary:
+func trigger_attack(sim: RefCounted, kind: String = "dos", target_id: int = -1, drill: bool=true, scenario_injection: bool=false) -> Dictionary:
+	if scenario_injection and (not drill or not sim.has_method("feature_enabled") or not bool(sim.campaign.active) or int(sim.campaign.chapter_id) != 14):
+		return fail("受控恢复注入仅用于指定的历史恢复情景。")
 	if kind not in ["dos", "spoof", "intrusion"]:
 		return fail("未知演练类型。")
 	sync_devices(sim)
@@ -554,9 +557,11 @@ func trigger_attack(sim: RefCounted, kind: String = "dos", target_id: int = -1, 
 		return fail("目标设备不存在。")
 	if not bool(_device(target_id).get("commissioned",false)): return fail("目标设备尚未投运数字网关。")
 	if not drill and not _paths(sim,false).has(target_id): return fail("设备没有暴露的通信路径。")
+	if scenario_injection and not _operational(sim,target_id):
+		return fail("开始恢复演练前，请先保障网关供电、投运并解除隔离。")
 	var score := int(state.security_level) + (2 if state.policy == "zero_trust" else (1 if state.policy == "segmented" else 0)) + (1 if _soc_online(sim) else 0)
 	var threshold := 3 if kind == "dos" else 2
-	var blocked: bool = not _operational(sim, target_id) or score >= threshold or (kind == "intrusion" and state.policy == "zero_trust")
+	var blocked: bool = not _operational(sim, target_id) or (not scenario_injection and (score >= threshold or (kind == "intrusion" and state.policy == "zero_trust")))
 	var incident := {"id": next_incident_id, "kind": kind, "target_id": target_id,
 		"status": "blocked" if blocked else "active", "detected": blocked, "remaining": 0.4 if blocked else (1.5 if kind == "dos" else (2.0 if kind == "spoof" else 4.0)),
 		"detection_remaining": 0.6 / (1.0 + float(state.security_level) + (2.0 if _soc_online(sim) else 0.0)),
@@ -570,8 +575,10 @@ func trigger_attack(sim: RefCounted, kind: String = "dos", target_id: int = -1, 
 		state.detected_incidents += 1
 		sim._log("安全系统拦截了异常通信请求。", "success")
 		return ok("安全策略成功拦截本次抽象事件。", int(incident.id))
+	if scenario_injection:
+		sim._log("历史恢复演练：本地注入一处受损网关，用于练习隔离与修补；普通安全事件仍遵守防护策略。", "info")
 	_apply_compromise(target_id, kind)
-	if state.policy == "open":
+	if state.policy == "open" and not scenario_injection:
 		for link in links:
 			var neighbor := int(link.b) if int(link.a) == target_id else (int(link.a) if int(link.b) == target_id else -1)
 			if neighbor > 0 and link.online and not link.fault and _operational(sim, neighbor):
@@ -628,6 +635,7 @@ func advance(sim: RefCounted, dt: float) -> void:
 				device.spoof_remaining = 0.0
 				device.dos_remaining = 0.0
 				device.isolated = false
+				_receipt(sim, "patch", int(building.id))
 				sim._log("设备补丁恢复完成，正在重新验证通信。", "success")
 		device.compromised = bool(device.intrusion) or float(device.spoof_remaining) > 0.0
 	for link in links:
@@ -640,10 +648,11 @@ func advance(sim: RefCounted, dt: float) -> void:
 				link.health = 100.0
 				sim._log("通信链路修复完成。", "success")
 	_advance_incidents(sim, dt)
-	if not _paths(sim,false).is_empty() and not warning_sent and float(sim.elapsed_hours) + 0.000001 >= next_attack_at - 1.0:
+	var natural_events: bool = not sim.has_method("feature_enabled") or sim.feature_enabled("natural_events")
+	if natural_events and not _paths(sim,false).is_empty() and not warning_sent and float(sim.elapsed_hours) + 0.000001 >= next_attack_at - 1.0:
 		warning_sent = true
 		sim._log("通信监测提示异常扫描趋势，请检查网关、安全策略与备用路径。", "warning")
-	if float(sim.elapsed_hours) + 0.000001 >= next_attack_at:
+	if natural_events and float(sim.elapsed_hours) + 0.000001 >= next_attack_at:
 		var kinds := ["dos", "spoof", "intrusion"]
 		if not _paths(sim,false).is_empty(): trigger_attack(sim, kinds[sim.rng.randi_range(0, 2)],-1,false)
 		next_attack_at += 36.0
@@ -713,6 +722,7 @@ func _advance_commands(sim: RefCounted, dt: float) -> void:
 			else:
 				state.remote_rejected+=1
 				sim._log("远程设施设置在到达时被拒绝："+str(result.message),"warning")
+			_receipt(sim,"facility",int(command.building_id),{"phase":"executed" if result.ok else "rejected","command_id":int(command.id),"settings":command.settings,"method":"remote"})
 		else:
 			var line: Dictionary=sim.get_line(int(command.line_id))
 			if not line.is_empty() and can_control(sim,int(command.line_id)) and (not command.target_closed or (not line.fault and float(line.repair_remaining)<=0.0)):
@@ -721,9 +731,11 @@ func _advance_commands(sim: RefCounted, dt: float) -> void:
 				line.trip_reason=""
 				state.remote_success+=1
 				sim._log("经过验证的远程开关命令已执行。","success")
+				_receipt(sim,"remote_switch",int(command.line_id),{"command_id":int(command.id),"closed":bool(command.target_closed)})
 			else:
 				state.remote_rejected+=1
 				sim._log("在途远程命令未通过到达时验证，已安全拒绝。","warning")
+				_receipt(sim,"remote_switch",int(command.line_id),{"phase":"rejected","command_id":int(command.id)})
 		pending_commands.remove_at(index)
 	for index in range(field_jobs.size()-1,-1,-1):
 		var job: Dictionary=field_jobs[index]
@@ -735,6 +747,7 @@ func _advance_commands(sim: RefCounted, dt: float) -> void:
 				var result: Dictionary=sim.evolution.configure(sim,int(job.building_id),job.settings)
 				if result.ok: _sample_facility(sim,building,"field")
 				sim._log("现场设施设置"+("已完成。" if result.ok else "未通过验证："+str(result.message)),"success" if result.ok else "warning")
+				_receipt(sim,"facility",int(job.building_id),{"phase":"executed" if result.ok else "rejected","command_id":int(job.id),"settings":job.settings,"method":"field"})
 		else:
 			var line: Dictionary=sim.get_line(int(job.line_id))
 			if not line.is_empty():
@@ -743,8 +756,14 @@ func _advance_commands(sim: RefCounted, dt: float) -> void:
 					line.heat=0.0
 					line.trip_reason=""
 				_sample(sim,line,"patrol")
+				var executed: bool = job.kind != "switch" or bool(line.closed) == bool(job.target_closed)
+				_receipt(sim,"field_switch" if job.kind == "switch" else "inspect",int(job.line_id),{"phase":"executed" if executed else "rejected","command_id":int(job.id)})
 				sim._log("现场队已核实线路 #%d：%s。" % [int(line.id),"发现设备损伤" if line.fault else "开关与设备已核实"],"info")
 		field_jobs.remove_at(index)
+
+func _receipt(sim: RefCounted, action: String, target: int, details: Dictionary = {}) -> void:
+	if sim.has_method("record_campaign_action"):
+		sim.record_campaign_action(action,target,details)
 
 func summarize(sim: RefCounted) -> Dictionary:
 	var reachable := _paths(sim, false)

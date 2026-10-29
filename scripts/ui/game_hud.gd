@@ -13,8 +13,12 @@ var values: Dictionary = {}
 var tool_buttons: Dictionary = {}
 var build_buttons: Dictionary = {}
 var category_buttons: Dictionary = {}
+var center_buttons: Dictionary = {}
+var city_name: Label
+var storm_button: Button
 var overlay_buttons: Dictionary = {}
 var popups: Dictionary = {}
+var popup_titles: Dictionary = {}
 var popup_order: Array[String] = []
 var active_category := ""
 var tray: PanelContainer
@@ -25,6 +29,7 @@ var inspector_box: VBoxContainer
 var inspector_scroll: ScrollContainer
 var objective: Button
 var mission_box: VBoxContainer
+var mission_scroll: ScrollContainer
 var research_button: Button
 var response_button: Button
 var events_label: RichTextLabel
@@ -106,7 +111,7 @@ func _popup(key: String, title: String, width: float=344, right: bool=false) -> 
 	p.size = Vector2(width,0)
 	var v := UI.column(p,10)
 	var heading := UI.row(v)
-	UI.label(heading,title,18)
+	popup_titles[key] = UI.label(heading,title,18)
 	UI.spacer(heading)
 	UI.button(heading,"×",func(): toggle_popup(key),Vector2(34,34))
 	popups[key] = p
@@ -120,7 +125,7 @@ func _build() -> void:
 	var cv := UI.column(city,3)
 	var heading := UI.row(cv,8)
 	UI.label(heading,"ϟ",26,UI.TEAL)
-	UI.label(heading,"青屿湾",20)
+	city_name = UI.label(heading,"青屿湾",20)
 	UI.label(heading,"潮汐电网",14,UI.MUTED)
 	objective = UI.button(cv,"当前委托",func(): toggle_popup("missions"),Vector2(292,34))
 	var top := _panel(self)
@@ -180,6 +185,7 @@ func _build() -> void:
 		var key: String = spec[0]
 		var entry := _dock_button(dr,key,spec[1],func(): center_requested.emit(key))
 		entry.toggle_mode = false
+		center_buttons[key] = entry
 	# Expandable, categorized catalog uses every facility from the simulation.
 	tray = _panel(self)
 	tray.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
@@ -255,10 +261,16 @@ func _build() -> void:
 	for key in ["supply","reliability","cash","balance"]: values[key].mouse_filter = Control.MOUSE_FILTER_PASS
 	# Full objectives and actions are in a non-modal popover.
 	var tasks := _popup("missions","运营委托",350)
-	mission_box = UI.column(tasks,8)
+	mission_scroll=ScrollContainer.new()
+	mission_scroll.horizontal_scroll_mode=ScrollContainer.SCROLL_MODE_DISABLED
+	mission_scroll.vertical_scroll_mode=ScrollContainer.SCROLL_MODE_SHOW_ALWAYS
+	mission_scroll.custom_minimum_size=Vector2(0,250)
+	tasks.add_child(mission_scroll)
+	mission_box = UI.column(mission_scroll,8)
+	mission_box.size_flags_horizontal=Control.SIZE_EXPAND_FILL
 	research_button = UI.button(tasks,"遥测研究",func(): action_requested.emit("research"))
 	response_button = UI.button(tasks,"需求响应",func(): action_requested.emit("response"))
-	UI.button(tasks,"风暴演练",func(): action_requested.emit("storm"))
+	storm_button = UI.button(tasks,"风暴演练",func(): action_requested.emit("storm"))
 	var log := _popup("log","调度日志",400,true)
 	events_label = RichTextLabel.new()
 	events_label.bbcode_enabled = true
@@ -266,7 +278,7 @@ func _build() -> void:
 	events_label.add_theme_font_size_override("normal_font_size",14)
 	log.add_child(events_label)
 	var menu := _popup("menu","游戏菜单",250,true)
-	for spec in [["save","保存游戏  F5"],["load","读取游戏  F9"],["help","调度员手册  H"]]:
+	for spec in [["save","保存游戏  F5"],["load","读取游戏  F9"],["campaign","历史战役与章节"],["help","调度员手册  H"]]:
 		var key: String = spec[0]
 		UI.button(menu,spec[1],func(): close_popups(); action_requested.emit(key))
 	var layer_list := _popup("layers","地图图层",260)
@@ -341,16 +353,36 @@ func toggle_category(category: String) -> void:
 	close_popups()
 	active_category = category
 	tray_title.text = {"power":"发电设施","grid":"输配电设施","storage":"储能设施","city":"城市与配套","digital":"数字电网设施"}.get(category,"设施目录")
-	for kind in build_buttons: build_buttons[kind].visible = category_for(kind) == category
+	for kind in build_buttons: build_buttons[kind].visible = category_for(kind) == category and (not game._campaign_active() or game.sim.can_build(kind).ok)
 	for key in category_buttons: category_buttons[key].button_pressed = key == category
 	tray.show()
 	refresh_context()
 
 func refresh_context() -> void:
+	var campaign_active: bool = game._campaign_active()
+	city_name.text = str(game.sim.campaign.chapter().get("place","历史现场")) if campaign_active else "青屿湾"
+	city_name.add_theme_font_size_override("font_size",16 if campaign_active else 20)
+	city_name.custom_minimum_size.x = 150 if campaign_active else 80
+	city_name.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	popup_titles.missions.text="本关任务" if campaign_active else "运营委托"
+	mission_scroll.custom_minimum_size.y=350 if campaign_active else 250
+	for category in category_buttons:
+		var available_category := false
+		for kind in build_buttons:
+			if category_for(kind)==category and game.sim.can_build(kind).ok: available_category=true; break
+		category_buttons[category].disabled=not available_category
+	tool_buttons.datalink.disabled = not game.sim.feature_enabled("digital")
+	category_buttons.digital.disabled = not game.sim.feature_enabled("digital")
+	for key in center_buttons:
+		var feature: String = {"market":"market","network":"digital","planning":"research"}[key]
+		center_buttons[key].disabled = not game.sim.feature_enabled(feature)
+	research_button.visible = not campaign_active or game.sim.feature_enabled("digital")
+	response_button.visible = not campaign_active or game.sim.feature_enabled("demand_response")
+	storm_button.visible = not campaign_active or game.sim.feature_enabled("storm")
 	for key in tool_buttons: tool_buttons[key].button_pressed = game.tool == key
 	for key in overlay_buttons: overlay_buttons[key].button_pressed = game.overlay == key
 	for key in build_buttons:
-		var available: Dictionary = game.sim.evolution.can_build(key)
+		var available: Dictionary = game.sim.can_build(key)
 		build_buttons[key].disabled = not available.ok or game.sim.cash < game.sim.catalog[key].price
 		build_buttons[key].button_pressed = game.tool == "build" and game.build_kind == key
 		build_buttons[key].tooltip_text = str(game.sim.catalog[key].description)+("\n"+str(available.get("message","")) if not available.ok else "")
@@ -367,6 +399,10 @@ func refresh_context() -> void:
 		if task.get("done",false): completed += 1
 		elif current == "全部委托完成 · 自由运营": current = str(task.get("title",task.get("name","运营委托")))
 	objective.text = "%d/%d  ·  %s  ›" % [completed,game.sim.objectives.size(),current]
+	if campaign_active:
+		var step: Dictionary=game.sim.campaign.current_step()
+		objective.text = "%02d  ·  %s  ›" % [game.sim.campaign.chapter_id,step.get("title","本关报告")]
+
 	var totals: Dictionary = game.sim.totals
 	statistics.text = "设施 %d  ·  线路 %d  ·  作业队 %d/2\n累计可靠率 %.1f%%  ·  碳排 %.1f t/h" % [game.sim.buildings.size(),game.sim.lines.size(),totals.get("crews_busy",0),float(totals.get("reliability_lifetime",1))*100,totals.get("carbon",0)]
 	_refresh_alerts()

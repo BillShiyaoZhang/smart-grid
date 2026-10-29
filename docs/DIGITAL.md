@@ -82,7 +82,9 @@
 
 `scripts/sim/digital_grid.gd` 保存独立通信图、UPS、设备隔离/事件、观测时间戳、在途命令和现场队任务。`grid_sim.gd` 协调它们与电力、市场和维修时间；界面通过 `communication_status`、`facility_observation`、`line_observation` 读取玩家可见状态。刷新查询没有采样或执行命令的副作用。
 
-当前存档为 **schema 5**，完整保存通信、观测、事件与未完成队列。旧 schema 1/2/3/4 存档可读取；缺少数字模块的 schema 1/2 根据已有电力连接创建默认光纤网络；旧文件不会凭空生成现场或远程任务。市场状态和四项运营任务保持兼容。
+当前存档为 **schema 6**，完整保存通信、观测、事件与未完成队列，以及独立战役阶段。旧 schema 1/2/3/4/5 存档可读取；缺少数字模块的 schema 1/2 根据已有电力连接创建默认光纤网络；旧文件不会凭空生成现场或远程任务。市场状态和四项运营任务保持兼容。
+
+历史战役第十一关学习观测，第十二关学习远控与需求响应，第十三关才启用自动自愈。章节规则会阻止提前投运网关或触发无关事件；自由运营的两级研究行为保持原样。
 
 ```sh
 /Applications/Godot.app/Contents/MacOS/Godot --headless --path . -s tests/test_digital.gd --log-file /tmp/tidal-digital-test.log

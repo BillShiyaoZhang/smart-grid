@@ -291,7 +291,7 @@ func _test_save_and_validation() -> void:
 	sim.sign_supply_contract(8.0, 12.0)
 	sim.step(0.25)
 	var path := "user://test_tidal-grid-market-test.json"
-	check(sim.save_game(path).ok and Sim.SCHEMA_VERSION == 5, "market snapshot uses current schema")
+	check(sim.save_game(path).ok and Sim.SCHEMA_VERSION == 6, "market snapshot includes schema six campaign compatibility")
 	var restored = Sim.new()
 	check(restored.load_game(path).ok, "market snapshot loads")
 	check(JSON.stringify(sim.market.state) == JSON.stringify(restored.market.state), "all pricing, sentiment, contract and storage policies round-trip")

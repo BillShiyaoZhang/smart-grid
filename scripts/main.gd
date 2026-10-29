@@ -9,6 +9,7 @@ const Chart = preload("res://scripts/ui/power_chart.gd")
 const MarketDesk = preload("res://scripts/ui/market_panel.gd")
 const DigitalDesk = preload("res://scripts/ui/digital_panel.gd")
 const PlanningDesk = preload("res://scripts/ui/planning_panel.gd")
+const CampaignDesk = preload("res://scripts/ui/campaign_panel.gd")
 const INK := Color("102c38")
 const PANEL := Color("122e3bdd")
 const TEAL := Color("77dbc0")
@@ -26,6 +27,7 @@ var camera: Camera3D
 var world: Node3D
 var terrain: Node3D
 var terrain_size := 16
+var terrain_identity := ""
 var sun_light: DirectionalLight3D
 var environment_state: Environment
 var rain_root: Node3D
@@ -93,6 +95,10 @@ var mission_snapshot := ""
 var last_structure := ""
 var last_finished := false
 var autosave_clock := 0.0
+var campaign_panel: Control
+var campaign_save_path := "user://campaign_save.json"
+var campaign_autosave_path := "user://campaign_autosave.json"
+var campaign_backup_path := "user://before_campaign.json"
 
 func _ready() -> void:
 	sim = Sim.new()
@@ -224,27 +230,30 @@ func _is_map_cell(cell: Vector2i) -> bool:
 	return cell.x >= 1 and cell.x < sim.map_size()-1 and cell.y >= 1 and cell.y < sim.map_size()-1
 
 func _sync_terrain() -> void:
-	if terrain_size == sim.map_size():
-		return
+	var map_description: Dictionary = sim.map_spec()
+	var identity := str(map_description.get("id","sandbox"))+":"+str(sim.map_size())
+	if terrain_identity == identity: return
+	terrain_identity = identity
 	terrain_size = sim.map_size()
 	terrain.queue_free()
-	terrain = Island.create(terrain_size,SPACING)
+	terrain = Island.create(terrain_size,SPACING) if map_description.is_empty() else Island.create_for_map(map_description,SPACING)
 	if terrain_size > 16:
 		# Keep the teaching town's original cell-to-world mapping unchanged.
 		terrain.position = Vector3(32,0,32)
-		Models.box(terrain,Vector3(57,0.016,7.4),Vector3(17,-0.018,-41),Color("6caeaf"),"RiverCorridor")
-		Models.box(terrain,Vector3(40,0.014,44),Vector3(22,-0.023,22),Color("98b992"),"EasternBasin")
-		for spec in [["河流走廊 · 水电选址",Vector3(13,0.15,-43)],["东部丘陵 · 抽水蓄能选址",Vector3(20,0.15,36)]]:
-			var caption := Label3D.new()
-			caption.text = spec[0]
-			caption.font = load("res://assets/fonts/NotoSansCJKsc-Regular.otf")
-			caption.font_size = 40
-			caption.pixel_size = 0.025
-			caption.outline_size = 2
-			caption.position = spec[1]
-			caption.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-			caption.modulate = Color("315d58")
-			terrain.add_child(caption)
+		if map_description.is_empty():
+			Models.box(terrain,Vector3(57,0.016,7.4),Vector3(17,-0.018,-41),Color("6caeaf"),"RiverCorridor")
+			Models.box(terrain,Vector3(40,0.014,44),Vector3(22,-0.023,22),Color("98b992"),"EasternBasin")
+			for spec in [["河流走廊 · 水电选址",Vector3(13,0.15,-43)],["东部丘陵 · 抽水蓄能选址",Vector3(20,0.15,36)]]:
+				var caption := Label3D.new()
+				caption.text = spec[0]
+				caption.font = load("res://assets/fonts/NotoSansCJKsc-Regular.otf")
+				caption.font_size = 40
+				caption.pixel_size = 0.025
+				caption.outline_size = 2
+				caption.position = spec[1]
+				caption.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+				caption.modulate = Color("315d58")
+				terrain.add_child(caption)
 		for city in sim.region.cities:
 			var caption := Label3D.new()
 			caption.text = "%s · %s" % [city.name,city.specialization]
@@ -508,8 +517,8 @@ func _process(delta: float) -> void:
 			var right := camera.global_basis.x
 			var forward := Vector3(camera.global_basis.z.x,0,camera.global_basis.z.z).normalized()
 			cam_target += (right*move.x+forward*move.y)*delta*10
-			cam_target.x = clampf(cam_target.x,-14,78 if sim.region.active else 14)
-			cam_target.z = clampf(cam_target.z,-14,78 if sim.region.active else 14)
+			cam_target.x = clampf(cam_target.x,-14,78 if sim.map_size()>16 else 14)
+			cam_target.z = clampf(cam_target.z,-14,78 if sim.map_size()>16 else 14)
 			_update_camera()
 	var effective_speed := 0 if _modal_open() else speed
 	sim_accum += delta * effective_speed
@@ -546,7 +555,7 @@ func _process(delta: float) -> void:
 	autosave_clock += delta
 	if autosave_clock > 90:
 		autosave_clock = 0
-		sim.save_game("user://autosave.json")
+		sim.save_game(campaign_autosave_path if _campaign_active() else "user://autosave.json")
 
 func _input(event: InputEvent) -> void:
 	# Reserve pause before focused HUD buttons receive the default Space accept.
@@ -559,7 +568,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_ESCAPE:
-			if planning_panel.visible:
+			if campaign_panel.visible:
+				campaign_panel.close()
+			elif planning_panel.visible:
 				planning_panel.close()
 			elif digital_panel.visible:
 				digital_panel.close()
@@ -605,9 +616,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_F5: _save()
 			KEY_F9: _load()
 			KEY_H: help_modal.show()
-			KEY_M: market_panel.open()
-			KEY_N: digital_panel.open()
-			KEY_T: planning_panel.open()
+			KEY_M: _open_center("market")
+			KEY_N: _open_center("network")
+			KEY_T: _open_center("planning")
 	if _modal_open():
 		return
 	if event is InputEventMouseButton:
@@ -615,7 +626,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			zoom = maxf(22,zoom-2)
 			_update_camera()
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			zoom = minf(135 if sim.region.active else 58,zoom+2)
+			zoom = minf(135 if sim.map_size()>16 else 58,zoom+2)
 			_update_camera()
 		elif event.button_index == MOUSE_BUTTON_MIDDLE:
 			dragging = event.pressed
@@ -629,12 +640,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		var right := camera.global_basis.x
 		var forward := Vector3(camera.global_basis.z.x,0,camera.global_basis.z.z).normalized()
 		cam_target -= (right*d.x+forward*d.y)*zoom/800
-		cam_target.x = clampf(cam_target.x,-14,78 if sim.region.active else 14)
-		cam_target.z = clampf(cam_target.z,-14,78 if sim.region.active else 14)
+		cam_target.x = clampf(cam_target.x,-14,78 if sim.map_size()>16 else 14)
+		cam_target.z = clampf(cam_target.z,-14,78 if sim.map_size()>16 else 14)
 		_update_camera()
 
 func _modal_open() -> bool:
-	return (welcome != null and welcome.visible) or (help_modal != null and help_modal.visible) or (end_modal != null and end_modal.visible) or (market_panel != null and market_panel.visible) or (digital_panel != null and digital_panel.visible) or (planning_panel != null and planning_panel.visible)
+	return (campaign_panel != null and campaign_panel.visible) or (welcome != null and welcome.visible) or (help_modal != null and help_modal.visible) or (end_modal != null and end_modal.visible) or (market_panel != null and market_panel.visible) or (digital_panel != null and digital_panel.visible) or (planning_panel != null and planning_panel.visible)
 
 func _handle_map_click(cell: Vector2i) -> void:
 	var id := _building_at(cell)
@@ -753,6 +764,12 @@ func _apply(result: Variant) -> void:
 	refresh_inspector = true
 
 func _set_tool(value: String) -> void:
+	if value=="datalink" and not sim.feature_enabled("digital"):
+		_notify("独立通信将在后续章节介绍。",false)
+		return
+	if value=="build" and not sim.can_build(build_kind).ok:
+		_apply(sim.can_build(build_kind))
+		return
 	tool = value
 	if value == "datalink": overlay = "comm"
 	if value == "select" and hud != null: hud.close_tray()
@@ -791,33 +808,98 @@ func _toggle_pause() -> void:
 		speed = 0
 	_update_hud()
 
-func _save() -> void:
-	_apply(sim.save_game("user://tidal_grid_save.json"))
+func _campaign_active() -> bool:
+	return sim != null and sim.get("campaign") != null and bool(sim.campaign.active)
 
-func _load(path: String="user://tidal_grid_save.json") -> void:
-	var result: Variant = sim.load_game(path)
+func _save() -> void:
+	_apply(sim.save_game(campaign_save_path if _campaign_active() else "user://tidal_grid_save.json"))
+
+func _load(path: String="") -> void:
+	if path.is_empty(): path = campaign_save_path if _campaign_active() else "user://tidal_grid_save.json"
+	var result: Dictionary = sim.load_game(path)
 	_apply(result)
-	if result is Dictionary and not result.get("ok",false):
-		return
-	for item in visuals.values():
-		item.queue_free()
+	if not result.get("ok",false): return
+	_rebuild_session()
+
+func _rebuild_session(reset_view: bool=false) -> void:
+	for item in visuals.values(): item.queue_free()
 	visuals.clear()
 	chart.history.clear()
 	hud.close_popups()
 	hud.close_tray()
 	inspector_selection = ""
-	market_panel.hide()
-	digital_panel.hide()
-	planning_panel.hide()
+	for panel in [market_panel,digital_panel,planning_panel,campaign_panel,welcome,help_modal,end_modal]:
+		if panel!=null: panel.hide()
 	last_finished = false
 	mission_snapshot = ""
+	planning_panel._asset_signature=""
+	planning_panel._city_signature=""
+	planning_panel._pending_facility=""
+	market_panel._ledger_signature=""
+	digital_panel._asset_signature=""
+	digital_panel._link_signature=""
+	digital_panel._circuit_signature=""
+	digital_panel._incidents_signature=""
+	digital_panel._jobs_signature=""
 	sim_accum = 0.0
 	selected_id = -1
 	selected_line = -1
 	selected_comm_line = -1
+	connection_start = -1
+	if reset_view:
+		speed = 1
+		previous_speed = 1
+		cam_target = Vector3.ZERO
+		orbit = 0.0
+		zoom = 47.0
+	if ghost: ghost.queue_free(); ghost=null
+	_set_tool("select")
 	_sync_world(true)
+	_update_camera()
 	_update_hud()
 	_update_inspector()
+
+func start_campaign_chapter(id: int) -> void:
+	if id<1 or id>int(campaign_panel.profile.unlocked):
+		_notify("请先完成上一章。",false)
+		return
+	if not _campaign_active():
+		var backup: Dictionary = sim.save_game(campaign_backup_path)
+		if not backup.ok: _apply(backup); return
+	var result: Dictionary = sim.start_campaign(id)
+	if not result.ok: _apply(result); return
+	campaign_panel.profile.last_chapter=id
+	campaign_panel.save_profile()
+	_rebuild_session(true)
+	sim.save_game(campaign_save_path)
+	campaign_panel.open_briefing()
+
+func restart_campaign_chapter() -> void:
+	var result: Dictionary = sim.restart_campaign_chapter()
+	if not result.ok: _apply(result); return
+	_rebuild_session(true)
+	sim.save_game(campaign_save_path)
+	campaign_panel.open_briefing()
+
+func continue_campaign() -> void:
+	var path := campaign_save_path
+	if FileAccess.file_exists(campaign_autosave_path):
+		if not FileAccess.file_exists(path) or FileAccess.get_modified_time(campaign_autosave_path)>FileAccess.get_modified_time(path): path=campaign_autosave_path
+	var result: Dictionary = sim.load_game(path)
+	if not result.ok: _apply(result); return
+	_rebuild_session()
+	if not last_finished: hud.toggle_popup("missions")
+
+func return_to_sandbox() -> void:
+	if _campaign_active():
+		sim.save_game(campaign_save_path)
+		if FileAccess.file_exists(campaign_backup_path):
+			var result: Dictionary=sim.load_game(campaign_backup_path)
+			if not result.ok: _apply(result); return
+		else: sim.reset(42)
+		_rebuild_session()
+	else:
+		campaign_panel.hide()
 
 func _notify(message: String, positive: bool=true) -> void:
 	notice_label.text = ("✓  " if positive else "!  ")+message
@@ -885,14 +967,32 @@ func _setup_ui() -> void:
 	_setup_modals()
 
 func _prepare_center(center: Control) -> void:
-	for other in [market_panel,digital_panel,planning_panel]:
+	if center==market_panel:
+		var storage_trading: bool = sim.feature_enabled("storage_control") and (not _campaign_active() or int(sim.campaign.chapter_id)>=15)
+		market_panel.tabs.set_tab_hidden(2,not storage_trading)
+		if market_panel.tabs.current_tab==2 and not storage_trading: market_panel.tabs.current_tab=0
+	if center==digital_panel:
+		digital_panel.tabs.set_tab_hidden(2,not sim.feature_enabled("security"))
+		if digital_panel.tabs.current_tab==2 and not sim.feature_enabled("security"): digital_panel.tabs.current_tab=0
+		digital_panel.remote_button.visible=sim.feature_enabled("remote")
+		_set_security_buttons(digital_panel)
+	for other in [market_panel,digital_panel,planning_panel,campaign_panel]:
 		if other != null and other != center: other.hide()
 	hud.close_popups()
 	hud.close_tray()
 	tooltip_label.hide()
 	if ghost: ghost.hide()
 
+func _set_security_buttons(node: Node) -> void:
+	if node is Button and ("隔离所选" in node.text or "解除设备隔离" in node.text or "恢复 / 修补" in node.text):
+		node.visible=sim.feature_enabled("security")
+	for child in node.get_children(): _set_security_buttons(child)
+
 func _open_center(value: String) -> void:
+	var feature: String = {"market":"market","network":"digital","planning":"research"}.get(value,"")
+	if not feature.is_empty() and not sim.feature_enabled(feature):
+		_notify("这一系统将在后续章节开放。",false)
+		return
 	match value:
 		"market": market_panel.open()
 		"network": digital_panel.open()
@@ -905,6 +1005,7 @@ func _hud_action(value: String) -> void:
 		"save": _save()
 		"load": _load()
 		"help": help_modal.show()
+		"campaign": campaign_panel.open_directory()
 		"research": _research()
 		"response": _apply(sim.demand_response()); _update_hud()
 		"storm": _storm()
@@ -956,39 +1057,52 @@ func _update_hud() -> void:
 	time_label.text = "第 %d 天  %02d:%02d" % [sim.day,int(hours),int(fmod(hours,1)*60)]
 	var translated := {"clear":"晴朗","sunny":"晴朗","cloudy":"多云","storm":"风暴","windy":"海风"}
 	weather_label.text = str(translated.get(sim.weather,sim.weather))
-	research_button.text = ["↗ 遥测研究 · ¥16k","↗ 自愈研究 · ¥32k","✓ 数字化研究完成"][mini(2,int(sim.research_level))]
-	research_button.disabled = sim.research_level >= 2 or (sim.evolution.heritage and not sim.evolution.has_technology("scada"))
+	research_button.text = _digital_research_caption()
+	research_button.disabled = not _digital_research_available()
 	for kind in build_buttons:
-		build_buttons[kind].disabled = not sim.evolution.can_build(kind).ok
+		build_buttons[kind].disabled = not sim.can_build(kind).ok
 	response_button.disabled = sim.research_level < 2
-	var mission_text := str(sim.objectives)
-	if mission_text != mission_snapshot:
-		_clear_children(mission_box)
-		var first_active := true
+	if _campaign_active():
+		var signature := "%d:%d:%s:%s:%d" % [sim.campaign.chapter_id,sim.campaign.step_index,sim.campaign.completed,sim.campaign.failed,campaign_panel.hint_level]
+		if signature!=mission_snapshot:
+			_clear_children(mission_box)
+			campaign_panel.populate_task(mission_box)
+			mission_snapshot=signature
+		campaign_panel.refresh_task_progress()
+		if (sim.campaign.completed or sim.campaign.failed) and not last_finished:
+			last_finished=true
+			campaign_panel.record_completion()
+			sim.save_game(campaign_save_path)
+			campaign_panel.open_report(bool(sim.campaign.completed))
+	else:
+		var mission_text := str(sim.objectives)
+		if mission_text != mission_snapshot:
+			_clear_children(mission_box)
+			var first_active := true
+			for objective in sim.objectives:
+				var done: bool = bool(objective.get("completed",objective.get("done",false)))
+				var name_: String = str(objective.get("title",objective.get("name","运营目标")))
+				var l := _label(mission_box,("✓  " if done else "○  ")+name_,12,TEAL if done else CREAM)
+				l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+				l.custom_minimum_size.x = 260
+				if not done and first_active:
+					first_active = false
+					var desc: String = str(objective.get("description",objective.get("detail","")))
+					if not desc.is_empty():
+						var d := _label(mission_box,desc,10,MUTED)
+						d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+						d.custom_minimum_size.x = 260
+			mission_snapshot = mission_text
+		var all_finished := true
 		for objective in sim.objectives:
-			var done: bool = bool(objective.get("completed",objective.get("done",false)))
-			var name_: String = str(objective.get("title",objective.get("name","运营目标")))
-			var l := _label(mission_box,("✓  " if done else "○  ")+name_,12,TEAL if done else CREAM)
-			l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-			l.custom_minimum_size.x = 260
-			if not done and first_active:
-				first_active = false
-				var desc: String = str(objective.get("description",objective.get("detail","")))
-				if not desc.is_empty():
-					var d := _label(mission_box,desc,10,MUTED)
-					d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-					d.custom_minimum_size.x = 260
-		mission_snapshot = mission_text
-	var all_finished := true
-	for objective in sim.objectives:
-		if not bool(objective.get("done",false)):
-			all_finished = false
-	if all_finished and not last_finished:
-		last_finished = true
-		_show_result(true)
-	elif sim.cash < -20000 and not last_finished:
-		last_finished = true
-		_show_result(false)
+			if not bool(objective.get("done",false)):
+				all_finished = false
+		if all_finished and not last_finished:
+			last_finished = true
+			_show_result(true)
+		elif sim.cash < -20000 and not last_finished:
+			last_finished = true
+			_show_result(false)
 	var logs := ""
 	for i in range(maxi(0,sim.log_entries.size()-30),sim.log_entries.size()):
 		var entry: Variant = sim.log_entries[i]
@@ -1123,16 +1237,16 @@ func _populate_inspector() -> void:
 		_stat(inspector_box,"实际供电","%.2f MW" % observation.served if observation.trusted else ("用户有供电反馈" if b.get("powered",false) else "用户报告停电"),TEAL)
 	else:
 		_stat(inspector_box,"实时出力","%.2f MW" % observation.output if observation.trusted else "遥测未确认",TEAL)
-	if b.kind in ["sensor","control","relay","soc"]:
-		_button(inspector_box,"⌁ 打开数字电网运行中心",func(): digital_panel.open(); digital_panel._select_device(int(b.id)),Vector2(0,34))
+	if b.kind in ["sensor","control","relay","soc"] and sim.feature_enabled("digital"):
+		_button(inspector_box,"⌁ 打开数字电网运行中心",func(): _open_center("network"); digital_panel._select_device(int(b.id)),Vector2(0,34))
 		_button(inspector_box,"⌁ 从这里铺设通信链路",func(): overlay="comm"; _set_tool("datalink"); connection_start=int(b.id); _sync_world(true),Vector2(0,34))
 	if sim.evolution.is_storage(str(b.kind)):
 		_stat(inspector_box,"储存能量","%.2f MWh" % observation.energy if observation.trusted else "遥测未确认",TEAL)
-		_button(inspector_box,"⇄ 储能策略与电价",func(): market_panel.open(); market_panel.tabs.current_tab=2,Vector2(0,32))
+		if sim.feature_enabled("market"): _button(inspector_box,"⇄ 储能策略与电价",func(): _open_center("market"); market_panel.tabs.current_tab=2,Vector2(0,32))
 	if sim.evolution.is_terminal(str(b.kind)):
 		_stat(inspector_box,"净交换功率","%+.2f MW" % observation.output if observation.trusted else "遥测未确认",TEAL)
-		_button(inspector_box,"⇄ 打开电力交易中心",func(): market_panel.open(),Vector2(0,32))
-	_button(inspector_box,"运行边界与精细控制  T",func(): planning_panel.open(); planning_panel.select_facility(int(b.id)),Vector2(0,32))
+		if sim.feature_enabled("market"): _button(inspector_box,"⇄ 打开电力交易中心",func(): _open_center("market"),Vector2(0,32))
+	if sim.feature_enabled("research"): _button(inspector_box,"运行边界与精细控制  T",func(): _open_center("planning"); planning_panel.select_facility(int(b.id)),Vector2(0,32))
 	var data: Dictionary = sim.catalog.get(b.kind,{})
 	_paragraph(inspector_box,str(data.get("description","")),MUTED,11)
 	var id: int = b.id
@@ -1141,6 +1255,7 @@ func _populate_inspector() -> void:
 		control_group.set_meta("inspector_advanced",true)
 		_label(control_group,"燃气出力上限 · 远程需可信遥测",14,ORANGE)
 		for method in ["remote","field"]:
+			if method=="remote" and not sim.feature_enabled("remote"): continue
 			var dispatch := _row(control_group,6)
 			for setting in [0.0,0.5,1.0]:
 				var ratio: float = setting
@@ -1181,7 +1296,7 @@ func _inspect_line() -> void:
 		_stat(inspector_box,"线路健康","%.0f%%" % float(health))
 	_paragraph(inspector_box,str(observation.get("reason","通信与现场观测决定你能知道什么。")),MUTED,11)
 	var id: int=line.id
-	_button(inspector_box,"远程开关 · 发送指令",func(): _apply(sim.remote_switch(id)); _sync_world(true); _update_inspector(),Vector2(0,34))
+	if sim.feature_enabled("remote"): _button(inspector_box,"远程开关 · 发送指令",func(): _apply(sim.remote_switch(id)); _sync_world(true); _update_inspector(),Vector2(0,34))
 	_button(inspector_box,"现场开关 · ¥350",func(): _apply(sim.field_switch(id)); _update_inspector(),Vector2(0,34))
 	_button(inspector_box,"巡检定位 · ¥500",func(): _apply(sim.patrol_line(id)); _update_inspector(),Vector2(0,34))
 	_button(inspector_box,"＋ 派遣线路抢修队",func(): _apply(sim.repair_line(id)); _update_inspector(),Vector2(0,34))
@@ -1204,7 +1319,16 @@ func _inspect_communication() -> void:
 	_button(inspector_box,"开通 / 停用通信链路",func(): _apply(sim.toggle_communication(id)); _sync_world(true); _update_inspector(),Vector2(0,34))
 	_button(inspector_box,"修复通信链路 · ¥650",func(): _apply(sim.repair_communication(id)); _sync_world(true); _update_inspector(),Vector2(0,34))
 	_button(inspector_box,"升级通信链路 · ¥2k",func(): _apply(sim.upgrade_communication(id)); _sync_world(true); _update_inspector(),Vector2(0,34))
-	_button(inspector_box,"⌁ 数字电网运行中心",func(): digital_panel.open(); digital_panel.selected_link=id; digital_panel.tabs.current_tab=1; digital_panel.refresh(true),Vector2(0,34))
+	_button(inspector_box,"⌁ 数字电网运行中心",func(): _open_center("network"); digital_panel.selected_link=id; digital_panel.tabs.current_tab=1; digital_panel.refresh(true),Vector2(0,34))
+
+func _digital_research_caption() -> String:
+	if _campaign_active() and int(sim.campaign.chapter_id)==11 and int(sim.research_level)>=1: return "✓ 一级遥测已完成"
+	if _campaign_active() and int(sim.campaign.chapter_id)==12 and int(sim.research_level)==1: return "↗ 设施远控研究 · ¥32k"
+	return ["↗ 遥测研究 · ¥16k","↗ 自愈研究 · ¥32k","✓ 数字化研究完成"][mini(2,int(sim.research_level))]
+
+func _digital_research_available() -> bool:
+	if _campaign_active() and int(sim.campaign.chapter_id)==11 and int(sim.research_level)>=1: return false
+	return sim.feature_enabled("digital") and int(sim.research_level)<2 and (not sim.evolution.heritage or sim.evolution.has_technology("scada"))
 
 func _research() -> void:
 	_apply(sim.research())
@@ -1239,12 +1363,12 @@ func _setup_modals() -> void:
 	dialog_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	dialog_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root_ui.add_child(dialog_layer)
-	welcome = _modal(dialog_layer,740,600)
+	welcome = _modal(dialog_layer,740,650)
 	var v := _column(welcome.get_node("Dialog"),10)
 	if ResourceLoader.exists("res://assets/art/bay_cover.png"):
 		var art := TextureRect.new()
 		art.texture = load("res://assets/art/bay_cover.png")
-		art.custom_minimum_size = Vector2(0,190)
+		art.custom_minimum_size = Vector2(0,140)
 		art.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		art.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
 		v.add_child(art)
@@ -1255,6 +1379,9 @@ func _setup_modals() -> void:
 	_label(v,"建造与接线  →  调度与储能  →  抢修与扩建",15,ORANGE)
 	_label(v,"左键交互 · 右键取消 · 空格暂停 · H 调度员手册",14,MUTED)
 	var begin := _button(v,"开始运营   →",func(): welcome.hide(); _notify("用接线工具连接中央变电站与东部工业园区。"),Vector2(0,48))
+	var campaign_actions := _row(v,10)
+	_button(campaign_actions,"历史战役  ·  电力时代",func(): campaign_panel.open_directory(),Vector2(0,40))
+	_button(campaign_actions,"继续战役",func(): continue_campaign(),Vector2(0,40))
 	begin.add_theme_stylebox_override("normal",UI.style(Color("28584f"),6,TEAL,10))
 	help_modal = _modal(dialog_layer,1040,620)
 	var h := _column(help_modal.get_node("Dialog"),14)
@@ -1308,8 +1435,12 @@ func _setup_modals() -> void:
 	planning_panel = PlanningDesk.new()
 	dialog_layer.add_child(planning_panel)
 	planning_panel.setup(self)
+	campaign_panel = CampaignDesk.new()
+	dialog_layer.add_child(campaign_panel)
+	campaign_panel.setup(self)
 
 func _show_result(victory: bool) -> void:
+	if _campaign_active(): campaign_panel.open_report(victory); return
 	var panel := end_modal.get_node("Dialog")
 	_clear_children(panel)
 	var v := _column(panel,18)
@@ -1340,32 +1471,7 @@ func _new_game(heritage: bool=false) -> void:
 		sim.start_heritage()
 	else:
 		sim.reset(42)
-	selected_id = -1
-	selected_line = -1
-	last_finished = false
-	mission_snapshot = ""
-	for item in visuals.values():
-		item.queue_free()
-	visuals.clear()
-	chart.history.clear()
-	hud.close_popups()
-	hud.close_tray()
-	inspector_selection = ""
-	market_panel.hide()
-	digital_panel.hide()
-	planning_panel.hide()
-	selected_comm_line=-1
-	speed = 1
-	sim_accum = 0.0
-	cam_target = Vector3.ZERO
-	orbit = 0.0
-	zoom = 47.0
-	_update_camera()
-	_set_tool("select")
-	end_modal.hide()
-	_sync_world(true)
-	_update_hud()
-	_update_inspector()
+	_rebuild_session(true)
 
 func _capture_preview() -> void:
 	await get_tree().process_frame

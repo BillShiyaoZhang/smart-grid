@@ -7,7 +7,9 @@ extends RefCounted
 signal changed
 signal event_logged(entry: Dictionary)
 
-const SCHEMA_VERSION := 5
+const SCHEMA_VERSION := 6
+const CampaignModel = preload("res://scripts/sim/campaign.gd")
+const ScenarioMap = preload("res://scripts/sim/scenario_map.gd")
 const MarketModel = preload("res://scripts/sim/power_market.gd")
 const DigitalModel = preload("res://scripts/sim/digital_grid.gd")
 const EvolutionModel = preload("res://scripts/sim/grid_evolution.gd")
@@ -37,6 +39,9 @@ var market: RefCounted = MarketModel.new()
 var digital: RefCounted = DigitalModel.new()
 var evolution: RefCounted = EvolutionModel.new()
 var region: RefCounted = RegionModel.new()
+var campaign: RefCounted = CampaignModel.new()
+var _scenario_map_id := 0
+var _scenario_map: Dictionary = {}
 var catalog: Dictionary = CATALOG.merged(EvolutionModel.EXTRA_CATALOG)
 var _dc_solver: RefCounted = NetworkSolver.new()
 var sandbox_goal := ""
@@ -81,6 +86,9 @@ func _init() -> void:
 	reset()
 
 func reset(seed_value: int = 42) -> void:
+	campaign = CampaignModel.new()
+	_scenario_map_id = 0
+	_scenario_map = {}
 	initial_seed = seed_value
 	rng.seed = seed_value
 	market.reset()
@@ -194,10 +202,10 @@ func build(kind: String, cell: Vector2i) -> Dictionary:
 		return _fail("区域设施已达 512 座，请优先改造现有设施。")
 	if not catalog.has(kind):
 		return _fail("未知设施。")
-	var unlocked: Dictionary = evolution.can_build(kind)
+	var unlocked: Dictionary = can_build(kind)
 	if not unlocked.ok:
 		return unlocked
-	var placement: Dictionary = evolution.can_place(kind, cell)
+	var placement: Dictionary = evolution.can_place(kind, cell, map_spec() if campaign.active else {})
 	if not placement.ok:
 		return placement
 	if cell.x < 1 or cell.y < 1 or cell.x >= map_size() - 1 or cell.y >= map_size() - 1:
@@ -210,6 +218,7 @@ func build(kind: String, cell: Vector2i) -> Dictionary:
 	cash -= price
 	var building := _add_building(kind, cell)
 	construction_count += 1
+	record_campaign_action("build", int(building.id), {"kind":kind})
 	_log("%s已建成；使用线路工具连接电网。" % building.name, "success")
 	_refresh()
 	return _ok("建造完成，请连接线路。", int(building.id))
@@ -229,6 +238,7 @@ func connect_buildings(a: int, b: int) -> Dictionary:
 		return _fail("资金不足。")
 	cash -= price
 	var line := _add_line(a, b)
+	record_campaign_action("connect", int(line.id), {"a":a,"b":b})
 	_log("新线路投运：%s ↔ %s。" % [get_building(a).name, get_building(b).name], "success")
 	_refresh()
 	return _ok("线路已连接。", int(line.id))
@@ -274,6 +284,7 @@ func upgrade_line(id: int) -> Dictionary:
 	line.health = 100.0
 	line.heat = 0.0
 	_log("线路 #%d 已增容至 %.1f MW。" % [id, line.capacity], "success")
+	record_campaign_action("upgrade_line", id)
 	_refresh()
 	return _ok("线路已增容。", id)
 
@@ -332,6 +343,8 @@ func active_repairs() -> int:
 	return count
 
 func toggle_line(id: int) -> Dictionary:
+	if campaign.active:
+		return _fail("本关开关操作需派现场队或提交远程命令。")
 	var line := get_line(id)
 	if line.is_empty():
 		return _fail("线路不存在。")
@@ -349,6 +362,12 @@ func demolish(id: int) -> Dictionary:
 	var building := get_building(id)
 	if building.is_empty():
 		return _fail("设施不存在。")
+	if campaign.active and id in campaign.roles.values() and str(building.kind) in ["home","factory","hospital"]:
+		return _fail("这是本关必须服务的客户，不能通过拆除消除供电责任。")
+	if campaign.active:
+		for role in campaign.roles:
+			if not _campaign_line_role(str(role)) and int(campaign.roles[role]) == id:
+				return _fail("这是本关工程需要保留的预置设施；可拆除自己新建的设施。")
 	if float(building.repair_remaining) > 0:
 		return _fail("检修期间无法拆除。")
 	var refund: float = float(building.get("refund_basis",catalog[building.kind].price)) * 0.35
@@ -368,6 +387,10 @@ func set_dispatch(id: int, ratio: float, method: String="remote") -> Dictionary:
 	return configure_facility(id,{"dispatch":ratio},method)
 
 func research() -> Dictionary:
+	if not feature_enabled("digital"):
+		return _fail("本关尚未开放数字电网研究。")
+	if campaign.active and int(campaign.chapter_id) == 11 and research_level >= 1:
+		return _fail("本关先掌握一级遥测，二级设施控制将在下一章学习。")
 	if evolution.heritage and not evolution.has_technology("scada"):
 		return _fail("历史开局需先研究 SCADA 调度接口，再开展遥测与自愈研究。")
 	if research_level >= RESEARCH_COSTS.size():
@@ -377,15 +400,61 @@ func research() -> Dictionary:
 		return _fail("资金不足。")
 	cash -= price
 	research_level += 1
+	record_campaign_action("research", research_level, {"level":research_level})
 	if research_level == 1:
 		_log("馈线遥测上线：可信且可达的网关可回传线路潮流与故障信息。", "success")
 	else:
-		_log("自愈控制上线：通过可信低时延通信操作备用线路，需求响应仅面向可控负荷。", "success")
+		_log("设施远控上线：设置需要可信通信和执行回执；自动自愈将在下一章学习。" if campaign.active and not feature_enabled("auto_restore") else "自愈控制上线：通过可信低时延通信操作备用线路，需求响应仅面向可控负荷。", "success")
 	_refresh()
 	return _ok("研究完成。", research_level)
 
 func map_size() -> int:
+	if campaign.active:
+		return int(map_spec().size)
 	return GRID_SIZE if region.active else 16
+
+func map_spec() -> Dictionary:
+	if not campaign.active: return {}
+	if _scenario_map_id != int(campaign.chapter_id):
+		_scenario_map_id = int(campaign.chapter_id)
+		_scenario_map = ScenarioMap.for_chapter(_scenario_map_id)
+	return _scenario_map
+
+func feature_enabled(feature: String) -> bool:
+	return campaign.allows(feature)
+
+func can_build(kind: String) -> Dictionary:
+	if not campaign.can_build(kind):
+		return _fail("本关未开放这类设施，请查看当前任务与时代档案。")
+	return evolution.can_build(kind)
+
+func start_campaign(chapter_id: int = 1) -> Dictionary:
+	if chapter_id < 1 or chapter_id > 15:
+		return _fail("未知历史章节，当前游戏未改变。")
+	reset(4200 + chapter_id)
+	var result: Dictionary = campaign.start(self, chapter_id)
+	if result.ok:
+		_refresh()
+	return result
+
+func restart_campaign_chapter() -> Dictionary:
+	return start_campaign(int(campaign.chapter_id)) if campaign.active else _fail("当前没有运行中的战役。")
+
+func campaign_action(name: String) -> Dictionary:
+	if not campaign.active:
+		return _fail("当前没有运行中的战役。")
+	var result: Dictionary = campaign.action(self, name)
+	if result.ok: _refresh()
+	return result
+
+func record_campaign_action(action: String, target: int = -1, details: Dictionary = {}) -> void:
+	var receipt := details.duplicate(true)
+	if not receipt.has("phase"): receipt.phase = "executed"
+	receipt.elapsed_hours = elapsed_hours
+	campaign.record_action(action, target, receipt)
+
+func _campaign_line_role(role: String) -> bool:
+	return role.ends_with("_feeder") or role.ends_with("_feed") or role in ["tie","root_power"]
 
 func start_heritage() -> void:
 	reset(initial_seed)
@@ -409,6 +478,8 @@ func start_heritage() -> void:
 	_refresh()
 
 func research_technology(id: String) -> Dictionary:
+	if not feature_enabled("research") or not campaign.can_research(id):
+		return _fail("本关未开放这项研究。")
 	var result: Dictionary = evolution.research(self, id)
 	if result.ok:
 		_log(result.message, "info")
@@ -416,7 +487,11 @@ func research_technology(id: String) -> Dictionary:
 	return result
 
 func configure_facility(id: int, settings: Dictionary, method: String="remote") -> Dictionary:
-	return _digital_result(digital.queue_facility(self,id,settings,method))
+	if method == "remote" and not feature_enabled("remote"):
+		return _fail("本关请派现场设置队；远程控制将在后续章节学习。")
+	if settings.has("storage_mode") and settings.storage_mode == "peak" and not feature_enabled("storage_control"):
+		return _fail("本关尚未开放储能协同削峰。")
+	return _campaign_result(digital.queue_facility(self,id,settings,method), "facility", id, {"phase":"accepted","settings":settings,"method":method})
 
 func _configure_facility_now(id: int, settings: Dictionary) -> Dictionary:
 	# Execution and deterministic fixtures only; player controls always queue.
@@ -428,13 +503,15 @@ func facility_observation(id: int) -> Dictionary:
 	return digital.facility_observation(self,id)
 
 func commission_device(id: int, role: String="device") -> Dictionary:
-	return _digital_result(digital.commission_device(self,id,role))
+	if not feature_enabled("digital"): return _fail("此时代尚未开放数字通信。")
+	return _campaign_result(digital.commission_device(self,id,role), "commission", id)
 
 func facility_status(id: int) -> String:
 	var building := get_building(id)
 	return evolution.facility_status(self, building) if not building.is_empty() else "设施不存在。"
 
 func expand_region() -> Dictionary:
+	if campaign.active: return _fail("战役使用本章规划区域；八城沙盘可从自由运营开启。")
 	var result: Dictionary = region.activate(self)
 	if result.ok:
 		_log(result.message, "success")
@@ -454,6 +531,7 @@ func sandbox_goals() -> Array[Dictionary]:
 	return definitions
 
 func set_sandbox_goal(id: String) -> Dictionary:
+	if campaign.active: return _fail("请先完成本章目标；长期沙盘目标位于自由运营。")
 	if id not in ["regional", "clean", "profitable"]:
 		return _fail("未知运营目标。")
 	if sandbox_goal == id:
@@ -492,18 +570,23 @@ func line_observation(line_id: int) -> Dictionary:
 	return digital.line_observation(self, line_id)
 
 func connect_communication(a: int, b: int, kind: String = "fiber") -> Dictionary:
-	return _digital_result(digital.connect_link(self, a, b, kind))
+	if not feature_enabled("digital"): return _fail("此时代尚未开放数字通信。")
+	return _campaign_result(digital.connect_link(self, a, b, kind), "communication", a, {"b":b})
 
 func toggle_communication(id: int) -> Dictionary:
+	if not feature_enabled("digital"): return _fail("此时代尚未开放数字通信。")
 	return _digital_result(digital.toggle_link(id))
 
 func repair_communication(id: int) -> Dictionary:
+	if not feature_enabled("digital"): return _fail("此时代尚未开放数字通信。")
 	return _digital_result(digital.repair_link(self, id))
 
 func upgrade_communication(id: int) -> Dictionary:
+	if not feature_enabled("digital"): return _fail("此时代尚未开放数字通信。")
 	return _digital_result(digital.upgrade_link(self, id))
 
 func remote_switch(id: int) -> Dictionary:
+	if not feature_enabled("remote"): return _fail("本关请派现场开关队。")
 	var line := get_line(id)
 	if line.is_empty():
 		return _fail("线路不存在。")
@@ -511,28 +594,40 @@ func remote_switch(id: int) -> Dictionary:
 	if observation.visibility != "verified":
 		digital.state.remote_rejected += 1
 		return _fail("需要新鲜可信遥测，或改派现场开关队。")
-	return _digital_result(digital.queue_remote(self, id, not bool(observation.closed)))
+	return _campaign_result(digital.queue_remote(self, id, not bool(observation.closed)), "remote_switch", id, {"phase":"accepted"})
 
 func field_switch(id: int) -> Dictionary:
-	return _digital_result(digital.queue_field(self, id, "switch"))
+	return _campaign_result(digital.queue_field(self, id, "switch"), "field_switch", id, {"phase":"accepted"})
 
 func patrol_line(id: int) -> Dictionary:
-	return _digital_result(digital.queue_field(self, id, "patrol"))
+	return _campaign_result(digital.queue_field(self, id, "patrol"), "inspect", id, {"phase":"accepted"})
 
 func set_security_policy(policy: String) -> Dictionary:
-	return _digital_result(digital.set_policy(policy))
+	if not feature_enabled("security"): return _fail("本关尚未开放安全策略。")
+	return _campaign_result(digital.set_policy(policy), "security", -1, {"policy":policy})
 
 func upgrade_security() -> Dictionary:
+	if not feature_enabled("security"): return _fail("本关尚未开放安全升级。")
 	return _digital_result(digital.upgrade_security(self))
 
 func trigger_cyberattack(kind: String = "dos", target_id: int = -1) -> Dictionary:
+	if campaign.active: return _fail("战役事件由当前教学阶段安排，请使用任务中的开始考核。")
 	return _digital_result(digital.trigger_attack(self, kind, target_id))
 
 func isolate_device(id: int, isolated: bool = true) -> Dictionary:
-	return _digital_result(digital.isolate(self, id, isolated))
+	if not feature_enabled("security"): return _fail("本关尚未开放安全处置。")
+	return _campaign_result(digital.isolate(self, id, isolated), "isolate", id, {"isolated":isolated})
 
 func recover_device(id: int) -> Dictionary:
-	return _digital_result(digital.recover(self, id))
+	if not feature_enabled("security"): return _fail("本关尚未开放安全处置。")
+	return _campaign_result(digital.recover(self, id), "patch", id, {"phase":"accepted"})
+
+func _campaign_result(result: Dictionary, action: String, target: int = -1, details: Dictionary = {}) -> Dictionary:
+	if result.ok:
+		var receipt := details.duplicate(true)
+		receipt.command_id = int(result.get("id", -1))
+		record_campaign_action(action, target, receipt)
+	return _digital_result(result)
 
 func _digital_result(result: Dictionary) -> Dictionary:
 	if result.ok:
@@ -544,6 +639,7 @@ func _digital_result(result: Dictionary) -> Dictionary:
 	return result
 
 func demand_response() -> Dictionary:
+	if not feature_enabled("demand_response"): return _fail("本关尚未开放需求响应。")
 	if research_level < 2:
 		return _fail("先研究自愈控制以解锁需求响应。")
 	if demand_response_remaining > 0:
@@ -552,11 +648,13 @@ func demand_response() -> Dictionary:
 		return _fail("资金不足。")
 	cash -= 1000.0
 	demand_response_remaining = 2.0
+	record_campaign_action("response")
 	_log("需求响应启动：未来 2 游戏小时，可通过可信通信控制的普通用户负荷下降 20%。", "success")
 	_refresh()
 	return _ok("需求响应已启动。")
 
 func trigger_storm() -> Dictionary:
+	if campaign.active: return _fail("战役灾害由当前教学阶段安排，请使用任务中的开始考核。")
 	if storm_active:
 		return _fail("风暴仍在持续。")
 	var candidates: Array[Dictionary] = []
@@ -591,6 +689,7 @@ func step(hours: float) -> void:
 		return
 	var remaining := minf(hours, 48.0)
 	while remaining > 0.000001:
+		if campaign.active and (campaign.completed or campaign.failed): break
 		var dt := minf(remaining, 0.05)
 		# Split every wholesale/retail band boundary as well as midnight.
 		for boundary in [7.0, 11.0, 15.0, 17.0, 21.0, 23.0, 24.0]:
@@ -619,7 +718,7 @@ func _tick(dt: float) -> void:
 		if storm_remaining <= 0.0:
 			storm_active = false
 			_log("风暴已离开海湾。修复受损设备，恢复全网供电。", "info")
-	_update_storm_schedule()
+	if not campaign.active: _update_storm_schedule()
 	demand_response_remaining = maxf(0.0, demand_response_remaining - dt)
 	for building in buildings:
 		if float(building.repair_remaining) > 0:
@@ -628,6 +727,7 @@ func _tick(dt: float) -> void:
 				building.repair_remaining = 0.0
 				building.health = 100.0
 				building.online = true
+				record_campaign_action("repair", int(building.id), {"kind":"building"})
 				_log("%s检修完成，恢复运行。" % building.name, "success")
 		elif building.online:
 			building.health = maxf(5.0, float(building.health) - dt * 0.025)
@@ -642,11 +742,12 @@ func _tick(dt: float) -> void:
 				line.heat = 0.0
 				line.trip_reason = ""
 				digital._sample(self, line, "patrol")
+				record_campaign_action("repair", int(line.id), {"kind":"line"})
 				_log("线路 #%d 抢修完成，已合闸恢复供电。" % line.id, "success")
 	_update_weather()
 	evolution.advance(self, dt)
 	digital.advance(self, dt)
-	if research_level >= 2:
+	if research_level >= 2 and feature_enabled("auto_restore"):
 		auto_restore_timer += dt
 		if auto_restore_timer >= 0.1:
 			auto_restore_timer = 0.0
@@ -690,6 +791,7 @@ func _tick(dt: float) -> void:
 		restored_storms = storm_count
 		_log("全网供电已恢复。环网、储能与快速抢修让城市更有韧性。", "success")
 	_update_objectives()
+	campaign.advance(self, dt)
 	if contract_was_active and float(market.state.contract_remaining) <= 0.0:
 		_log("固定供电合约已履行完毕，可按新报价签订下一份合约。", "info")
 	_pricing_day = -1
@@ -748,43 +850,69 @@ func demand_factor(kind: String) -> float:
 	return growth
 
 func set_tariff(mode: String, valley: float = 85.0, flat: float = 145.0, peak: float = 220.0) -> Dictionary:
+	if not feature_enabled("market"): return _fail("本关采用固定供电安排，现代电价配置将在市场章节开放。")
 	var result: Dictionary = market.set_tariff(mode, valley, flat, peak)
 	if result.ok:
+		record_campaign_action("market", -1, {"kind":"tariff","operation":"tariff"})
 		_log(result.message, "info")
 		_refresh()
 	return result
 
 func set_market_policy(mode: String, buy_limit: float = 120.0, sell_floor: float = 90.0) -> Dictionary:
+	if not feature_enabled("market"): return _fail("本关未开放现货购售电策略。")
 	var result: Dictionary = market.set_policy(mode, buy_limit, sell_floor)
 	if result.ok:
+		record_campaign_action("market", -1, {"kind":"policy","operation":"policy"})
 		_log(result.message, "info")
 		_refresh()
 	return result
 
 func set_storage_policy(mode: String, charge_price: float = 60.0, discharge_price: float = 150.0, reserve: float = 0.2) -> Dictionary:
+	if not feature_enabled("market"): return _fail("本关未开放市场储能套利策略。")
 	var result: Dictionary = market.set_storage(mode, charge_price, discharge_price, reserve)
 	if result.ok:
+		record_campaign_action("market", -1, {"kind":"storage","operation":"storage"})
 		_log(result.message, "info")
 		_refresh()
 	return result
 
 func sign_supply_contract(mw: float, hours: float = 12.0) -> Dictionary:
-	market.update_prices(day, time_hours, weather)
+	if not feature_enabled("market"): return _fail("本关尚未开放锁价合约。")
+	_update_market_prices(day, time_hours)
 	var capacity := 0.0
 	for building in buildings:
 		if evolution.is_terminal(str(building.kind)) and building.online:
 			capacity += _terminal_capacity(building)
 	var result: Dictionary = market.sign_contract(mw, hours, capacity, market.quote_for(day, time_hours, weather, hours))
 	if result.ok:
+		record_campaign_action("contract", -1, {"mw":mw,"hours":hours})
 		_log(result.message, "info")
 		_refresh()
 	return result
 
 func market_forecast() -> Array[Dictionary]:
+	if campaign.active and not feature_enabled("market"):
+		var fixed: Array[Dictionary] = []
+		for offset in 24:
+			fixed.append({"day":day + int((time_hours + offset) / 24.0),"hour":fposmod(time_hours + offset,24.0),"spot":float(campaign.chapter().get("fixed_import_price",90.0)),"retail":145.0})
+		return fixed
 	return market.forecast(day, time_hours, weather)
 
+func _update_market_prices(pricing_day: int, pricing_hour: float) -> void:
+	market.update_prices(pricing_day, pricing_hour, weather)
+	if campaign.active and not feature_enabled("market"):
+		# Regulated external supply uses the same physical delivery and ledger,
+		# without silently applying a modern time-varying wholesale price.
+		market.state.spot_price = float(campaign.chapter().get("fixed_import_price",90.0))
+		market.state.export_price = 0.0
+		market.state.market_mode = "balanced" if feature_enabled("external_supply") else "off"
+		market.state.buy_limit = 500.0
+		market.state.storage_mode = "reserve"
+		market.state.tariff_mode = "flat"
+		market.state.retail_price = 145.0
+
 func _solve(dt: float) -> void:
-	market.update_prices(_pricing_day if _pricing_day >= 0 else day, _pricing_hour if _pricing_hour >= 0.0 else time_hours, weather)
+	_update_market_prices(_pricing_day if _pricing_day >= 0 else day, _pricing_hour if _pricing_hour >= 0.0 else time_hours)
 	_contract_budget = float(market.state.contract_mw) if float(market.state.contract_remaining) > 0.0 and market.state.market_mode != "off" else 0.0
 	var adjacency := {}
 	for building in buildings:
@@ -1024,6 +1152,7 @@ func _fault_count() -> int:
 	return count
 
 func _update_objectives() -> void:
+	if campaign.active: return
 	var renewable_count := 0
 	var industry_powered := false
 	for building in buildings:
@@ -1052,6 +1181,7 @@ func _refresh() -> void:
 	_update_weather()
 	_solve(0.0)
 	_update_objectives()
+	campaign.evaluate(self)
 	changed.emit()
 
 func _log(message: String, severity: String = "info") -> void:
@@ -1086,6 +1216,7 @@ func snapshot() -> Dictionary:
 		"objectives": objectives.duplicate(true), "log_entries": log_entries.duplicate(true),
 		"market": market.snapshot(), "digital": digital.snapshot(),
 		"evolution": evolution.snapshot(), "region": region.snapshot(),
+		"campaign": campaign.snapshot(),
 		"sandbox_goal": sandbox_goal, "sandbox_goal_hours": sandbox_goal_hours,
 		"completed_sandbox_goals": completed_sandbox_goals.duplicate()}
 
@@ -1114,6 +1245,9 @@ func load_game(path: String = "user://bay_grid_save.json") -> Dictionary:
 		return _fail("市场存档数据不完整，当前游戏未改变。")
 	var restored_evolution: RefCounted = EvolutionModel.new()
 	var restored_region: RefCounted = RegionModel.new()
+	var restored_campaign: RefCounted = CampaignModel.new()
+	if int(data.schema_version) >= 6 and not restored_campaign.load_snapshot(data.campaign):
+		return _fail("战役存档数据不完整，当前游戏未改变。")
 	if int(data.schema_version) >= 4:
 		if not restored_evolution.load_snapshot(data.evolution) or not restored_region.load_snapshot(data.region):
 			return _fail("科技或城市存档数据不完整，当前游戏未改变。")
@@ -1144,6 +1278,7 @@ func load_game(path: String = "user://bay_grid_save.json") -> Dictionary:
 	market = restored_market
 	evolution = restored_evolution
 	region = restored_region
+	campaign = restored_campaign
 	sandbox_goal = str(data.get("sandbox_goal", ""))
 	sandbox_goal_hours = float(data.get("sandbox_goal_hours", 0.0))
 	completed_sandbox_goals.clear()
@@ -1200,6 +1335,8 @@ func _valid_save(data: Dictionary) -> bool:
 	if not _saved_integer(data.get("schema_version"), 1, SCHEMA_VERSION):
 		return false
 	if int(data.schema_version) >= 2 and not MarketModel.valid_snapshot(data.get("market")):
+		return false
+	if int(data.schema_version) >= 6 and not CampaignModel.valid_snapshot(data.get("campaign")):
 		return false
 	for key in ["buildings", "lines", "objectives", "log_entries"]:
 		if not data.get(key) is Array:
@@ -1293,6 +1430,19 @@ func _valid_save(data: Dictionary) -> bool:
 				return false
 	if int(data.next_line_id) <= maximum_line_id:
 		return false
+	if int(data.schema_version) >= 6 and bool(data.campaign.get("active",false)):
+		var chapter_map: Dictionary = ScenarioMap.for_chapter(int(data.campaign.chapter_id))
+		for building in data.buildings:
+			if float(building.cell[0]) >= float(chapter_map.size)-1 or float(building.cell[1]) >= float(chapter_map.size)-1:
+				return false
+		for role_id in data.campaign.get("roles",{}).values():
+			if not ids.has(int(role_id)) and not line_ids.has(int(role_id)): return false
+		for role in data.campaign.roles:
+			var references: Dictionary = line_ids if _campaign_line_role(str(role)) else ids
+			if not references.has(int(data.campaign.roles[role])): return false
+		if int(data.campaign.initial_customer_count) != data.campaign.required_customers.size(): return false
+		for customer_id in data.campaign.required_customers:
+			if not ids.has(int(customer_id)) or ids[int(customer_id)].kind not in ["home","factory","hospital"]: return false
 	var objective_ids := {}
 	for objective in data.objectives:
 		if not objective is Dictionary:
