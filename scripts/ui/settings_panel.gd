@@ -9,6 +9,8 @@ var status: Label
 var scale_picker: OptionButton
 var contrast_toggle: CheckButton
 var motion_toggle: CheckButton
+var preview: PanelContainer
+var preview_gauge: Control
 
 func setup(value: RefCounted) -> void:
 	preferences = value
@@ -56,6 +58,17 @@ func setup(value: RefCounted) -> void:
 	motion.button_pressed = preferences.reduced_motion
 	motion.toggled.connect(func(enabled: bool): _set_option("reduced_motion",enabled))
 	body.add_child(motion)
+	preview=PanelContainer.new()
+	body.add_child(preview)
+	var example:=UI.column(preview,6)
+	UI.label(example,"显示效果预览",18)
+	preview_gauge=UI.metric(example,"已供 / 需求",11.9,22.9,"MW",UI.TEAL,true,"缺口 11.0 MW · 条纹表示未满足需求")
+	preview_gauge.hatch_remainder=true
+	var markers:=UI.row(example,8)
+	UI.badge(markers,"✓ 已核实",UI.TEAL)
+	UI.badge(markers,"? 待核实",UI.MUTED)
+	UI.badge(markers,"! 需处理",UI.AMBER)
+	_update_preview()
 	UI.label(body,"快捷键",20)
 	UI.label(body,"点击按键后输入新键。重复按键会交换两个操作；Esc 保留用于取消和返回。",14,UI.MUTED).autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	for action in preferences.DEFAULT_BINDINGS:
@@ -109,8 +122,16 @@ func _refresh_bindings() -> void:
 
 func _set_option(key: String, value: Variant) -> void:
 	_save_result(preferences.set_option(key,value))
+	_update_preview()
 
 func _save_result(result: Error) -> void:
 	status.text = "设置已保存。" if result == OK else "设置已应用，但无法写入个人配置文件。"
 	status.add_theme_color_override("font_color",UI.TEAL if result == OK else UI.AMBER)
 	preferences_changed.emit()
+
+func _update_preview() -> void:
+	if preview==null: return
+	preview.theme=UI.create_theme(bool(preferences.high_contrast))
+	preview.add_theme_stylebox_override("panel",UI.style(Color("07151d") if preferences.high_contrast else UI.RAISED,8,Color.WHITE if preferences.high_contrast else UI.MUTED.darkened(.5),12))
+	preview_gauge.detail="静态方向与状态标记保留" if preferences.reduced_motion else "缺口 11.0 MW · 条纹表示未满足需求"
+	preview_gauge.queue_redraw()

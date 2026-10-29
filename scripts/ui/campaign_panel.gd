@@ -3,6 +3,7 @@ extends Control
 const Catalog = preload("res://scripts/sim/campaign_catalog.gd")
 const UI = preload("res://scripts/ui/ui_kit.gd")
 const Shell = preload("res://scripts/ui/management_shell.gd")
+const VisualChart = preload("res://scripts/ui/center_charts.gd")
 var game: Node
 var body: VBoxContainer
 var content: VBoxContainer
@@ -13,11 +14,18 @@ var step_signature := ""
 var hold_label: Label
 var mode := "directory"
 var chapter_buttons: Dictionary = {}
+var hold_gauge: Control
+var condition_gauges: Dictionary = {}
+var interruption_label: Label
+var _previous_hold := 0.0
 
 func reset_session() -> void:
 	hint_level=0
 	step_signature=""
 	hold_label=null
+	hold_gauge=null
+	condition_gauges.clear()
+	_previous_hold=0
 
 func chapter_focus_ids() -> Array[int]:
 	var ids: Array[int]=[]
@@ -111,7 +119,7 @@ func _label(caption: String, font_size: int=16, color: Color=UI.TEXT) -> Label:
 func open_directory() -> void:
 	mode = "directory"
 	_begin("从第一盏街灯，到协同运行的电网")
-	_label("15 个独立历史情景。首次按顺序解锁，已完成章节可以重玩。每一关从当地工程问题出发，逐步学习新的系统。",16,UI.MUTED)
+	_label("15 个历史现场 · 建设 → 经营 → 智能化 → 清洁可靠供电",16,UI.MUTED)
 	var actions := UI.row(content,10)
 	var resume := UI.button(actions,"继续战役",func(): game.continue_campaign(),Vector2(150,40))
 	resume.disabled = not FileAccess.file_exists(game.campaign_save_path)
@@ -126,15 +134,19 @@ func open_directory() -> void:
 		card.add_theme_stylebox_override("panel",UI.style(Color("193b47"),8,Color("355561"),12))
 		content.add_child(card)
 		var row := UI.row(card,16)
+		var timeline:=UI.column(row,4)
+		timeline.custom_minimum_size.x=86
+		UI.label(timeline,"●" if complete else ("◉" if unlocked else "○"),28,UI.TEAL if unlocked else UI.MUTED)
+		UI.label(timeline,str(chapter.years),14,UI.TEAL if unlocked else UI.MUTED)
 		var text_box := UI.column(row,6)
 		text_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		var title := UI.label(text_box,"%02d  %s%s" % [id,chapter.title,"  ✓" if complete else ""],19,UI.TEXT if unlocked else UI.MUTED)
 		title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		var location := UI.label(text_box,"%s  ·  %s" % [chapter.place,chapter.years],14,UI.TEAL if unlocked else UI.MUTED)
 		location.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		var summary := UI.label(text_box,str(chapter.get("objective","")),14,UI.MUTED)
+		var summary := UI.label(text_box,str(chapter.get("objective","")) if unlocked else "完成前章，继续探索下一种电力能力",14,UI.MUTED)
 		summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		var button := UI.button(row,"重玩" if complete else ("进入情景" if unlocked else "完成前章解锁"),func(): request_start(id),Vector2(155,44))
+		var button := UI.button(row,"重玩" if complete else ("进入情景" if unlocked else "待解锁"),func(): request_start(id),Vector2(112,44))
 		button.disabled = not unlocked
 		chapter_buttons[id] = button
 
@@ -165,7 +177,13 @@ func open_briefing() -> void:
 	_label("%s  ·  %s" % [chapter.place,chapter.years],18,UI.TEAL)
 	_label(str(chapter.briefing),19)
 	_label("你的任务  ·  "+str(chapter.get("objective","根据任务单完成当地供电工程。")),18,UI.TEXT)
-	_label("这是独立情景，使用本关预算、设施与技术。正常建设和运营都会产生费用；经营失败可重试本关。历史背景真实，工程尺度、计价与启停时间属于教学模型。",15,UI.MUTED)
+	var steps:=HFlowContainer.new()
+	steps.add_theme_constant_override("h_separation",12)
+	steps.add_theme_constant_override("v_separation",8)
+	content.add_child(steps)
+	for entry in Catalog.steps(int(chapter.id)):
+		UI.badge(steps,"○ "+str(entry.title),UI.TEAL)
+	_label("独立预算与进度 · 正常建设及运营费用 · 完成实际操作与持续考核",14,UI.MUTED)
 	UI.button(content,"进入现场  →",func(): close(); game.hud.toggle_popup("missions"),Vector2(0,46))
 	UI.button(content,"阅读历史档案",open_archive,Vector2(0,38))
 
@@ -211,6 +229,17 @@ func open_report(victory: bool) -> void:
 	var reliability := float(game.sim.total_served_mwh)/float(game.sim.total_demand_mwh) if float(game.sim.total_demand_mwh)>0.000001 else 1.0
 	_label("实际供电 %.1f MWh  ·  累计供电率 %.1f%%  ·  账本运营净收益 ¥%s" % [game.sim.total_served_mwh,reliability*100,game._number(operating_net)],18,UI.TEAL)
 	_label("当前资金 ¥%s  ·  %d 座设施  ·  %d 条线路" % [game._number(game.sim.cash),game.sim.buildings.size(),game.sim.lines.size()],17,UI.TEAL)
+	var metrics:=UI.row(content,18)
+	UI.metric(metrics,"累计供电率",reliability*100,100,"%",UI.TEAL,true,"实际供电 %.1f MWh" % float(game.sim.total_served_mwh)).size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	var profit:=UI.column(metrics,3)
+	profit.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	UI.label(profit,"运营净收益",14,UI.MUTED)
+	UI.label(profit,"%s¥%s" % ["+" if operating_net>=0 else "−",game._number(absf(operating_net))],30,UI.TEAL if operating_net>=0 else UI.RED)
+	var history:=VisualChart.new()
+	history.mode="profit"
+	history.custom_minimum_size=Vector2(0,128)
+	history.set_snapshot({"entries":game.sim.market.ledger})
+	content.add_child(history)
 	if victory:
 		record_completion()
 		_label("你把这一时代的工程选择变成了真实供电。下一关将从新的现场开始，已完成章节的解锁进度会单独保留。",16,UI.MUTED)
@@ -225,6 +254,8 @@ func open_report(victory: bool) -> void:
 
 func populate_task(box: VBoxContainer) -> void:
 	hold_label=null
+	hold_gauge=null
+	condition_gauges.clear()
 	var campaign: RefCounted = game.sim.campaign
 	var step: Dictionary = campaign.current_step()
 	var signature := "%d:%d" % [campaign.chapter_id,campaign.step_index]
@@ -232,6 +263,7 @@ func populate_task(box: VBoxContainer) -> void:
 		step_signature = signature
 		hint_level = 0
 		game.hud.mission_scroll.scroll_vertical=0
+		_previous_hold=0
 	UI.label(box,"本关步骤 %d / %d" % [mini(int(campaign.step_index)+1,Catalog.steps(int(campaign.chapter_id)).size()),Catalog.steps(int(campaign.chapter_id)).size()],13,UI.MUTED)
 	var title := UI.label(box,str(step.get("title","情景运营")),19,UI.TEAL)
 	title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -239,8 +271,22 @@ func populate_task(box: VBoxContainer) -> void:
 	instruction.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	if float(step.get("hold_hours",0))>0:
 		hold_label = UI.label(box,"持续达标 %.1f / %.1f 游戏小时" % [step.get("elapsed_hours",0),step.hold_hours],14,UI.TEAL)
-	var why := UI.label(box,str(step.get("why","")),13,UI.MUTED)
+		hold_gauge=UI.metric(box,"连续达标时间",float(step.get("elapsed_hours",0)),float(step.hold_hours),"小时",UI.TEAL)
+		hold_gauge.compact=true
+		hold_gauge.custom_minimum_size.y=50
+		for spec in _condition_specs(step):
+			var gauge: Control=UI.metric(box,str(spec.label),float(spec.value),float(spec.max),str(spec.unit),UI.TEAL,true,str(spec.detail))
+			gauge.compact=true
+			gauge.custom_minimum_size.y=62
+			gauge.show_value=str(spec.key) not in ["net","telemetry"]
+			condition_gauges[str(spec.key)]=gauge
+	interruption_label=UI.label(box,"",14,UI.AMBER)
+	interruption_label.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	var why_button:=UI.button(box,"为什么这样做？",func(): pass,Vector2(0,30),true)
+	var why := UI.label(box,str(step.get("why","")),14,UI.MUTED)
 	why.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	why.hide()
+	why_button.toggled.connect(func(value: bool): why.visible=value)
 	if not str(step.get("action","")).is_empty():
 		var action := str(step.action)
 		UI.button(box,"准备完成，开始考核",func(): game._apply(game.sim.campaign_action(action)); game._update_hud(),Vector2(0,38))
@@ -258,6 +304,35 @@ func refresh_task_progress() -> void:
 	if not is_instance_valid(hold_label) or not game._campaign_active(): return
 	var step: Dictionary = game.sim.campaign.current_step()
 	hold_label.text="持续达标 %.1f / %.1f 游戏小时" % [step.get("elapsed_hours",0),step.get("hold_hours",0)]
+	var elapsed: float=float(step.get("elapsed_hours",0))
+	if is_instance_valid(hold_gauge): hold_gauge.configure("连续达标时间",elapsed,float(step.get("hold_hours",1)),"小时",UI.TEAL)
+	var shortfalls: Array[String]=[]
+	for spec in _condition_specs(step):
+		if condition_gauges.has(str(spec.key)) and is_instance_valid(condition_gauges[str(spec.key)]):
+			condition_gauges[str(spec.key)].configure(str(spec.label),float(spec.value),float(spec.max),str(spec.unit),UI.TEAL if float(spec.value)>=float(spec.max) else UI.AMBER,true,str(spec.detail))
+		if float(spec.value)<float(spec.max): shortfalls.append(str(spec.label))
+	if elapsed+0.00001<_previous_hold and is_instance_valid(interruption_label):
+		interruption_label.text="连续计时已中断 · "+("、".join(shortfalls) if not shortfalls.is_empty() else "考核条件变化，请核对结果")
+	_previous_hold=elapsed
+
+func _condition_specs(step: Dictionary) -> Array:
+	var result: Array=[]
+	var predicate: String=str(step.get("predicate",""))
+	var totals: Dictionary=game.sim.totals
+	if predicate in ["reliable","import_reliable","nuclear_reliable","market_reliable","wind_reliable","telemetry_reliable","secure_reliable","final_assessment"]:
+		result.append({"key":"supply","label":"当前供电率","value":float(totals.get("reliability",0))*100,"max":98.0,"unit":"%","detail":"目标 ≥98%"})
+	if predicate in ["wind_reliable","final_assessment"]:
+		var threshold:=50.0 if predicate=="final_assessment" else 35.0
+		result.append({"key":"clean","label":"实际清洁供电","value":float(totals.get("renewable_supply_share",0))*100,"max":threshold,"unit":"%","detail":"目标 ≥%.0f%% · 含已知来源储能" % threshold})
+	if predicate=="market_reliable":
+		result.append({"key":"customers","label":"客户满意度","value":float(game.sim.market.state.satisfaction),"max":60.0,"unit":"%","detail":"目标 ≥60"})
+	if predicate=="telemetry_reliable":
+		var line_id: int=int(game.sim.campaign.roles.get("main_feeder",-1))
+		var fresh: bool=game.sim.line_observation(line_id).get("visibility","")=="verified"
+		result.append({"key":"telemetry","label":"主馈线可信遥测","value":1.0 if fresh else 0.0,"max":1.0,"unit":"","detail":"新鲜且可信" if fresh else "需要更新可信观测"})
+	if predicate=="final_assessment":
+		result.append({"key":"net","label":"窗口运营收益","value":1.0 if game.sim.campaign.assessment_net>=0 else 0.0,"max":1.0,"unit":"","detail":"¥%.0f · 目标不亏损" % game.sim.campaign.assessment_net})
+	return result
 
 func guide_to(target: String) -> void:
 	var focus: Dictionary=current_focus_target()

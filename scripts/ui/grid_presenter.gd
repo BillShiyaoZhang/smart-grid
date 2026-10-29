@@ -9,6 +9,19 @@ static func category_for(kind: String) -> String:
 	if kind in ["substation","intertie","hvdc","condenser"]: return "grid"
 	return "power"
 
+static func operating_snapshot(sim: RefCounted) -> Dictionary:
+	var demand: float=maxf(0,float(sim.totals.get("demand",0)))
+	var served: float=maxf(0,float(sim.totals.get("served",0)))
+	return {"hour":float(sim.elapsed_hours),"demand":demand,"served":served,
+		"deficit":maxf(0,demand-served),"reliability":clampf(served/demand,0,1) if demand>.000001 else 1.0,
+		"cash":float(sim.cash),"net_rate":float(sim.totals.get("income",0))-float(sim.totals.get("expenses",0))}
+
+static func customer_feedback(sim: RefCounted, id: int) -> Dictionary:
+	var building: Dictionary=sim.get_building(id)
+	if building.is_empty() or str(building.kind) not in ["home","factory","hospital"]: return {}
+	if sim.has_method("customer_service_active") and not sim.customer_service_active(id): return {}
+	return {"powered":bool(building.get("powered",false)),"text":"用户有供电反馈" if bool(building.get("powered",false)) else "用户报告停电","source":"公开用户供电反馈"}
+
 static func facilities(sim: RefCounted, query: String="", filter: String="all") -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	var needle: String = query.strip_edges().to_lower()
@@ -27,10 +40,12 @@ static func facilities(sim: RefCounted, query: String="", filter: String="all") 
 		var observed: Dictionary = sim.facility_observation(id)
 		var trusted: bool = bool(observed.get("trusted",false))
 		var fault: bool = trusted and float(observed.get("health",100))<=0.0
-		var outage: bool = trusted and float(observed.get("demand",0))>float(observed.get("served",0))+.01
+		var feedback: Dictionary=customer_feedback(sim,id)
+		var outage: bool = (trusted and float(observed.get("demand",0))>float(observed.get("served",0))+.01) or (not feedback.is_empty() and not bool(feedback.powered))
 		var category: String = category_for(kind)
 		var known_issue: bool = fault or outage or pending.has(id) or not connected.has(id)
 		var status_text: String = str(observed.status)
+		if outage and not trusted: status_text="用户报告停电 · 设备读数待核实"
 		known_issue=known_issue or (trusted and ("启动" in status_text or "配套" in status_text or "岗位不足" in status_text))
 		if filter in ["power","grid","storage","city","digital"] and category!=filter: continue
 		if filter in ["unknown","untrusted"] and trusted: continue
@@ -40,7 +55,7 @@ static func facilities(sim: RefCounted, query: String="", filter: String="all") 
 		if filter=="outage" and not outage: continue
 		if filter=="pending" and not pending.has(id): continue
 		var row: Dictionary = {"id":id,"name":name_text,"kind":kind,"category":category,"cell":building.cell,
-			"capacity":float(building.get("capacity",0)),"status":str(observed.status),"visibility":str(observed.visibility),
+			"capacity":float(building.get("capacity",0)),"energy_capacity":float(building.get("energy_capacity",0)),"status":status_text,"visibility":str(observed.visibility),
 			"trusted":trusted,"source":str(observed.get("reason","")),"age_hours":float(observed.get("age_hours",0)),
 			"fault":fault,"outage":outage,"pending":pending.has(id),"connected":connected.has(id)}
 		for key in ["available","output","served","demand","energy","health"]:
@@ -106,6 +121,8 @@ static func diagnosis(sim: RefCounted) -> Dictionary:
 			causes.append(_item("unconnected_%d" % id,"warning",name_text+" · 未接电力线路","设施尚无电力连接；连接后核实实际供电。","facility",id,"connect","公开电力拓扑"))
 		if not bool(facility.trusted):
 			unknown_count+=1
+			if bool(facility.outage) and connected.has(id):
+				causes.append(_item("customer_outage_%d" % id,"warning",name_text+" · 用户报告停电","用户供电反馈可确认失供；线路原因与设备读数仍需现场核实。","facility",id,"inspect","公开用户供电反馈"))
 			continue
 		var status_text: String = str(facility.status)
 		known_demand+=float(facility.demand)
@@ -131,9 +148,20 @@ static func diagnosis(sim: RefCounted) -> Dictionary:
 		causes.append(_item("unverified","info","部分运行状态待核实","%d 座设施缺少当前可信观测；不能据此断言故障或容量不足。可建立遥测或派现场队核实线路。" % unknown_count,"global",-1,"observe","观测覆盖情况"))
 	if deficit>.01 and causes.is_empty():
 		causes.append(_item("supply_capacity","warning","供给与交付需要核实","公开指标显示有缺额；比较可信可用出力、负荷与线路读数，避免仅按额定容量扩建。"))
+	# Each item is rendered once, with known actionable problems before uncertainty.
+	var unique: Array[Dictionary]=[]
+	var seen: Dictionary={}
+	for cause in causes:
+		var key: String=str(cause.get("target_type",""))+":"+str(cause.get("target_id",-1))+":"+str(cause.get("action",""))
+		if key in seen: continue
+		seen[key]=true
+		unique.append(cause)
+	unique.sort_custom(func(a: Dictionary,b: Dictionary) -> bool:
+		if _severity_order(str(a.severity))!=_severity_order(str(b.severity)): return _severity_order(str(a.severity))<_severity_order(str(b.severity))
+		return str(a.get("action",""))=="connect" and str(b.get("action",""))!="connect")
 	return {"served":served,"demand":demand,"deficit":deficit,"reliability":float(sim.totals.get("reliability",1)),
 		"summary":"当前缺额 %.1f MW；按已知证据检查下列项目。" % deficit if deficit>.01 else "当前供电满足需求；关注备用与已知风险。",
-		"causes":causes}
+		"causes":unique,"unknown_count":unknown_count}
 
 static func jobs(sim: RefCounted) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
@@ -144,7 +172,15 @@ static func jobs(sim: RefCounted) -> Array[Dictionary]:
 			var title: String = ("远程" if method=="remote" else "现场")+("设施设置" if facility else ("线路巡检" if command.get("kind","")=="patrol" else "线路开关"))
 			result.append({"id":int(command.id),"command_id":int(command.id),"phase":"pending","method":method,
 				"target_type":"facility" if facility else "line","target_id":int(command.get("building_id",-1) if facility else command.get("line_id",-1)),
-				"title":title,"remaining":float(command.remaining),"message":"已受理，等待实际执行；远程到达时重新验证。" if method=="remote" else "现场队执行中，完成后查看回执。"})
+				"title":title,"remaining":float(command.remaining),"duration":float(command.get("duration",0)),"started_at":float(command.get("started_at",-1)),"message":"已受理，等待实际执行；远程到达时重新验证。" if method=="remote" else "现场队执行中，完成后查看回执。"})
+	# Physical maintenance also occupies the same two field crews. Its timing is a
+	# submitted work order, not hidden electrical or fault telemetry.
+	for target in [[sim.buildings,"facility"],[sim.lines,"line"],[sim.digital.links,"communication"]]:
+		for item in target[0]:
+			if float(item.get("repair_remaining",0))<=.000001: continue
+			result.append({"id":-int(item.id)-1000,"command_id":-int(item.id)-1000,"phase":"pending","method":"field",
+				"target_type":target[1],"target_id":int(item.id),"title":"设施检修" if target[1]=="facility" else ("线路抢修" if target[1]=="line" else "通信链路修复"),
+				"remaining":float(item.repair_remaining),"duration":float(item.get("repair_duration",0)),"started_at":float(item.get("repair_started_at",-1)),"message":"现场作业中，完成后核对恢复状态。"})
 	var receipts: Array = sim.operation_receipts() if sim.has_method("operation_receipts") else []
 	for index in range(receipts.size()-1,-1,-1):
 		var receipt: Dictionary = receipts[index]
@@ -158,6 +194,8 @@ static func jobs(sim: RefCounted) -> Array[Dictionary]:
 
 static func facility_marker(sim: RefCounted, id: int) -> Dictionary:
 	var observed: Dictionary = sim.facility_observation(id)
+	var feedback: Dictionary=customer_feedback(sim,id)
+	if not feedback.is_empty() and not bool(feedback.powered): return {"text":"!","color_key":"warning"}
 	if not bool(observed.get("trusted",false)): return {"text":"?","color_key":"muted"}
 	if float(observed.get("health",100))<=0: return {"text":"×","color_key":"critical"}
 	if float(observed.get("demand",0))>float(observed.get("served",0))+.01: return {"text":"!","color_key":"warning"}

@@ -308,6 +308,8 @@ func repair_link(sim: RefCounted, id: int) -> Dictionary:
 		return fail("资金不足。")
 	sim.cash -= 650.0
 	link.repair_remaining = 0.4 if link.kind == "wireless" else 1.0
+	link.repair_started_at=float(sim.elapsed_hours)
+	link.repair_duration=float(link.repair_remaining)
 	link.online = false
 	return ok("通信抢修队已派出。", id)
 
@@ -379,12 +381,13 @@ func _sample(sim: RefCounted, line: Dictionary, source: String) -> void:
 func _sample_facility(sim: RefCounted, building: Dictionary, source: String) -> void:
 	facility_observations[int(building.id)]={"building_id":int(building.id),"source":source,"sampled_at":float(sim.elapsed_hours),
 		"available":float(building.get("available",0)),"output":float(building.get("output",0)),"served":float(building.get("served",0)),
+		"charging":float(building.get("charging",0)),
 		"demand":float(building.get("demand",0)),"energy":float(building.get("energy",0)),"health":float(building.get("health",100)),
 		"fuel_cost":sim.evolution.fuel_cost(building),"status":sim.evolution.facility_status(sim,building)}
 
 func facility_observation(sim: RefCounted, id: int) -> Dictionary:
 	var result: Dictionary={"visibility":"unknown","trusted":false,"reason":"尚无可信设施遥测","age_hours":0.0,
-		"available":null,"output":null,"served":null,"demand":null,"energy":null,"health":null,"fuel_cost":null,
+		"available":null,"output":null,"charging":null,"served":null,"demand":null,"energy":null,"health":null,"fuel_cost":null,
 		"status":"遥测未确认；额定参数和已提交设定可查看"}
 	if sim.get_building(id).is_empty(): result.reason="设施不存在"; return result
 	var sample: Dictionary=facility_observations.get(id,{})
@@ -401,6 +404,7 @@ func facility_observation(sim: RefCounted, id: int) -> Dictionary:
 	result.trusted=true
 	result.reason="现场核实记录" if field_fresh else "可信设施遥测"
 	for key in ["available","output","served","demand","energy","health","fuel_cost","status"]: result[key]=sample[key]
+	result.charging=sample.get("charging",null)
 	return result
 
 func can_configure(sim: RefCounted, id: int) -> bool:
@@ -425,6 +429,8 @@ func queue_facility(sim: RefCounted, id: int, settings: Dictionary, method: Stri
 		if float(sim.cash)<350.0: return fail("现场设置需要 ¥350。")
 		sim.cash-=350.0
 	var command: Dictionary={"id":next_command_id,"kind":"facility","building_id":id,"settings":settings.duplicate(true),"remaining":delay}
+	command.started_at=float(sim.elapsed_hours)
+	command.duration=delay
 	next_command_id+=1
 	if method=="remote": pending_commands.append(command)
 	else: field_jobs.append(command)
@@ -461,6 +467,8 @@ func queue_remote(sim: RefCounted, line_id: int, target_closed: bool) -> Diction
 	var delay := maxf(float(status(sim, int(line.a)).latency_ms), float(status(sim, int(line.b)).latency_ms))
 	var command := {"id": next_command_id, "line_id": line_id, "target_closed": target_closed,
 		"remaining": 0.05 + delay / 6000.0}
+	command.started_at=float(sim.elapsed_hours)
+	command.duration=float(command.remaining)
 	next_command_id += 1
 	pending_commands.append(command)
 	return ok("远程命令已排队，到达时会再次验证通信与电气安全。", int(command.id))
@@ -480,6 +488,8 @@ func queue_field(sim: RefCounted, line_id: int, kind: String) -> Dictionary:
 	sim.cash -= cost
 	var job := {"id": next_command_id, "line_id": line_id, "kind": kind,
 		"target_closed": not bool(line.closed), "remaining": 0.5 if kind == "patrol" else 0.35}
+	job.started_at=float(sim.elapsed_hours)
+	job.duration=float(job.remaining)
 	next_command_id += 1
 	field_jobs.append(job)
 	return ok("现场巡检队已派出。" if kind == "patrol" else "现场开关操作队已派出。", int(job.id))
@@ -649,6 +659,7 @@ func advance(sim: RefCounted, dt: float) -> void:
 				sim._log("通信链路修复完成。", "success")
 	_advance_incidents(sim, dt)
 	var natural_events: bool = not sim.has_method("feature_enabled") or sim.feature_enabled("natural_events")
+	if sim.management.state.active and not sim.management.allows("cyber_events"): natural_events=false
 	if natural_events and not _paths(sim,false).is_empty() and not warning_sent and float(sim.elapsed_hours) + 0.000001 >= next_attack_at - 1.0:
 		warning_sent = true
 		sim._log("通信监测提示异常扫描趋势，请检查网关、安全策略与备用路径。", "warning")
@@ -929,6 +940,8 @@ static func valid_snapshot(data: Variant, building_ids: Dictionary, line_ids: Di
 			return false
 		if not _number(link.get("latency_ms"), 0.001, 10000.0) or not _number(link.get("health"), 0.0, 100.0) or not _number(link.get("repair_remaining"), 0.0, 1.0):
 			return false
+		if link.has("repair_duration") or link.has("repair_started_at"):
+			if not _number(link.get("repair_duration"),0.000001,100) or not _number(link.get("repair_started_at"),0,elapsed+0.00001) or float(link.repair_remaining)>float(link.repair_duration)+0.00001: return false
 	var observation_ids := {}
 	for sample in data.observations:
 		if not sample is Dictionary or not _integer(sample.get("line_id"), 1, 1000000000) or not line_ids.has(int(sample.line_id)) or observation_ids.has(int(sample.line_id)):
@@ -949,6 +962,8 @@ static func valid_snapshot(data: Variant, building_ids: Dictionary, line_ids: Di
 				return false
 			command_ids[int(command.id)] = true
 			if not _number(command.get("remaining"),0.0,100.0): return false
+			if command.has("duration") or command.has("started_at"):
+				if not _number(command.get("duration"),0.000001,100) or not _number(command.get("started_at"),0,elapsed+0.00001) or float(command.remaining)>float(command.duration)+0.00001: return false
 			if command.get("kind","")=="facility":
 				if not _integer(command.get("building_id"),1,1000000000) or not building_ids.has(int(command.building_id)): return false
 				if facility_targets.has(int(command.building_id)): return false
@@ -966,6 +981,7 @@ static func valid_snapshot(data: Variant, building_ids: Dictionary, line_ids: Di
 			if sample.get("source") not in ["telemetry","field"] or not sample.get("status") is String or not _number(sample.get("sampled_at"),0.0,elapsed+0.00001): return false
 			for key in ["available","output","served","demand","energy","health","fuel_cost"]:
 				if not _number(sample.get(key),-1000000.0 if key=="output" else 0.0,1e9): return false
+			if sample.has("charging") and not _number(sample.charging,0,1e9): return false
 	if data.field_jobs.size() > 2:
 		return false
 	var incident_ids := {}
@@ -986,7 +1002,7 @@ static func valid_snapshot(data: Variant, building_ids: Dictionary, line_ids: Di
 	return true
 
 static func _valid_settings(settings: Variant, kind: String) -> bool:
-	if not settings is Dictionary or settings.is_empty() or settings.size()>12: return false
+	if not settings is Dictionary or settings.is_empty() or settings.size()>14: return false
 	for key in settings:
 		var value: Variant=settings[key]
 		match str(key):
@@ -1002,6 +1018,10 @@ static func _valid_settings(settings: Variant, kind: String) -> bool:
 				if kind not in ["steam","coal","ccgt"] or not value is bool: return false
 			"storage_mode":
 				if kind not in ["battery","pumped_storage","flow_battery","community_battery","hydrogen","thermal_storage"] or value not in ["auto","hold","peak"]: return false
+			"storage_intent":
+				if kind not in ["battery","pumped_storage","flow_battery","community_battery","hydrogen","thermal_storage"] or value not in ["inherit","supply","peak","arbitrage","legacy_custom"]: return false
+			"storage_reserve":
+				if kind not in ["battery","pumped_storage","flow_battery","community_battery","hydrogen","thermal_storage"] or not _number(value,0,0.9): return false
 			"reserve_soc":
 				if kind not in ["battery","pumped_storage","flow_battery","community_battery","hydrogen","thermal_storage"] or not _number(value,0,.9): return false
 			"peak_hour":

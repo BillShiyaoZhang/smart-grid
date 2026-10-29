@@ -80,9 +80,14 @@ static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt:
 		var ca: float = sim.evolution.marginal_cost(a)
 		var cb: float = sim.evolution.marginal_cost(b)
 		return int(a.id)<int(b.id) if is_equal_approx(ca,cb) else ca<cb)
-	var can_trade: bool = transfer_capacity>0.000001 and sim.market.state.market_mode!="off"
-	var trade: bool = can_trade and sim.market.state.market_mode=="trade"
-	var arbitrage: bool = sim.market.state.storage_mode=="arbitrage"
+	var operating: Dictionary=sim.operating_policy()
+	var can_trade: bool = transfer_capacity>0.000001 and bool(operating.enabled)
+	var trade: bool = can_trade and bool(operating.economic)
+	var arbitrage_batteries: Array[Dictionary]=[]
+	for battery in batteries:
+		var policy: Dictionary=sim.storage_dispatch_policy(battery)
+		if policy.intent=="arbitrage" or (policy.legacy_custom and sim.market.state.storage_mode=="arbitrage"): arbitrage_batteries.append(battery)
+	var arbitrage: bool = not arbitrage_batteries.is_empty()
 	var spot: float = sim.market.state.spot_price
 	var can_buy: bool = can_trade and spot<=float(sim.market.state.buy_limit)
 	var deficit := demand
@@ -95,7 +100,7 @@ static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt:
 	deficit-=contract_used
 	var battery_discharge := 0.0
 	if arbitrage and spot>=float(sim.market.state.discharge_price):
-		battery_discharge=sim._discharge_batteries(batteries,deficit,dt,true)
+		battery_discharge=sim._discharge_batteries(arbitrage_batteries,deficit,dt,true)
 		deficit-=battery_discharge
 	for b in generators:
 		if trade and can_buy and spot<sim.evolution.marginal_cost(b):
@@ -103,7 +108,7 @@ static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt:
 			imports+=bought; deficit-=bought
 		var take := minf(deficit,maxf(0.0,float(b.available)-float(b.output)))
 		b.output+=take; deficit-=take
-	var extra_discharge: float = sim._discharge_batteries(batteries,deficit,dt,arbitrage)
+	var extra_discharge: float = sim._discharge_batteries(batteries,deficit,dt,sim.market.state.storage_mode=="arbitrage")
 	battery_discharge+=extra_discharge; deficit-=extra_discharge
 	if can_buy:
 		var bought := minf(deficit,maxf(0.0,transfer_capacity-imports))
@@ -124,12 +129,12 @@ static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt:
 		if arbitrage and can_trade and deficit<=0.000001 and spot<=float(sim.market.state.charge_price):
 			var import_room := maxf(0.0,transfer_capacity-imports)
 			var prepaid := minf(import_room,float(sim._contract_budget))
-			charge=sim._charge_batteries(batteries,import_room if can_buy else prepaid,dt)
+			charge=sim._charge_batteries(arbitrage_batteries,import_room if can_buy else prepaid,dt)
 			var paid_charge := minf(prepaid,charge)
 			sim._contract_budget-=paid_charge; contract_used+=paid_charge
 			imports+=charge; charging+=charge
 	var exports := 0.0
-	if trade and imports<=0.000001 and float(sim.market.state.export_price)>=float(sim.market.state.sell_floor):
+	if can_trade and bool(operating.allow_export) and imports<=0.000001 and float(sim.market.state.export_price)>=float(sim.market.state.sell_floor):
 		var price: float = sim.market.state.export_price
 		var room := transfer_capacity
 		var taken := _take_generation(sim,generators,room,INF,true)
@@ -139,7 +144,7 @@ static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt:
 		taken=_take_generation(sim,generators,room,price-0.000001)
 		exports+=taken; room-=taken
 		if arbitrage and spot>=float(sim.market.state.discharge_price) and charging<=0.000001:
-			taken=sim._discharge_batteries(batteries,room,dt,true)
+			taken=sim._discharge_batteries(arbitrage_batteries,room,dt,true)
 			exports+=taken; battery_discharge+=taken
 	for b in renewables: b.curtailment_mw=maxf(0.0,float(b.available)-float(b.output))
 	for b in generators: b.curtailment_mw=maxf(0.0,sim.evolution.generator_minimum(b)-float(b.output))

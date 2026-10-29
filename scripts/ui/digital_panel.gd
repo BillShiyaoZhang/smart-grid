@@ -3,6 +3,8 @@ extends Control
 const NetworkMap = preload("res://scripts/ui/digital_map.gd")
 const Shell = preload("res://scripts/ui/management_shell.gd")
 const Drafts = preload("res://scripts/ui/config_drafts.gd")
+const VisualChart = preload("res://scripts/ui/center_charts.gd")
+const UI = preload("res://scripts/ui/ui_kit.gd")
 const TEAL := Color("77dbc0")
 const BLUE := Color("81c9ee")
 const CREAM := Color("f2eddb")
@@ -52,6 +54,8 @@ var drafts: RefCounted = Drafts.new()
 var policy_draft: Label
 var _inputs_ready := false
 var _map_selection := Vector3i(-2,-2,-2)
+var readiness_chart: Control
+var queue_chart: Control
 
 func reset_session() -> void:
 	drafts.clear()
@@ -90,7 +94,7 @@ func close() -> void:
 	game._update_hud()
 	game._update_inspector()
 func _build() -> void:
-	var body: VBoxContainer = Shell.build(self,"数字电网", "推进 15 分钟",_advance,close)
+	var body: VBoxContainer = Shell.build(self,"运维 · 数字电网", "推进 15 分钟",_advance,close)
 	var stats := HFlowContainer.new()
 	stats.add_theme_constant_override("h_separation",20)
 	stats.add_theme_constant_override("v_separation",6)
@@ -98,7 +102,7 @@ func _build() -> void:
 	for spec in [["coverage","通信可达","0%"],["trusted","可信路径","0%"],["observed","可靠观测","0 / 0"],["links","在线链路","0 / 0"],["incident","已检测事件","0"],["pending","操作队列","0"]]:
 		var metric: HBoxContainer = game._row(stats,6)
 		game._label(metric,spec[1],14,MUTED)
-		cards[spec[0]] = game._label(metric,spec[2],14,BLUE)
+		cards[spec[0]] = game._label(metric,spec[2],22,BLUE)
 	tabs = TabContainer.new()
 	tabs.use_hidden_tabs_for_min_size=false
 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -175,13 +179,17 @@ func _build_network() -> void:
 	network_map.node_selected.connect(_select_device)
 	network_map.link_selected.connect(func(id: int): selected_link=id; _select_id(link_picker,id); tabs.current_tab=1; refresh())
 	graph_box.add_child(network_map)
-	network_map.custom_minimum_size = Vector2(520,300)
+	network_map.custom_minimum_size = Vector2(0,300)
 	_text(graph_box,"点击节点查看设备，点击链路进入维护。",MUTED)
 	var details := _box(row,440)
 	game._label(details,"所选设备",18,BLUE)
 	device_picker = _select(details,"选择设备",276)
 	device_picker.item_selected.connect(func(_i: int): _select_device(_picked(device_picker)))
 	device_info = _text(details,"",CREAM,400,13)
+	readiness_chart=VisualChart.new()
+	readiness_chart.mode="conditions"
+	readiness_chart.custom_minimum_size=Vector2(0,98)
+	details.add_child(readiness_chart)
 	telemetry_button=game._button(details,"遥测研究",func(): game._research(); refresh(),Vector2(0,36))
 	commission_button = game._button(details,"投运数字网关",func():
 		var building: Dictionary=game.sim.get_building(selected_device)
@@ -299,6 +307,9 @@ func _build_kind(kind: String) -> void:
 	game._set_build_category("digital")
 	game._set_tool("build")
 func _advance() -> void:
+	if game.has_method("advance_management"):
+		game.advance_management(.25)
+		return
 	game.sim.step(.25)
 	game._sync_world(true)
 	game._update_hud()
@@ -349,6 +360,16 @@ func refresh(sync_inputs: bool=false) -> void:
 	var latency: float=status.get("latency_ms",-1)
 	device_info.text="%s\n可信：%s  ·  时延 %s\nUPS 剩余 %.1f 小时\n%s" % [("调度根" if status.get("root",false) else "普通网关")+" · "+("路径可达" if status.get("reachable",false) else "与调度失联"),"已校验" if status.get("trusted",false) else "未校验","%.0f ms" % latency if latency>=0 else "不可达",status.get("ups_remaining",0),status.get("reason","")]
 	var building: Dictionary=sim.get_building(selected_device)
+	var observation: Dictionary=sim.facility_observation(selected_device)
+	var live_observation: bool=observation.get("visibility","")=="verified"
+	var powered: bool=bool(status.get("reachable",false)) or float(status.get("ups_remaining",0))>0
+	readiness_chart.set_snapshot({"steps":[
+		{"label":"供电/UPS","ok":powered,"detail":"维持运行" if powered else "需核实","known":powered or str(status.get("reason","")).contains("UPS")},
+		{"label":"通信路径","ok":status.get("reachable",false),"detail":"可达" if status.get("reachable",false) else "中断"},
+		{"label":"可信校验","ok":status.get("trusted",false),"detail":"可信" if status.get("trusted",false) else "待核实"},
+		{"label":"新鲜观测","ok":live_observation,"detail":"实时" if live_observation else "待更新"},
+		{"label":"远控许可","ok":sim.digital.can_configure(sim,selected_device),"detail":"可执行" if sim.digital.can_configure(sim,selected_device) else "未就绪"}
+	]})
 	var root_capable: bool=building.get("kind","") in ["sensor","control"]
 	commission_button.text="调度根已投运" if status.get("root",false) else ("投运为调度根" if root_capable else ("数字网关已投运" if status.get("commissioned",false) else "投运数字网关"))
 	commission_button.disabled=(status.get("root",false) or (status.get("commissioned",false) and not root_capable)) or (sim.evolution.heritage and not sim.evolution.has_technology("scada"))

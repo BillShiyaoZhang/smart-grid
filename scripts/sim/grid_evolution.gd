@@ -134,7 +134,7 @@ func can_place(kind: String, cell: Vector2i, map_spec: Dictionary = {}) -> Dicti
 	return _result(true,"选址可用。")
 
 func initialize_building(b: Dictionary) -> void:
-	var defaults := {"enabled":true, "cooling_mode":"wet", "storage_mode":"auto", "reserve_soc":0.0,
+	var defaults := {"enabled":true, "cooling_mode":"wet", "storage_mode":"auto", "reserve_soc":0.0,"storage_intent":"inherit","storage_reserve":0.2,
 		"peak_hour":17.0, "environmental_release":0.25, "flexible_mode":false, "boost_cooling":false,
 		"protection_margin":1.0, "ramp_mw":0.0, "startup_remaining":float(STARTUP.get(b.kind,0.0)), "running_hours":0.0}
 	for key in defaults:
@@ -165,6 +165,12 @@ func configure(sim: RefCounted, id: int, settings: Dictionary, apply_changes: bo
 					return _result(false,"无效储能策略。")
 				if value == "peak" and not has_technology("smart_storage"):
 					return _result(false,"削峰策略需要储能协同与削峰研究。")
+			"storage_intent":
+				if not is_storage(str(b.kind)) or value not in ["inherit","supply","peak","arbitrage","legacy_custom"]: return _result(false,"无效储能经营意图。")
+				if value=="peak" and (not has_technology("smart_storage") or not sim.feature_enabled("storage_control")): return _result(false,"削峰意图需要协同研究与本阶段能力。")
+				if value=="arbitrage" and not sim.feature_enabled("market"): return _result(false,"套利意图需要开放市场经营。")
+			"storage_reserve":
+				if not is_storage(str(b.kind)) or not _number(value,0,0.9): return _result(false,"有效备用电量范围0—90%。")
 			"reserve_soc":
 				if not is_storage(str(b.kind)) or not _number(value,0.0,0.9) or (not has_technology("regional_planning") and float(value) != float(b.get("reserve_soc",0.0))):
 					return _result(false,"保留电量需要区域负荷规划研究，范围 0—90%。")
@@ -193,6 +199,7 @@ func configure(sim: RefCounted, id: int, settings: Dictionary, apply_changes: bo
 		if dispatch > 0.000001 and dispatch + 0.000001 < minimum:
 			return _result(false,"此机组最低稳定出力为额定容量的 %.0f%%；请提高上限或设为 0 停机。" % (minimum*100.0))
 	if apply_changes:
+		if (settings.has("storage_mode") or settings.has("reserve_soc")) and not settings.has("storage_intent"): b.storage_intent="legacy_custom"
 		for key in settings:
 			b[key] = settings[key]
 	return _result(true,"设施策略已应用；启停与爬坡将在时间推进后完成。" if apply_changes else "设施设置校验通过。")
@@ -294,6 +301,12 @@ func storage_power_factor(_sim: RefCounted, b: Dictionary) -> float:
 	return 1.0 if bool(b.get("enabled",true)) and bool(b.online) else 0.0
 
 func storage_can_discharge(sim: RefCounted, b: Dictionary) -> bool:
+	var policy: Dictionary=sim.storage_dispatch_policy(b) if sim.has_method("storage_dispatch_policy") else {"legacy_custom":true}
+	if not policy.legacy_custom:
+		if not bool(b.get("enabled",true)): return false
+		if policy.intent=="peak" and has_technology("smart_storage") and int(sim.research_level)>=1 and sim.digital.control_reachable(sim,int(b.id)):
+			return fposmod(float(sim.time_hours)-float(policy.peak_hour),24)<4
+		return true
 	if not bool(b.get("enabled",true)) or b.get("storage_mode","auto") == "hold":
 		return false
 	if b.get("storage_mode","auto") == "peak" and has_technology("smart_storage") and int(sim.research_level) >= 1 and sim.digital.control_reachable(sim,int(b.id)):
@@ -302,6 +315,12 @@ func storage_can_discharge(sim: RefCounted, b: Dictionary) -> bool:
 	return true
 
 func storage_can_charge(sim: RefCounted, b: Dictionary) -> bool:
+	var policy: Dictionary=sim.storage_dispatch_policy(b) if sim.has_method("storage_dispatch_policy") else {"legacy_custom":true}
+	if not policy.legacy_custom:
+		if not bool(b.get("enabled",true)): return false
+		if policy.intent=="peak" and has_technology("smart_storage") and int(sim.research_level)>=1 and sim.digital.control_reachable(sim,int(b.id)):
+			return fposmod(float(sim.time_hours)-float(policy.peak_hour),24)>=4
+		return true
 	if not bool(b.get("enabled",true)) or b.get("storage_mode","auto") == "hold":
 		return false
 	if b.get("storage_mode","auto") == "peak" and has_technology("smart_storage") and int(sim.research_level) >= 1 and sim.digital.control_reachable(sim,int(b.id)):
@@ -410,6 +429,15 @@ func facility_status(sim: RefCounted, b: Dictionary) -> String:
 			return "厂用电不足：配套冷却与学院必须获得实际供电"
 		return "热功率 %.1f MW · 最低负荷 %.1f MW · 每小时燃料 ¥%.0f" % [float(b.get("ramp_mw",b.get("available",0.0))),generator_minimum(b),fuel_cost(b)]
 	if is_storage(str(b.kind)):
+		var policy: Dictionary=sim.storage_dispatch_policy(b) if sim.has_method("storage_dispatch_policy") else {"legacy_custom":true}
+		if not bool(policy.legacy_custom):
+			var scope: String="继承全网" if bool(policy.inherited) else "单机覆盖"
+			var mode_text: String="本地自动保供"
+			if policy.intent=="arbitrage": mode_text="价格套利；缺电时本地保供"
+			elif policy.intent=="peak":
+				var coordinated: bool=has_technology("smart_storage") and int(sim.research_level)>=1 and sim.digital.control_reachable(sim,int(b.id))
+				mode_text=("可信削峰 · 当前放电窗口" if fposmod(float(sim.time_hours)-float(policy.peak_hour),24)<4 else "可信削峰 · 当前充电窗口") if coordinated else "削峰控制不可用，退回本地自动保供"
+			return "充放效率各 %.0f%% · 有效保留 %.0f%% · %s · %s" % [storage_efficiency(b)*100.0,float(policy.reserve_soc)*100.0,scope,mode_text]
 		var coordinated: bool = b.get("storage_mode","auto") == "peak" and has_technology("smart_storage") and int(sim.research_level) >= 1 and sim.digital.control_reachable(sim,int(b.id))
 		var mode_text := "可信控制执行削峰" if coordinated else ("保留电量；双向待机" if b.get("storage_mode","auto") == "hold" else ("削峰控制不可用，退回本地自动保供" if b.get("storage_mode","auto") == "peak" else "本地自动保供"))
 		return "充放效率各 %.0f%% · 保留 %.0f%% · %s" % [storage_efficiency(b)*100.0,float(b.get("reserve_soc",0.0))*100.0,mode_text]
@@ -578,6 +606,8 @@ static func validate_building(b: Dictionary) -> bool:
 		return false
 	if b.has("storage_mode") and b.storage_mode not in ["auto","hold","peak"]:
 		return false
+	if b.has("storage_intent") and b.storage_intent not in ["inherit","supply","peak","arbitrage","legacy_custom"]: return false
+	if b.has("storage_reserve") and not _number(b.storage_reserve,0,0.9): return false
 	return true
 
 static func _number(value: Variant, low: float, high: float) -> bool:

@@ -6,6 +6,7 @@ const OperatorMap = preload("res://scripts/ui/operator_map.gd")
 const Preferences = preload("res://scripts/ui/operator_preferences.gd")
 const SettingsDesk = preload("res://scripts/ui/settings_panel.gd")
 const Presenter = preload("res://scripts/ui/grid_presenter.gd")
+const FacilityReadout = preload("res://scripts/ui/facility_readout.gd")
 const Sim = preload("res://scripts/sim/grid_sim.gd")
 const Models = preload("res://scripts/art/model_factory.gd")
 const Island = preload("res://scripts/art/island_factory.gd")
@@ -114,6 +115,8 @@ var previous_overlay := "normal"
 var onboarding := false
 var onboarding_skipped := false
 var _last_map_size := Vector2.ZERO
+var _charted_receipts: Dictionary = {}
+var _charted_storm := false
 
 func _ready() -> void:
 	preferences = Preferences.new()
@@ -153,7 +156,7 @@ func _setup_world() -> void:
 	atmosphere.background_color = Color("153d4a")
 	atmosphere.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	atmosphere.ambient_light_color = Color("c5e1df")
-	atmosphere.ambient_light_energy = 0.25
+	atmosphere.ambient_light_energy = 0.29
 	atmosphere.tonemap_mode = Environment.TONE_MAPPER_LINEAR
 	env.environment = atmosphere
 	environment_state = atmosphere
@@ -162,7 +165,7 @@ func _setup_world() -> void:
 	sun.name = "AfternoonSun"
 	sun.rotation_degrees = Vector3(-52,-35,0)
 	sun.light_color = Color("ffedd5")
-	sun.light_energy = 0.45
+	sun.light_energy = 0.54
 	sun.shadow_enabled = true
 	sun.directional_shadow_max_distance = 90.0
 	add_child(sun)
@@ -359,10 +362,11 @@ func focus_city(id: int) -> void:
 	cam_target = _cell_position(city.anchor)
 	zoom = 40.0
 	_update_camera()
+	selected_id=-1
+	selected_line=-1
+	selected_comm_line=-1
 	if not city.building_ids.is_empty():
 		selected_id = int(city.building_ids[0])
-		selected_line = -1
-		selected_comm_line = -1
 	_update_inspector()
 	_sync_world(true)
 	_notify("%s · %s · 人口 %.0f" % [city.name,city.specialization,city.population])
@@ -373,7 +377,8 @@ func _sync_world(force: bool=false) -> void:
 		for child in terrain.get_children():
 			if child.has_meta("city_id"):
 				var city: Dictionary = sim.region.city_status(int(child.get_meta("city_id")))
-				child.text = "%s · %s" % [city.name,city.specialization]
+				var phase: String=str(city.get("service_phase","active"))
+				child.text = "%s · %s" % [city.name,{"prospect":"潜在市场","planned":"建设接入中","active":str(city.specialization)}.get(phase,str(city.specialization))]
 	var ids: Array = []
 	for b in sim.buildings:
 		ids.append(b.id)
@@ -488,9 +493,15 @@ func _draw_communications() -> void:
 func _update_lighting() -> void:
 	var daylight := smoothstep(-0.15,0.4,sin((float(sim.time_hours)-6.0)*PI/12.0))
 	var storm: bool = sim.weather == "风暴"
-	sun_light.light_energy = (0.06+daylight*0.39)*(0.65 if storm else 1.0)
-	environment_state.ambient_light_energy = 0.11+daylight*0.14
+	sun_light.light_energy = (0.12+daylight*0.42)*(0.70 if storm else 1.0)
+	environment_state.ambient_light_energy = 0.23+daylight*0.06
 	environment_state.ambient_light_color = Color("638aaf").lerp(Color("c5e1df"),daylight)
+	if terrain != null:
+		for title in ["Sea", "WaterSurround"]:
+			var sea := terrain.get_node_or_null(title) as MeshInstance3D
+			if sea != null and sea.material_override is ShaderMaterial:
+				sea.material_override.set_shader_parameter("daylight", daylight)
+				sea.material_override.set_shader_parameter("motion", not preferences.reduced_motion)
 	rain_root.visible = storm and not preferences.reduced_motion
 	for id in visuals:
 		var lamp: OmniLight3D = visuals[id].get_node("EveningLight")
@@ -972,6 +983,15 @@ func _rebuild_session(reset_view: bool=false) -> void:
 	for item in visuals.values(): item.queue_free()
 	visuals.clear()
 	chart.reset_history()
+	if sim.has_method("operating_snapshot"):
+		var prior_storm: Variant=null
+		for row in sim.operating_snapshot().get("history",[]):
+			chart.sample(float(row.demand),float(row.generation),float(row.hour),float(row.served))
+			if prior_storm!=null and bool(row.get("storm",false))!=bool(prior_storm):
+				chart.record_event("观测到风暴" if row.get("storm",false) else "观测到风暴结束",float(row.hour))
+			prior_storm=bool(row.get("storm",false))
+	_charted_receipts.clear()
+	_charted_storm=bool(sim.storm_active)
 	hud.operator_dock.reset_session()
 	for center in [market_panel,digital_panel,planning_panel,campaign_panel]:
 		if center.has_method("reset_session"): center.reset_session()
@@ -1173,6 +1193,65 @@ func _open_center(value: String) -> void:
 		"network": digital_panel.open()
 		"planning": planning_panel.open()
 
+func advance_management(hours: float=1.0) -> Dictionary:
+	return _advance_operating_time(hours, false)
+
+func wait_for_next_event() -> Dictionary:
+	var duration: float = sim.next_event_hours(24.0) if sim.has_method("next_event_hours") else 1.0
+	return _advance_operating_time(clampf(duration, 0.001, 24.0), true)
+
+func _advance_operating_time(hours: float, stop_on_event: bool) -> Dictionary:
+	if not is_finite(hours) or hours <= 0.0:
+		return {"ok":false, "message":"请选择有效的推进时间。", "advanced":0.0}
+	var started: float = float(sim.elapsed_hours)
+	var limit: float = minf(hours, 48.0)
+	var initial_deficit: float = maxf(0, float(sim.totals.get("demand",0))-float(sim.totals.get("served",0)))
+	var known_alerts: Dictionary = {}
+	for alert in Presenter.alerts(sim): known_alerts[str(alert.id)] = true
+	var known_receipts: String = str(sim.operation_receipts().filter(func(receipt: Dictionary): return str(receipt.get("phase","")) in ["executed","rejected"]))
+	var stage: int = int(sim.management_status().get("stage",-1)) if sim.has_method("management_status") else -1
+	var campaign_step: int = int(sim.campaign.step_index)
+	var objective_state := str(sim.objectives.map(func(item: Dictionary): return bool(item.get("done",false))))
+	var reason := "下一事件已到达" if stop_on_event else "已完成真实结算"
+	var remaining: float = limit
+	while remaining > 0.000001:
+		if _campaign_active() and (sim.campaign.completed or sim.campaign.failed): break
+		var chunk: float = minf(remaining, 0.05)
+		sim.step(chunk)
+		remaining -= chunk
+		chart.sample(float(sim.totals.get("demand",0)),float(sim.totals.get("generation",0))+float(sim.totals.get("import_mw",0)),float(sim.elapsed_hours),float(sim.totals.get("served",0)))
+		_record_observed_events()
+		if not stop_on_event: continue
+		var receipts: Array = sim.operation_receipts().filter(func(receipt: Dictionary): return str(receipt.get("phase","")) in ["executed","rejected"])
+		if str(receipts)!=known_receipts and not receipts.is_empty():
+			reason = "操作已拒绝，请查看回执" if str(receipts[-1].get("phase",""))=="rejected" else "操作已完成，请核对生效值"
+			break
+		var deficit: float = maxf(0,float(sim.totals.get("demand",0))-float(sim.totals.get("served",0)))
+		if deficit>initial_deficit+maxf(0.1,float(sim.totals.get("demand",0))*.02):
+			reason="供电缺口增大，已停止等待"
+			break
+		var new_alert := ""
+		for alert in Presenter.alerts(sim):
+			if not known_alerts.has(str(alert.id)):
+				new_alert=str(alert.title)
+				break
+		if not new_alert.is_empty():
+			reason="出现新事项："+new_alert
+			break
+		if (_campaign_active() and int(sim.campaign.step_index)!=campaign_step) or str(sim.objectives.map(func(item: Dictionary): return bool(item.get("done",false))))!=objective_state:
+			reason="目标已更新"
+			break
+		if sim.has_method("management_status") and int(sim.management_status().get("stage",-1))!=stage:
+			reason="经营阶段已更新"
+			break
+	_sync_world(true)
+	_update_hud()
+	_update_inspector()
+	var actual: float = float(sim.elapsed_hours)-started
+	var result := {"ok":true,"advanced":actual,"message":"推进 %.0f 游戏分钟 · %s" % [actual*60.0,reason]}
+	_notify(str(result.message))
+	return result
+
 func _hud_action(value: String) -> void:
 	match value:
 		"pause": _toggle_pause()
@@ -1256,23 +1335,28 @@ func _update_hud() -> void:
 			sim.save_game(campaign_save_path)
 			campaign_panel.open_report(bool(sim.campaign.completed))
 	else:
-		var mission_text := str(sim.objectives)
+		var management: Dictionary = sim.management_status() if sim.has_method("management_status") else {}
+		var mission_text := str([sim.objectives,management])
 		if mission_text != mission_snapshot:
 			_clear_children(mission_box)
-			var first_active := true
-			for objective in sim.objectives:
-				var done: bool = bool(objective.get("completed",objective.get("done",false)))
-				var name_: String = str(objective.get("title",objective.get("name","运营目标")))
-				var l := _label(mission_box,("✓  " if done else "○  ")+name_,12,TEAL if done else CREAM)
-				l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-				l.custom_minimum_size.x = 260
-				if not done and first_active:
-					first_active = false
-					var desc: String = str(objective.get("description",objective.get("detail","")))
-					if not desc.is_empty():
-						var d := _label(mission_box,desc,10,MUTED)
-						d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-						d.custom_minimum_size.x = 260
+			if management.get("active",false):
+				_populate_management_missions(management)
+			else:
+				var first_active := true
+				for objective in sim.objectives:
+					var done: bool = bool(objective.get("completed",objective.get("done",false)))
+					var name_: String = str(objective.get("title",objective.get("name","运营目标")))
+					var l := _label(mission_box,("✓  " if done else "○  ")+name_,14,TEAL if done else CREAM)
+					l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+					l.custom_minimum_size.x = 260
+					if not done and first_active:
+						first_active = false
+						UI.metric(mission_box,"目标进度",float(objective.get("progress",0))*100,100,"%",TEAL)
+						var desc: String = str(objective.get("description",objective.get("detail","")))
+						if not desc.is_empty():
+							var d := _label(mission_box,desc,14,MUTED)
+							d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+							d.custom_minimum_size.x = 260
 			mission_snapshot = mission_text
 		var all_finished := true
 		for objective in sim.objectives:
@@ -1296,7 +1380,49 @@ func _update_hud() -> void:
 	_update_time_status()
 	chart.sample(float(t.get("demand",0)),float(t.get("generation",0))+float(t.get("import_mw",0)),float(sim.elapsed_hours),float(t.get("served",0)))
 	hud.operator_dock.refresh()
+	if hud.has_method("refresh_visuals"): hud.refresh_visuals()
+	_record_observed_events()
 	_update_onboarding()
+
+func _record_observed_events() -> void:
+	if not chart.has_method("record_event"): return
+	for receipt in sim.operation_receipts():
+		if str(receipt.get("phase","")) not in ["executed","rejected"]: continue
+		var identity := str([receipt.get("command_id",-1),receipt.get("action",""),receipt.get("elapsed_hours",0),receipt.get("phase","")])
+		if _charted_receipts.has(identity): continue
+		_charted_receipts[identity]=true
+		chart.record_event("操作生效" if receipt.get("phase","")=="executed" else "执行拒绝",float(receipt.get("elapsed_hours",sim.elapsed_hours)))
+	if bool(sim.storm_active)!=_charted_storm:
+		chart.record_event("风暴抵达" if sim.storm_active else "风暴离开",float(sim.elapsed_hours))
+		_charted_storm=bool(sim.storm_active)
+
+func _populate_management_missions(status: Dictionary) -> void:
+	_paragraph(mission_box,str(status.get("title","海湾经营")),TEAL,20)
+	_paragraph(mission_box,str(status.get("description","")),CREAM,14)
+	for condition in status.get("conditions",[]):
+		if not condition is Dictionary: continue
+		var target: float=float(condition.get("target",1))
+		var amount: float=float(condition.get("value",0))
+		var accent: Color=TEAL if condition.get("met",false) else ORANGE
+		if target<=0:
+			_label(mission_box,str(condition.get("label","经营条件")),14,MUTED)
+			_label(mission_box,"%+.0f %s" % [amount,condition.get("unit","")],24,accent)
+			_label(mission_box,"目标：不低于 %.0f %s" % [target,condition.get("unit","")],14,MUTED)
+		else:
+			UI.metric(mission_box,str(condition.get("label","经营条件")),amount,target,str(condition.get("unit","")),
+				accent,bool(condition.get("known",true)),"目标 ≥ %.0f %s" % [target,condition.get("unit","")])
+	if float(status.get("required_hours",0))>0:
+		UI.metric(mission_box,"持续达标",float(status.get("elapsed_hours",0)),float(status.required_hours),"小时",TEAL)
+	if not str(status.get("interruption","")).is_empty():
+		_paragraph(mission_box,"最近中断 · "+str(status.interruption),ORANGE,14)
+	if float(status.get("best_hours",0))>0:
+		_label(mission_box,"最佳连续 %.1f 游戏小时" % float(status.best_hours),14,MUTED)
+	if status.get("first_storm_ready",false) and not status.get("first_storm_prepared",false):
+		var prepare := _button(mission_box,"准备完成 · 开始风暴预警",func(): _apply(sim.prepare_first_storm()); _update_hud(),Vector2(0,42))
+		UI.action(prepare)
+	var actions := _row(mission_box,6)
+	_button(actions,"定位当前问题",func(): hud.operator_dock.show_page("diagnosis"))
+	_button(actions,"等待下一事件",wait_for_next_event)
 
 func _number(value: float) -> String:
 	var whole := roundi(value)
@@ -1356,6 +1482,12 @@ func _ui_shape(node: Node) -> String:
 	return result
 
 func _sync_ui_values(live: Node, draft: Node) -> void:
+	if live.has_method("sync_from"):
+		live.sync_from(draft)
+		return
+	if live.get_meta("facility_editor", false):
+		live.refresh()
+		return
 	if live is Label:
 		live.text = draft.text
 		live.add_theme_color_override("font_color",draft.get_theme_color("font_color"))
@@ -1406,34 +1538,53 @@ func _populate_inspector() -> void:
 	_label(inspector_box,"设施档案  /  ASSET %02d" % int(b.id),11,TEAL)
 	_label(inspector_box,str(b.name),23)
 	var observation: Dictionary = sim.facility_observation(int(b.id))
+	var customer: bool=b.kind in ["home","factory","hospital"]
+	var service_active: bool=not customer or not sim.has_method("customer_service_active") or sim.customer_service_active(int(b.id))
 	var status: String = str(observation.status) if observation.trusted else "运行状态待核实"
-	if float(b.get("repair_remaining",0)) > 0:
+	if not service_active:
+		var city: Dictionary=sim.region.city_status(int(b.get("city_id",-1)))
+		status="潜在市场 · 尚未开通服务" if city.get("service_phase","prospect")=="prospect" else "接入建设中 · 尚未开通服务"
+	elif float(b.get("repair_remaining",0)) > 0:
 		status = "抢修中 · %.1f 小时" % b.repair_remaining
 	elif observation.trusted and float(observation.get("health",100)) <= 0:
 		status = "设备故障 · 等待维修"
-	elif b.kind in ["home","factory","hospital"] and not b.get("powered",false):
+	elif customer and not b.get("powered",false):
 		status = "供电中断 · 请检查连接"
 	_paragraph(inspector_box,"●  "+status,TEAL if observation.trusted else ORANGE,14)
 	_stat(inspector_box,"设备等级","L%d" % b.get("level",1))
 	var comm: Dictionary=sim.communication_status(int(b.id))
 	_stat(inspector_box,"设备遥测","可信" if observation.trusted else "未确认 / 过时",TEAL if observation.trusted else ORANGE)
 	_stat(inspector_box,"资产状况","%.0f%%" % observation.health if observation.trusted else "需遥测或现场检查")
-	if float(b.get("capacity",0))>0 and b.kind!="substation": _stat(inspector_box,"额定容量","%.1f MW" % b.capacity)
-	if b.kind in ["home","factory","hospital"]:
-		_stat(inspector_box,"当前需求","%.2f MW" % observation.demand if observation.trusted else "遥测未确认")
-		_stat(inspector_box,"实际供电","%.2f MW" % observation.served if observation.trusted else ("用户有供电反馈" if b.get("powered",false) else "用户报告停电"),TEAL)
-	else:
-		_stat(inspector_box,"实时出力","%.2f MW" % observation.output if observation.trusted else "遥测未确认",TEAL)
+	var generator: bool = b.kind in ["gas","solar","wind","hydro","dc_dynamo"] or sim.evolution.is_generator(str(b.kind))
+	var measurable: bool = (customer and service_active) or generator or sim.evolution.is_storage(str(b.kind))
+	if measurable:
+		var readout := FacilityReadout.new()
+		var snapshot: Dictionary = observation.duplicate(true)
+		snapshot.merge({"capacity":float(b.get("capacity",0)), "energy_capacity":float(b.get("energy_capacity",0)),
+			"generator":generator, "storage":sim.evolution.is_storage(str(b.kind))}, true)
+		if snapshot.storage and sim.has_method("storage_status"):
+			var storage: Dictionary=sim.storage_status(int(b.id))
+			snapshot.duration_hours=storage.get("duration_hours")
+			snapshot.reserve_soc=storage.get("reserve_soc",0.0)
+		readout.set_snapshot(snapshot)
+		inspector_box.add_child(readout)
+		if not observation.trusted: _label(inspector_box,"遥测未确认 · 斜纹表示未知读数",14,MUTED)
+		if b.kind in ["home","factory","hospital"] and not observation.trusted:
+			_label(inspector_box,"用户有供电反馈" if b.get("powered",false) else "用户报告停电",14,TEAL if b.get("powered",false) else ORANGE)
+	if customer and not service_active:
+		_label(inspector_box,"开通服务后才计入供电、收入和失供责任。",14,MUTED).autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+		_button(inspector_box,"规划与开通城市服务",func(): _open_center("planning"); planning_panel.tabs.current_tab=2; planning_panel.selected_city=int(b.get("city_id",-1)); planning_panel.refresh(),Vector2(0,38))
 	if b.kind in ["sensor","control","relay","soc"] and sim.feature_enabled("digital"):
 		_button(inspector_box,"⌁ 打开数字电网运行中心",func(): _open_center("network"); digital_panel._select_device(int(b.id)),Vector2(0,34))
 		_button(inspector_box,"⌁ 从这里铺设通信链路",func(): _set_tool("datalink"); connection_start=int(b.id); _sync_world(true),Vector2(0,34))
 	if sim.evolution.is_storage(str(b.kind)):
-		_stat(inspector_box,"储存能量","%.2f MWh" % observation.energy if observation.trusted else "遥测未确认",TEAL)
 		if sim.feature_enabled("market"): _button(inspector_box,"⇄ 储能策略与电价",func(): _open_center("market"); market_panel.tabs.current_tab=2,Vector2(0,32))
 	if sim.evolution.is_terminal(str(b.kind)):
 		_stat(inspector_box,"净交换功率","%+.2f MW" % observation.output if observation.trusted else "遥测未确认",TEAL)
 		if sim.feature_enabled("market"): _button(inspector_box,"⇄ 打开电力交易中心",func(): _open_center("market"),Vector2(0,32))
 	if sim.feature_enabled("research"): _button(inspector_box,"运行边界与精细控制  "+preferences.binding_label("planning"),func(): _open_center("planning"); planning_panel.select_facility(int(b.id)),Vector2(0,32))
+	if planning_panel.has_method("create_facility_editor") and (b.kind=="gas" or sim.evolution.is_generator(str(b.kind)) or sim.evolution.is_storage(str(b.kind))):
+		planning_panel.create_facility_editor(inspector_box,int(b.id))
 	var data: Dictionary = sim.catalog.get(b.kind,{})
 	_paragraph(inspector_box,str(data.get("description","")),MUTED,11)
 	var id: int = b.id
@@ -1578,8 +1729,9 @@ func _setup_modals() -> void:
 	UI.spacer(v).size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_label(v,"建造与接线  →  调度与储能  →  抢修与扩建",15,ORANGE)
 	_label(v,"左键交互 · 右键取消 · 空格暂停 · H 调度员手册",14,MUTED)
-	var begin := _button(v,"开始运营   →",func(): welcome.hide(); onboarding=true; onboarding_skipped=false; _update_onboarding(); _notify("用接线工具连接中央变电站与东部工业园区。"),Vector2(0,48))
+	var begin := _button(v,"开始运营   →",_begin_management,Vector2(0,48))
 	var campaign_actions := _row(v,10)
+	_button(campaign_actions,"自由沙盘",_begin_free_sandbox,Vector2(0,40))
 	_button(campaign_actions,"历史战役  ·  电力时代",func(): campaign_panel.open_directory(),Vector2(0,40))
 	_button(campaign_actions,"继续战役",func(): continue_campaign(),Vector2(0,40))
 	begin.add_theme_stylebox_override("normal",UI.style(Color("28584f"),6,TEAL,10))
@@ -1603,13 +1755,13 @@ func _setup_modals() -> void:
 	var prose := _paragraph(content,"",CREAM,16)
 	prose.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var manual := [
-		["建设与接线","从底部选择发电、输电、储能、城市或数字设施，展开建设目录。选择设施后点击空地放置；接线工具需要依次点击两座设施。所有电力设施都需要电气连接。\n\n右键取消当前工具；Esc 优先关闭展开面板。点击地图上的设施或线路，在右侧查看详情和操作。"],
-		["调度与储能","光伏随太阳变化，风机随天气变化。燃气提供可调备用，电池在富余时充电、短缺时放电。MW 表示当前功率，MWh 表示储存能量。\n\n左侧统计入口提供供需曲线、电网拓扑、清洁能源与储能数据。选中设施后，可从高级控制进入精细调度。"],
+		["建设与接线","点击底部建造，在托盘选择发电、输电、储能、城市或数字分类。选择设施后点击空地放置；接线工具依次点击两座设施。所有电力设施都需要电气连接。\n\n右键取消工具，Esc 优先关闭浮层。地图当前重点卡可直接进入接线或检查；电力线与通信线分别建设。"],
+		["调度与储能","光伏随太阳变化，风机随天气变化。燃气提供可调备用，储能在运行条件允许时吸收富余并支援缺口。MW 表示功率，MWh 表示能量；比较页用共同尺度显示功率、标称时长与损耗。\n\n选中设施可以直接编辑运行方案。保供、削峰和套利共用一个有效备用电量，单台可覆盖或恢复继承全网。提交后查看队列与真实回执；储能条图只画已观测电量和功率。"],
 		["故障与恢复","图层入口提供景观、功率、健康和通信视图。可靠观测或现场巡检决定你能看到哪些故障，未知读数不能作为确定信息。\n\n点击线路可以巡检定位、派现场开关队或抢修；远程控制需要可信路径。备用供电路径可以分散潮流，提高韧性。"],
-		["委托与运营","点击左上角当前委托查看完整目标、研究、需求响应和风暴演练。研究解锁能力后仍然需要真实通信路径。\n\n自然风暴首次在第1天14:00抵达，此后每30游戏小时再来；失供电按每MWh ¥60支付补偿。一般操作显示短暂回执，已知异常在右上角告警中保留。"],
+		["委托与运营","开始运营按接网、昼夜、清洁盈利、风暴恢复、新城服务五阶段推进。点击当前任务查看条件、持续时间和最近中断；首次风暴在确认准备完成后预警一小时。自由沙盘保留原四委托与自然风暴时刻。\n\n顶部常驻供电比例和缺口。经营工作台可推进15分钟、1小时或等待下一事件；等待遇执行拒绝、供电恶化或新告警时停止。失供按每MWh ¥60补偿。"],
 		["电价与交易","按 M 进入市场，配置购售电、零售电价、储能策略和12小时锁价合约。建造市场联络站并接线后才可以交付电力；合约用不完仍需付费。\n\n配置修改后点击应用；刷新、切页和报价不会结算。推进1小时可以观察真实账单。"],
 		["数字电网","按 N 管理独立通信网，按4进入地图通信布线。通信线与电力线分别建设。可信遥测帮助定位故障；失联时可先巡检或派现场队。\n\n安全页面选择明确的演练目标，事件页查看已检测事件与作业回执。隔离和修补需要时间；推进15分钟观察恢复。"],
-		["科技与区域","按 T 浏览六代科技，选中节点后查看前置、费用、时间与解锁设施。研发需要游戏时间，一次开展一个项目。\n\n设施页区分运行设置与建设目录。区域页可以开启八城沙盘、定位城市并设定长期目标。历史开局与恢复位于科技页的场景选项。"],
+		["科技与区域","按 T 进入发展规划，科技节点与依赖线显示能力、前置、费用和时间；数字化研究也可从同一工作台进入。研发和设备投运分别满足，研究不会替代真实配套。\n\n区域页先发现潜在市场，再规划接入、建设线路并明确开通服务。未开通城市不产生收入、失供补偿或人口衰退；开通后承担真实供电责任。历史开局与恢复位于场景选项。"],
 		["快捷键与存档","WASD／鼠标中键：平移\n滚轮：缩放　Q／E：旋转\n1：选择　2：接线　3：抢修　4：通信\n空格：暂停／继续　M／N／T：经营中心\nH：手册　F5：保存　F9：读取\n\n右上菜单也提供存读档入口。每90秒写入独立自动存档；经营中心暂停自动时间，返回后继续原有倍率。"]
 	]
 	var topic_buttons: Array[Button] = []
@@ -1624,7 +1776,7 @@ func _setup_modals() -> void:
 		topic_buttons.append(button)
 	topic_buttons[0].pressed.emit()
 	help_modal.hide()
-	end_modal = _modal(dialog_layer,650,410)
+	end_modal = _modal(dialog_layer,760,560)
 	end_modal.hide()
 	market_panel = MarketDesk.new()
 	dialog_layer.add_child(market_panel)
@@ -1649,9 +1801,23 @@ func _show_result(victory: bool) -> void:
 	var v := _column(panel,18)
 	_label(v,"青屿湾示范区  /  运营报告",14,MUTED)
 	_label(v,"运营委托完成" if victory else "运营资金告急",26,TEAL if victory else RED)
-	_paragraph(v,"你完成了建设、清洁转型、数字化和风暴恢复四项委托。青屿湾已成为智能电网示范区，接下来按 T 研究更多代际科技、开启八城区域沙盘，或设定长期运营目标。" if victory else "累计亏损已经超过应急额度。你可以继续调整电网与成本，也可以重新接手一座全新的海湾。",CREAM,14)
+	var managed: bool=sim.has_method("management_status") and sim.management_status().get("active",false)
+	var success_text := "你已完成接网、昼夜经营、清洁盈利、风暴恢复与新城服务。继续拓展城市，选择长期运营目标。" if managed else "建设、清洁转型、数字化与风暴恢复委托已完成。继续研究、扩张城市，或选择长期运营目标。"
+	_paragraph(v,success_text if victory else "累计亏损已经超过应急额度。可以继续调整电网与成本，也可以重新接手海湾。",CREAM,14)
 	_stat(v,"当前资金","¥ "+_number(sim.cash))
 	_stat(v,"电网规模","%d 设施 · %d 线路" % [sim.buildings.size(),sim.lines.size()])
+	var reliability: float=float(sim.total_served_mwh)/maxf(.001,float(sim.total_demand_mwh)) if sim.total_demand_mwh>0 else 1.0
+	UI.metric(v,"累计供电率",reliability*100,100,"%",TEAL)
+	var net := 0.0
+	for row in sim.market.ledger: net+=float(row.get("net",0))
+	_label(v,"累计运营净收益  %s¥%s" % ["+" if net>=0 else "−",_number(absf(net))],22,TEAL if net>=0 else RED)
+	if sim.has_method("operating_snapshot"):
+		var snapshots: Array=sim.operating_snapshot().get("history",[])
+		if snapshots.size()>1:
+			var trend := Chart.new()
+			trend.custom_minimum_size=Vector2(0,120)
+			v.add_child(trend)
+			for row in snapshots: trend.sample(float(row.demand),float(row.generation),float(row.hour),float(row.served))
 	UI.spacer(v).size_flags_vertical = Control.SIZE_EXPAND_FILL
 	var actions := _row(v,12)
 	var continue_button := _button(actions,"继续运营",func(): end_modal.hide(),Vector2(0,44))
@@ -1669,10 +1835,33 @@ func start_heritage_game(backup_path: String="user://before_heritage.json") -> v
 	_new_game(true)
 	_notify("已备份旧进度。历史开局从短距离直流供电开始，按 T 查看研究路线。")
 
+func _begin_management(discard_drafts: bool=false) -> void:
+	if not discard_drafts and _offer_discard_drafts(func(): _begin_management(true)): return
+	if sim.has_method("start_management_game"): sim.start_management_game(42)
+	else: sim.reset(42)
+	_rebuild_session(true)
+	onboarding=true
+	onboarding_skipped=false
+	_focus_working_area()
+	_update_hud()
+	_notify("先点亮工业园。经营系统随你的建设逐步开放。")
+
+func _begin_free_sandbox(discard_drafts: bool=false) -> void:
+	if not discard_drafts and _offer_discard_drafts(func(): _begin_free_sandbox(true)): return
+	sim.reset(42)
+	_rebuild_session(true)
+	onboarding=false
+	onboarding_skipped=true
+	_focus_working_area()
+	_notify("自由沙盘已开启，全部经营工具可用。")
+
 func _new_game(heritage: bool=false,discard_drafts: bool=false) -> void:
 	if not discard_drafts and _offer_discard_drafts(func(): _new_game(heritage,true)): return
+	var management: bool = sim.has_method("management_status") and sim.management_status().get("active",false)
 	if heritage:
 		sim.start_heritage()
+	elif management:
+		sim.start_management_game(42)
 	else:
 		sim.reset(42)
 	_rebuild_session(true)
@@ -1789,6 +1978,11 @@ func _update_onboarding() -> void:
 	if hud==null or hud.onboarding_panel==null: return
 	hud.onboarding_panel.visible=onboarding and not onboarding_skipped and not _campaign_active() and not _modal_open()
 	if not hud.onboarding_panel.visible: return
+	if sim.has_method("management_status"):
+		var status: Dictionary=sim.management_status()
+		if status.get("active",false) and int(status.get("stage",0))>0:
+			hud.onboarding_panel.hide()
+			return
 	var connected:=false
 	for line in sim.lines:
 		if (int(line.a)==2 and int(line.b)==6) or (int(line.a)==6 and int(line.b)==2): connected=true

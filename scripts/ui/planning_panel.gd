@@ -4,6 +4,9 @@ const Evolution = preload("res://scripts/sim/grid_evolution.gd")
 const RegionMap = preload("res://scripts/ui/region_map.gd")
 const Shell = preload("res://scripts/ui/management_shell.gd")
 const Drafts = preload("res://scripts/ui/config_drafts.gd")
+const UI = preload("res://scripts/ui/ui_kit.gd")
+const VisualChart = preload("res://scripts/ui/center_charts.gd")
+const FacilityEditor = preload("res://scripts/ui/facility_controls.gd")
 const TEAL := Color("77dbc0")
 const BLUE := Color("81c9ee")
 const CREAM := Color("f2eddb")
@@ -29,6 +32,7 @@ var enabled_input: CheckButton
 var dispatch_input: SpinBox
 var cooling_input: OptionButton
 var storage_input: OptionButton
+var storage_intent_input: OptionButton
 var reserve_input: SpinBox
 var peak_input: SpinBox
 var release_input: SpinBox
@@ -78,6 +82,17 @@ var comparison_label: Label
 var comparison_buttons: Dictionary = {}
 var comparison_grid: GridContainer
 var comparison_cards: Dictionary = {}
+var comparison_chart: Control
+var facility_chart: Control
+var technology_map: Control
+var digital_research_button: Button
+var research_progress: ProgressBar
+var city_chart: Control
+var city_service_buttons: Dictionary = {}
+var comparison_details_toggle: Button
+var comparison_choice: OptionButton
+var comparison_choose: Button
+var catalog_header_row: HBoxContainer
 
 func reset_session() -> void:
 	drafts.clear()
@@ -127,7 +142,7 @@ func select_facility(id: int) -> void:
 	refresh(true)
 
 func _build() -> void:
-	var body: VBoxContainer = Shell.build(self,"科技与区域规划","推进 1 小时",_advance,close)
+	var body: VBoxContainer = Shell.build(self,"发展 · 科技与区域规划","推进 1 小时",_advance,close)
 	var metrics: HBoxContainer = game._row(body,12)
 	funds_label = _text(metrics,"",CREAM,15)
 	funds_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -200,8 +215,14 @@ func _build_technologies() -> void:
 		button.tooltip_text = str(era.years)
 		era_buttons.append(button)
 	era_description = _text(body,"",MUTED,14)
+	technology_map=VisualChart.new()
+	technology_map.mode="technology"
+	technology_map.custom_minimum_size=Vector2(0,170)
+	technology_map.technology_selected.connect(_select_technology)
+	body.add_child(technology_map)
 	var work: HBoxContainer = game._row(body,16)
 	var technology_list: VBoxContainer = game._column(work,4)
+	technology_list.visible=false
 	technology_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	technology_list.size_flags_stretch_ratio = 0.85
 	for tech_id in Evolution.TECHNOLOGIES:
@@ -220,7 +241,12 @@ func _build_technologies() -> void:
 	technology_status = _text(detail,"",TEAL,14)
 	technology_action = game._button(detail,"开展研究",_research_selected,Vector2(0,40))
 	technology_detail = _text(detail,"",MUTED,15)
-	_text(detail,"一次开展一项研究。支付费用后，推进游戏时间完成研发。",MUTED,14)
+	research_progress=ProgressBar.new()
+	research_progress.custom_minimum_size=Vector2(0,14)
+	research_progress.show_percentage=false
+	detail.add_child(research_progress)
+	digital_research_button=game._button(detail,"智能化能力研究",func(): game._research(); refresh(),Vector2(0,38))
+	digital_research_button.tooltip_text="遥测、远控与自动恢复统一在能力研究中查看；实际运行仍需通信与新鲜观测。"
 	_select_era(0)
 
 func _select_era(index: int) -> void:
@@ -244,6 +270,7 @@ func _select_technology(id: String) -> void:
 	_refresh_technology_detail()
 
 func _refresh_technology_detail() -> void:
+	_update_technology_map()
 	if selected_technology.is_empty() or not _technology_allowed(selected_technology):
 		technology_title.text="本关技术"
 		technology_detail.text="选择本关开放的技术；其他能力将由后续章节介绍。"
@@ -294,6 +321,9 @@ func _build_facilities() -> void:
 	facility_picker.item_selected.connect(func(_index: int): selected_facility=facility_picker.get_selected_id(); _refresh_facility(true))
 	var operating := _card(operating_body)
 	facility_info = _text(operating,"",CREAM,14)
+	facility_chart=VisualChart.new()
+	facility_chart.custom_minimum_size=Vector2(0,156)
+	operating.add_child(facility_chart)
 	operating_grid = GridContainer.new()
 	operating_grid.columns = 2
 	operating_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -306,6 +336,8 @@ func _build_facilities() -> void:
 	controls.enabled = enabled_input
 	dispatch_input = _number_control(operating_grid,"出力上限 %",0,100,5)
 	cooling_input = _option_control(operating_grid,"冷却方式",["湿式 · 更强冷却，更多用水","干式 · 节水，但降低机组上限"])
+	storage_intent_input = _option_control(operating_grid,"运行方案",["继承全网默认","保供优先","高峰支援","低买高卖","旧版自定义"])
+	storage_intent_input.item_selected.connect(_storage_intent_selected)
 	storage_input = _option_control(operating_grid,"储能运行策略",["自动平衡","保留电量","定时削峰"])
 	reserve_input = _number_control(operating_grid,"保留荷电 %",0,90,5)
 	peak_input = _number_control(operating_grid,"削峰起点（持续4小时）",0,23,1)
@@ -334,6 +366,7 @@ func _build_facilities() -> void:
 	var catalog_body: VBoxContainer = game._column(facility_modes,12)
 	catalog_body.name = "建造目录"
 	var catalog_header: HBoxContainer = game._row(catalog_body,12)
+	catalog_header_row=catalog_header
 	_text(catalog_header,"选择设施后，返回地图放置。",MUTED,14)
 	catalog_category = OptionButton.new()
 	catalog_category.custom_minimum_size = Vector2(160,38)
@@ -346,9 +379,25 @@ func _build_facilities() -> void:
 	comparison_grid.size_flags_horizontal=Control.SIZE_EXPAND_FILL
 	comparison_grid.add_theme_constant_override("h_separation",12)
 	comparison_grid.add_theme_constant_override("v_separation",12)
+	comparison_chart=VisualChart.new()
+	comparison_chart.mode="comparison"
+	comparison_chart.custom_minimum_size=Vector2(0,414)
+	catalog_body.add_child(comparison_chart)
+	comparison_chart.hide()
+	var comparison_actions: HBoxContainer=game._row(catalog_body,8)
+	comparison_choice=OptionButton.new()
+	comparison_choice.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	comparison_choice.item_selected.connect(func(_index: int): _update_comparison_action())
+	comparison_actions.add_child(comparison_choice)
+	comparison_choose=game._button(comparison_actions,"选择并选址",func():
+		if comparison_choice.selected>=0: _choose_build(str(comparison_choice.get_item_metadata(comparison_choice.selected)))
+	,Vector2(140,38))
+	UI.action(comparison_choose)
+	comparison_actions.name="ComparisonActions"
+	comparison_details_toggle=game._button(catalog_body,"详细参数",func(): comparison_grid.visible=not comparison_grid.visible,Vector2(0,32))
 	catalog_body.add_child(comparison_grid)
 	comparison_grid.hide()
-	game._button(catalog_body,"清空设施对比",func(): comparison_kinds.clear(); _refresh_comparison(),Vector2(0,34))
+	game._button(catalog_body,"清空设施对比",func(): comparison_kinds.clear(); _refresh_comparison(),Vector2(0,32))
 	catalog_grid = GridContainer.new()
 	catalog_grid.columns = 2
 	catalog_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -393,7 +442,7 @@ func _adapt_columns() -> void:
 	if operating_grid!=null:
 		operating_grid.columns = 1 if narrow else 2
 	if comparison_grid!=null:
-		comparison_grid.columns=1 if narrow else 3
+		comparison_grid.columns=maxi(1,comparison_kinds.size())
 	if region_work!=null:
 		region_work.vertical = narrow
 
@@ -427,8 +476,13 @@ func _option_control(parent: Node, caption: String, options: Array) -> OptionBut
 func _build_region() -> void:
 	var body := _tab("区域沙盘与自定目标")
 	_text(body,"从一座海湾走向八城区域。供电、电价和污染影响城市成长。",MUTED,14)
-	expand_button = game._button(body,"开启 48 × 48 区域沙盘 · 接管七座周边城市",func(): _commit(game.sim.expand_region()),Vector2(0,40))
+	expand_button = game._button(body,"探索 48 × 48 区域 · 查看七座潜在城市",func(): _commit(game.sim.explore_region() if game.sim.has_method("explore_region") else game.sim.expand_region()),Vector2(0,40))
 	region_info = _text(body,"",TEAL,15)
+	city_chart=VisualChart.new()
+	city_chart.mode="cities"
+	city_chart.custom_minimum_size=Vector2(0,344)
+	city_chart.item_selected.connect(func(id: int): selected_city=id; _refresh_region())
+	body.add_child(city_chart)
 	region_work = BoxContainer.new()
 	region_work.add_theme_constant_override("separation",16)
 	body.add_child(region_work)
@@ -496,6 +550,13 @@ func refresh(sync_inputs: bool=false) -> void:
 		catalog_era_labels[kind].text=("本关技术 · "+str(game.sim.campaign.chapter().years)) if campaign_active else ("用电侧 · 随城市发展" if kind in ["home","factory","hospital"] else "%s · %s" % [Evolution.ERAS[era].name,Evolution.ERAS[era].years])
 	funds_label.text = "可用资金  ¥%s" % game._number(float(game.sim.cash))
 	var evolution: RefCounted = game.sim.evolution
+	digital_research_button.visible=game.sim.feature_enabled("digital")
+	digital_research_button.text=game._digital_research_caption()
+	digital_research_button.disabled=not game._digital_research_available()
+	research_progress.visible=not str(evolution.project).is_empty()
+	if research_progress.visible:
+		var project: Dictionary=Evolution.TECHNOLOGIES[evolution.project]
+		research_progress.value=100*(1-float(evolution.remaining_hours)/maxf(.001,float(project.hours)))
 	scenario_label.text = ("本关技术与设施 · "+str(game.sim.campaign.chapter().title)) if campaign_active else ("历史开局：按技术解锁设施" if bool(evolution.get("heritage")) else "现代试点：继承基础设施，探索技术路线")
 	project_label.text = "研发空闲 · 选择下一项技术"
 	if not str(evolution.project).is_empty():
@@ -547,6 +608,15 @@ func _refresh_facility(sync_inputs: bool) -> void:
 		return
 	var observation: Dictionary = game.sim.facility_observation(selected_facility)
 	facility_info.text = "%s · %s\n%s" % [building.name,game.sim.catalog[building.kind].description,observation.status]
+	var trusted: bool=bool(observation.get("trusted",false))
+	var capacity: float=float(building.get("capacity",0))
+	var rows: Array=[]
+	if capacity>0:
+		rows.append({"label":"额定容量","value":capacity,"max":capacity,"text":"%.1f MW" % capacity,"color":MUTED})
+		rows.append({"label":"当前可用","value":float(observation.get("available",0)) if observation.get("available")!=null else 0,"max":capacity,"text":"%.1f MW" % float(observation.get("available",0)) if trusted else "?","known":trusted})
+		rows.append({"label":"实际输出","value":float(observation.get("output",0)) if observation.get("output")!=null else 0,"max":capacity,"text":"%.1f MW" % float(observation.get("output",0)) if trusted else "?","known":trusted})
+	facility_chart.visible=not rows.is_empty()
+	facility_chart.set_snapshot({"rows":rows})
 	var execution := "设置先提交队列，执行完成后才生效。"
 	var pending_signature := ""
 	for pair in [[game.sim.digital.pending_commands,"远程"],[game.sim.digital.field_jobs,"现场"]]:
@@ -566,7 +636,7 @@ func _refresh_facility(sync_inputs: bool) -> void:
 	var storage: bool = game.sim.evolution.is_storage(str(building.kind))
 	var generator: bool = game.sim.evolution.is_generator(str(building.kind)) or building.kind=="gas"
 	if storage:
-		facility_guidance.text="保留电量减少即时可用出力；协同削峰需要可信通信，失联退回本地保供。"
+		facility_guidance.text="只改启停会保留现有运行方案；修改有效备用电量会建立此设施的独立覆盖。旧版自定义才使用旧版备用字段。"
 	elif building.kind in ["steam","coal","ccgt","nuclear","fusion"]:
 		facility_guidance.text="热机受到启停、爬坡和最低稳定负荷约束；核电还需要冷却、人才与实际厂用电。"
 	else:
@@ -574,6 +644,7 @@ func _refresh_facility(sync_inputs: bool) -> void:
 	controls["出力上限 %"].visible = generator
 	controls["冷却方式"].visible = building.kind=="cooling"
 	controls["储能运行策略"].visible = storage
+	controls["运行方案"].visible = storage
 	controls["保留荷电 %"].visible = storage
 	controls["削峰起点（持续4小时）"].visible = storage
 	controls["水电生态下泄 %"].visible = building.kind=="hydro"
@@ -588,8 +659,6 @@ func _refresh_facility(sync_inputs: bool) -> void:
 	boost_input.tooltip_text = "需要研究「先进热管理」；提高冷却容量，也增加耗电和维护费。"
 	protection_input.editable = game.sim.evolution.has_technology("protection")
 	protection_input.tooltip_text = "需要研究「继电保护协调」；低裕度更早跳闸，高裕度加速设备老化。"
-	reserve_input.editable = game.sim.evolution.has_technology("regional_planning")
-	reserve_input.tooltip_text = "需要研究「区域负荷规划」。"
 	cooling_input.set_item_disabled(1,not game.sim.evolution.has_technology("dry_cooling"))
 	cooling_input.tooltip_text = "干冷模式需要研究「空冷与节水运行」。"
 	storage_input.set_item_disabled(2,not game.sim.evolution.has_technology("smart_storage"))
@@ -599,11 +668,12 @@ func _refresh_facility(sync_inputs: bool) -> void:
 	var key := str(selected_facility)
 	var draft: Dictionary=drafts.retain(key,_effective_facility(building))
 	_write_facility(draft)
+	_refresh_storage_controls(storage)
 	_displayed_facility=selected_facility
 	var changes: Array[String]=[]
 	var names: Dictionary={"enabled":"运行许可","dispatch":"出力上限 %","cooling":"冷却方式","storage":"储能策略","reserve":"保留荷电 %","peak":"削峰小时","release":"生态下泄 %","protection":"保护裕度 %","flexible":"柔性档","boost":"强化冷却","method":"提交方式"}
 	for field in draft:
-		if draft[field]!=drafts.baselines[key][field]: changes.append("%s %s → %s" % [names[field],_facility_value(field,drafts.baselines[key][field]),_facility_value(field,draft[field])])
+		if draft[field]!=drafts.baselines[key][field]: changes.append("%s %s → %s" % [names.get(field,field),_facility_value(field,drafts.baselines[key][field]),_facility_value(field,draft[field])])
 	facility_draft.text="草案与生效值差异 · "+"；".join(changes) if not changes.is_empty() else "当前字段与生效设置一致。提交后需等待执行回执。"
 	if not pending_signature.is_empty(): facility_draft.text+="\n已有设置在途；新编辑仍需另行提交。"
 
@@ -612,23 +682,32 @@ func _facility_value(field: String, value: Variant) -> String:
 		"enabled","flexible","boost": return "开启" if bool(value) else "关闭"
 		"cooling": return "干式" if int(value)==1 else "湿式"
 		"storage": return ["自动平衡","保留电量","定时削峰"][int(value)]
+		"intent": return str({"supply":"保供优先","peak":"高峰支援","arbitrage":"低买高卖","inherit":"继承全网","legacy_custom":"旧版自定义"}.get(str(value),str(value)))
 		"method": return "远程" if int(value)==0 else "现场"
 	return "%.0f" % float(value)
 
 func _effective_facility(building: Dictionary) -> Dictionary:
-	return {"enabled":bool(building.get("enabled",true)),"dispatch":float(building.get("dispatch",1.0))*100,"cooling":1 if building.get("cooling_mode","wet")=="dry" else 0,"storage":maxi(0,["auto","hold","peak"].find(str(building.get("storage_mode","auto")))),"reserve":float(building.get("reserve_soc",0))*100,"peak":float(building.get("peak_hour",17)),"release":float(building.get("environmental_release",.25))*100,"protection":float(building.get("protection_margin",1.0))*100,"flexible":bool(building.get("flexible_mode",false)),"boost":bool(building.get("boost_cooling",false)),"method":0 if game.sim.feature_enabled("remote") and game.sim.digital.can_configure(game.sim,int(building.id)) else 1}
+	var result := {"enabled":bool(building.get("enabled",true)),"dispatch":float(building.get("dispatch",1.0))*100,"cooling":1 if building.get("cooling_mode","wet")=="dry" else 0,"storage":maxi(0,["auto","hold","peak"].find(str(building.get("storage_mode","auto")))),"reserve":float(building.get("reserve_soc",0))*100,"peak":float(building.get("peak_hour",17)),"release":float(building.get("environmental_release",.25))*100,"protection":float(building.get("protection_margin",1.0))*100,"flexible":bool(building.get("flexible_mode",false)),"boost":bool(building.get("boost_cooling",false)),"method":0 if game.sim.feature_enabled("remote") and game.sim.digital.can_configure(game.sim,int(building.id)) else 1,"intent":"legacy_custom"}
+	if game.sim.evolution.is_storage(str(building.kind)) and game.sim.has_method("storage_status"):
+		var status: Dictionary=game.sim.storage_status(int(building.id))
+		result.intent=("inherit" if status.get("inherited",false) else str(status.get("intent","legacy_custom"))) if not status.get("legacy_custom",true) else "legacy_custom"
+		# Legacy controls edit their raw field; the new intent controls edit the
+		# one effective reserve. Never feed a global effective value into reserve_soc.
+		if not status.get("legacy_custom",true): result.reserve=float(status.get("reserve_soc",float(building.get("reserve_soc",0))))*100
+	return result
 
 func _read_facility() -> Dictionary:
-	return {"enabled":enabled_input.button_pressed,"dispatch":dispatch_input.value,"cooling":cooling_input.selected,"storage":storage_input.selected,"reserve":reserve_input.value,"peak":peak_input.value,"release":release_input.value,"protection":protection_input.value,"flexible":flexible_input.button_pressed,"boost":boost_input.button_pressed,"method":facility_method.selected}
+	return {"enabled":enabled_input.button_pressed,"dispatch":dispatch_input.value,"cooling":cooling_input.selected,"storage":storage_input.selected,"reserve":reserve_input.value,"peak":peak_input.value,"release":release_input.value,"protection":protection_input.value,"flexible":flexible_input.button_pressed,"boost":boost_input.button_pressed,"method":facility_method.selected,"intent":["inherit","supply","peak","arbitrage","legacy_custom"][maxi(0,storage_intent_input.selected)]}
 
 func _write_facility(value: Dictionary) -> void:
 	enabled_input.set_pressed_no_signal(bool(value.enabled)); dispatch_input.value=float(value.dispatch)
 	cooling_input.select(int(value.cooling)); storage_input.select(int(value.storage)); reserve_input.value=float(value.reserve)
+	storage_intent_input.select(maxi(0,["inherit","supply","peak","arbitrage","legacy_custom"].find(str(value.get("intent","legacy_custom")))))
 	peak_input.value=float(value.peak); release_input.value=float(value.release); protection_input.value=float(value.protection)
 	flexible_input.set_pressed_no_signal(bool(value.flexible)); boost_input.set_pressed_no_signal(bool(value.boost)); facility_method.select(int(value.method))
 
 func _capture_facility() -> void:
-	if _displayed_facility<0: return
+	if _displayed_facility<0 or not visible: return
 	var building: Dictionary=game.sim.get_building(_displayed_facility)
 	if not building.is_empty(): drafts.retain(str(_displayed_facility),_effective_facility(building),_read_facility())
 
@@ -659,15 +738,35 @@ func _toggle_comparison(kind: String) -> void:
 func _refresh_comparison() -> void:
 	game._clear_children(comparison_grid)
 	comparison_cards.clear()
-	comparison_grid.visible=not comparison_kinds.is_empty()
+	comparison_grid.hide()
+	comparison_chart.visible=not comparison_kinds.is_empty()
+	comparison_choice.get_parent().visible=not comparison_kinds.is_empty()
+	comparison_details_toggle.visible=not comparison_kinds.is_empty()
+	catalog_header_row.visible=comparison_kinds.is_empty()
+	var selected_kind: String=str(comparison_choice.get_item_metadata(comparison_choice.selected)) if comparison_choice.selected>=0 else ""
+	comparison_choice.clear()
+	var items: Array=[]
+	var maximum_capacity:=1.0
+	var maximum_energy:=1.0
+	var maximum_time:=1.0
+	var maximum_price:=1.0
 	for kind in comparison_kinds:
 		var spec: Dictionary=game.sim.catalog[kind]
+		comparison_choice.add_item(str(spec.name))
+		comparison_choice.set_item_metadata(comparison_choice.item_count-1,kind)
+		if kind==selected_kind: comparison_choice.select(comparison_choice.item_count-1)
 		var card: VBoxContainer=_card(comparison_grid)
 		comparison_cards[kind]=card.get_parent()
-		_text(card,str(spec.name),CREAM,18)
+		_text(card,str(spec.name),CREAM,16)
 		var energy: float=float(spec.get("energy",0))
 		var capacity: float=float(spec.get("capacity",0))
 		var efficiency: float=float(Evolution.EFFICIENCY.get(kind,1.0))
+		var duration: float=energy/maxf(.001,capacity)
+		maximum_capacity=maxf(maximum_capacity,capacity)
+		maximum_energy=maxf(maximum_energy,energy)
+		maximum_time=maxf(maximum_time,duration)
+		maximum_price=maxf(maximum_price,float(spec.price))
+		items.append({"kind":kind,"name":spec.name,"price_text":game._number(float(spec.price)),"role":"山地选址" if kind=="pumped_storage" else ("跨日储能" if kind=="hydrogen" else "短时平衡" if energy>0 else "发电与供电"),"capacity":capacity,"capacity_text":"%.0f MW" % capacity,"energy":energy if energy>0 else null,"energy_text":"%.0f MWh" % energy,"duration":duration if energy>0 else null,"duration_text":"%.1f 小时" % duration,"efficiency":efficiency*efficiency*100 if energy>0 else null,"efficiency_text":"%.0f%%" % (efficiency*efficiency*100),"price":float(spec.price),"price_text_metric":"¥%s" % game._number(float(spec.price))})
 		var fields: Array=[
 			["建设费用","¥%s" % game._number(float(spec.price))],
 			["额定功率","%.0f MW" % capacity],
@@ -679,6 +778,7 @@ func _refresh_comparison() -> void:
 			["最低稳定负荷","%.0f%%" % (float(Evolution.MINIMUM.get(kind,0))*100) if Evolution.STARTUP.has(kind) else "不适用"]
 		]
 		for field in fields:
+			if field[0] not in ["储能容量","基础维护","往返效率"]: continue
 			var row: HBoxContainer=game._row(card,8)
 			var caption: Label=_text(row,str(field[0]),MUTED,14)
 			caption.custom_minimum_size.x=100
@@ -686,11 +786,12 @@ func _refresh_comparison() -> void:
 			var value: Label=_text(row,str(field[1]),TEAL,14)
 			value.horizontal_alignment=HORIZONTAL_ALIGNMENT_RIGHT
 			if field[0]=="基础维护": value.tooltip_text="一级设施基础维护，不含燃料、辅机购电、线路及通信等费用。"
-		_text(card,"选址与运行约束",CREAM,14)
-		_text(card,str(spec.description),MUTED,14)
-	comparison_label.text="已选 %d / 3 项 · 同序比较功率、容量、基础维护、往返效率与热机边界；额定参数不预测实际交付。" % comparison_kinds.size() if not comparison_kinds.is_empty() else "对比最多三种设施：加入对比后查看额定容量、成本与约束。"
+		card.get_parent().tooltip_text=str(spec.description)
+	comparison_chart.set_snapshot({"items":items,"metrics":[{"key":"capacity","label":"瞬时功率 · MW","max":maximum_capacity,"color":TEAL},{"key":"duration","label":"标称时长 · 小时","max":maximum_time,"color":ORANGE},{"key":"efficiency","label":"往返效率 · 阴影为损耗","max":100.0,"color":TEAL}]})
+	comparison_label.text="已选 %d / 3 项 · 共同标尺比较功率、标称时长、往返效率；额定参数不预测实际交付。" % comparison_kinds.size() if not comparison_kinds.is_empty() else "对比最多三种设施：选择后直接比较能力、时长和损耗。"
 	_adapt_columns()
 	for kind in comparison_buttons: comparison_buttons[kind].text="移出对比" if kind in comparison_kinds else "加入对比"
+	_update_comparison_action()
 
 func _refresh_region() -> void:
 	var region: RefCounted = game.sim.region
@@ -702,14 +803,20 @@ func _refresh_region() -> void:
 	region_map.visible = bool(region.active)
 	region_map.sim = game.sim
 	region_map.refresh()
+	city_chart.visible=bool(region.active)
+	var ranked: Array=region.cities.duplicate(true)
+	ranked.sort_custom(func(a: Dictionary,b: Dictionary): return float(a.get("service",0))<float(b.get("service",0)))
+	city_chart.set_snapshot({"cities":ranked})
+	city_chart.custom_minimum_size.y=maxf(64,float(ranked.size())*40+10)
 	region_info.text = "海湾教学区运行中。准备好备用容量和远距离输电资金，再开启区域。"
 	if region.active:
-		region_info.text = "%d 座城市 · 人口 %.0f · %d 城成长 / %d 城衰退 · 区域供电 %.0f%%" % [summary.city_count,summary.population,summary.growing,summary.declining,float(summary.average_service)*100]
+		region_info.text = "%d 座城市 · %d 已服务 / %d 建设中 / %d 潜在市场 · 已服务城市供电 %.0f%%" % [summary.city_count,summary.get("serving_count",summary.city_count),summary.get("planned_count",0),summary.get("prospect_count",0),float(summary.average_service)*100]
 	var signature := str(region.cities.map(func(city: Dictionary): return city.id))
 	if signature != _city_signature:
 		game._clear_children(city_box)
 		city_labels.clear()
 		city_cards.clear()
+		city_service_buttons.clear()
 		city_picker.clear()
 		for city in region.cities:
 			var card := _card(city_box)
@@ -717,6 +824,12 @@ func _refresh_region() -> void:
 			city_labels[city.id] = _text(card,"",CREAM,13)
 			var id: int = city.id
 			game._button(card,"定位城市",func(): close(); game.focus_city(id),Vector2(0,32))
+			city_service_buttons[id]=game._button(card,"规划接入",func():
+				var live: Dictionary=game.sim.region.city_status(id)
+				var phase: String=str(live.get("service_phase","active"))
+				if phase=="prospect": _commit(game.sim.plan_city(id))
+				elif phase=="planned": _commit(game.sim.start_city_service(id))
+			,Vector2(0,36))
 			city_picker.add_item(str(city.name)+" · "+str(city.specialization),id)
 		if not city_cards.has(selected_city) and city_picker.item_count>0:
 			selected_city = city_picker.get_item_id(0)
@@ -727,6 +840,9 @@ func _refresh_region() -> void:
 	for city in region.cities:
 		city_cards[city.id].visible = int(city.id)==selected_city
 		city_labels[city.id].text = "%s · %s\n人口 %.0f    供电 %.0f%%    繁荣 %.0f%%    每日人口 %+.1f%%\n%s" % [city.name,city.specialization,city.population,float(city.service)*100,float(city.prosperity)*100,float(city.growth)*100,city.trend]
+		var phase: String=str(city.get("service_phase","active"))
+		city_service_buttons[city.id].visible=phase!="active" and not game._campaign_active()
+		city_service_buttons[city.id].text="规划接入 · 尚未承担服务责任" if phase=="prospect" else "开通服务 · 开始计费与供电责任"
 	city_picker.visible = bool(region.active)
 	city_heading.visible = bool(region.active)
 	region_map.selected_id = selected_city
@@ -736,6 +852,8 @@ func _refresh_region() -> void:
 			challenge_labels[challenge.id].text = "%s · 进度 %.0f%%%s" % ["当前目标" if game.sim.sandbox_goal==challenge.id else "可选方向",float(challenge.progress)*100," · ✓ 已达成" if challenge.complete else ""]
 		if game.sim.sandbox_goal==challenge.id:
 			current_goal.text = "%s · %.0f%%%s\n%s" % [challenge.name,float(challenge.progress)*100," · ✓ 已达成" if challenge.complete else "",challenge.description]
+			current_goal.text+="\n最佳连续 %.1f 小时" % float(challenge.get("best_hours",0))
+			if not str(challenge.get("interruption","")).is_empty(): current_goal.text+="\n中断原因："+str(challenge.interruption)
 
 func _apply_facility() -> void:
 	var building: Dictionary = game.sim.get_building(selected_facility)
@@ -750,16 +868,74 @@ func _apply_facility() -> void:
 		settings.cooling_mode = "dry" if cooling_input.selected==1 else "wet"
 		settings.boost_cooling = boost_input.button_pressed
 	if game.sim.evolution.is_storage(str(building.kind)):
-		settings.storage_mode = ["auto","hold","peak"][storage_input.selected]
-		settings.reserve_soc = reserve_input.value/100
-		settings.peak_hour = peak_input.value
+		_storage_settings(building,settings)
 	if building.kind=="hydro":
 		settings.environmental_release = release_input.value/100
 	if building.kind=="substation":
 		settings.protection_margin = protection_input.value/100
 	if building.kind in ["steam","coal","ccgt"]:
 		settings.flexible_mode = flexible_input.button_pressed
-	_commit(game.sim.configure_facility(selected_facility,settings,"remote" if facility_method.selected==0 else "field"),false)
+	var result: Dictionary=game.sim.configure_facility(selected_facility,settings,"remote" if facility_method.selected==0 else "field")
+	if result.get("ok",false) and settings.has("storage_intent"):
+		# The visible draft must describe the actual submitted scope, including
+		# the deliberate inherit -> per-device override caused by reserve editing.
+		_capture_facility()
+		var submitted: Dictionary=drafts.retain(str(selected_facility),_effective_facility(building))
+		submitted.intent=str(settings.storage_intent)
+		drafts.retain(str(selected_facility),_effective_facility(building),submitted)
+		_write_facility(submitted)
+	_commit(result,false)
+
+func _storage_intent_selected(_index: int) -> void:
+	var building: Dictionary=game.sim.get_building(selected_facility)
+	if building.is_empty(): return
+	if storage_intent_input.selected==4:
+		# A deliberate transition to legacy imports the original legacy fields,
+		# rather than silently turning an inherited effective reserve into one.
+		reserve_input.value=float(building.get("reserve_soc",0))*100
+		storage_input.select(maxi(0,["auto","hold","peak"].find(str(building.get("storage_mode","auto")))))
+	_refresh_storage_controls(true)
+	_capture_facility()
+
+func _refresh_storage_controls(storage: bool) -> void:
+	if not storage: return
+	var legacy: bool=storage_intent_input.selected==4
+	controls["储能运行策略"].visible=legacy
+	controls["削峰起点（持续4小时）"].visible=legacy or storage_intent_input.selected==2
+	reserve_input.editable=not legacy or game.sim.evolution.has_technology("regional_planning")
+	reserve_input.tooltip_text="旧版设施备用需要区域负荷规划；与旧版市场备用分别约束。" if legacy else "当前有效备用电量。修改后将采用此设施的独立方案，停止继承全网备用。"
+	controls["保留荷电 %"].get_child(0).text="旧版设施备用 %" if legacy else "有效备用电量 %"
+	storage_intent_input.set_item_disabled(2,not game.sim.evolution.has_technology("smart_storage") or not game.sim.feature_enabled("storage_control"))
+	storage_intent_input.set_item_disabled(3,not game.sim.feature_enabled("market"))
+
+func _storage_settings(building: Dictionary, settings: Dictionary) -> void:
+	var effective: Dictionary=_effective_facility(building)
+	var intent: String=["inherit","supply","peak","arbitrage","legacy_custom"][maxi(0,storage_intent_input.selected)]
+	var reserve_changed: bool=not is_equal_approx(reserve_input.value,float(effective.reserve))
+	var mode_changed: bool=storage_input.selected!=int(effective.storage)
+	var peak_changed: bool=not is_equal_approx(peak_input.value,float(effective.peak))
+	if intent=="legacy_custom":
+		var explicit_transition: bool=str(effective.intent)!="legacy_custom"
+		if explicit_transition:
+			settings.storage_intent="legacy_custom"
+			settings.storage_mode=["auto","hold","peak"][storage_input.selected]
+			settings.reserve_soc=reserve_input.value/100.0
+		elif mode_changed or reserve_changed:
+			settings.storage_intent="legacy_custom"
+			if mode_changed: settings.storage_mode=["auto","hold","peak"][storage_input.selected]
+			if reserve_changed: settings.reserve_soc=reserve_input.value/100.0
+	else:
+		var raw_intent: String=str(building.get("storage_intent","inherit"))
+		if reserve_changed:
+			# An effective reserve edited while inheriting becomes an explicit
+			# override of the current resolved intent; keep unrelated old fields out.
+			var resolved: Dictionary=game.sim.storage_status(selected_facility)
+			settings.storage_intent=str(resolved.get("intent","supply")) if intent=="inherit" else intent
+			settings.storage_reserve=reserve_input.value/100.0
+		elif intent!=raw_intent:
+			settings.storage_intent=intent
+			if intent!="inherit": settings.storage_reserve=reserve_input.value/100.0
+	if peak_changed: settings.peak_hour=peak_input.value
 
 func _choose_build(kind: String) -> void:
 	close()
@@ -768,6 +944,9 @@ func _choose_build(kind: String) -> void:
 	game._set_tool("build")
 
 func _advance() -> void:
+	if game.has_method("advance_management"):
+		game.advance_management(1.0)
+		return
 	game.sim.step(1.0)
 	game._sync_world(true)
 	game._update_hud()
@@ -783,3 +962,29 @@ func _commit(result: Dictionary, sync_inputs: bool=true) -> void:
 	refresh(sync_inputs)
 	message_label.text = ("✓ " if result.get("ok",false) else "! ")+str(result.get("message","操作完成"))
 	message_label.add_theme_color_override("font_color",TEAL if result.get("ok",false) else ORANGE)
+
+func create_facility_editor(parent: Node, id: int) -> Control:
+	if visible: _capture_facility()
+	var editor:=FacilityEditor.new()
+	parent.add_child(editor)
+	editor.setup(self,id)
+	return editor
+
+func _update_technology_map() -> void:
+	if technology_map==null: return
+	var nodes: Array=[]
+	for id in Evolution.TECHNOLOGIES:
+		var spec: Dictionary=Evolution.TECHNOLOGIES[id]
+		if int(spec.era)!=selected_era or not _technology_allowed(id): continue
+		var previous: Array[String]=[]
+		for required in spec.requires:
+			if int(Evolution.TECHNOLOGIES[required].era)!=selected_era: previous.append(str(Evolution.TECHNOLOGIES[required].name))
+		nodes.append({"id":id,"name":spec.name,"requires":spec.requires,"previous":" / ".join(previous),"complete":id in game.sim.evolution.unlocked,"selected":id==selected_technology,"project":str(game.sim.evolution.project)==id})
+	technology_map.custom_minimum_size.y=maxf(96,ceilf(float(nodes.size())/3.0)*100+12)
+	technology_map.set_snapshot({"nodes":nodes})
+
+func _update_comparison_action() -> void:
+	if comparison_choice==null or comparison_choice.selected<0: return
+	var kind: String=str(comparison_choice.get_item_metadata(comparison_choice.selected))
+	comparison_choose.disabled=not game.sim.can_build(kind).ok or float(game.sim.cash)<float(game.sim.catalog[kind].price)
+	comparison_choose.text="选择并选址" if not comparison_choose.disabled else "需要解锁或资金"

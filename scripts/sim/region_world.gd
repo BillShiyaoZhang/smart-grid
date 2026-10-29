@@ -6,6 +6,7 @@ extends RefCounted
 const MAX_BUILDINGS := 128
 const MAX_EXPANSIONS := 3
 const CUSTOMER_KINDS := ["home", "factory", "hospital"]
+const SOURCE_KINDS := ["gas","dc_dynamo","steam","coal","hydro","ccgt","nuclear","fusion","wind","solar","intertie","hvdc"]
 const MAX_CITY_BUILDINGS := 512
 const ROLES := ["居住", "工业", "农业", "服务", "科研", "港口"]
 const SETTLEMENTS := [
@@ -71,7 +72,7 @@ func seed_from_scenario(sim: RefCounted, settlements: Array) -> Dictionary:
 	current_hour = float(sim.time_hours)
 	return _result(true, "已登记%d座情景城市，人口与供电反馈从现有街区开始。" % cities.size())
 
-func activate(sim: RefCounted) -> Dictionary:
+func activate(sim: RefCounted, prospective: bool=false) -> Dictionary:
 	if active:
 		return _result(false, "区域沙盘已经开启。")
 	if sim.buildings.size() > MAX_BUILDINGS - SETTLEMENTS.size() * 2:
@@ -91,9 +92,15 @@ func activate(sim: RefCounted) -> Dictionary:
 			pair.append(cell)
 		placements.append(pair)
 	cities.append(_new_city(0, "青屿湾", Vector2i(8, 7), "服务", 4600.0, []))
+	if prospective:
+		cities[0].role_effects=false
+		cities[0].initial_demand_scale=1.0+minf(0.6,float(int(sim.day)-1)*0.025)
 	for index in SETTLEMENTS.size():
 		var spec: Dictionary = SETTLEMENTS[index]
 		cities.append(_new_city(index+1, spec.name, spec.anchor, spec.role, float(spec.population), []))
+		if prospective:
+			cities[-1].service_phase="prospect"
+			cities[-1].trend="潜在市场 · 尚未承担服务责任"
 	active = true
 	# Register all pre-existing customers without changing their ownership.
 	for building in sim.buildings:
@@ -111,15 +118,51 @@ func activate(sim: RefCounted) -> Dictionary:
 			ids.append(int(building.id))
 		sim._add_line(ids[0], ids[1])
 	current_hour = float(sim.time_hours)
-	sim._log("区域沙盘开启：七座城镇等待接入。稳定、可负担的电力吸引人口与产业；长期失供会引发衰落。", "info")
-	return _result(true, "七座城镇已出现。先查看区域地图，再逐城规划馈线与电源。")
+	sim._log("区域地图已展开：七座潜在城市可逐城规划，开通服务前不计收入、失供或人口衰退。" if prospective else "区域沙盘开启：七座城镇等待接入。稳定、可负担的电力吸引人口与产业；长期失供会引发衰落。", "info")
+	return _result(true, "已发现七座潜在城市；先规划接入，再明确开通服务。" if prospective else "七座城镇已出现。先查看区域地图，再逐城规划馈线与电源。")
 
 func _new_city(id: int, city_name: String, anchor: Vector2i, role: String, people: float, ids: Array[int]) -> Dictionary:
 	return {"id": id, "name": city_name, "anchor": anchor, "population": people,
 		"base_population": people, "specialization": role, "prosperity": 0.55,
 		"service": 1.0 if id == 0 else 0.0, "growth": 0.0,
 		"trend": "等待接网" if id != 0 else "观察供电与电价", "building_ids": ids,
-		"expansions": 0, "role_pressure": 0.0, "unserved_hours": 0.0, "displaced_demand":0.0}
+		"expansions": 0, "role_pressure": 0.0, "unserved_hours": 0.0, "displaced_demand":0.0,"service_phase":"active"}
+
+func plan_city(id: int) -> Dictionary:
+	var city:=_city(id)
+	if city.is_empty() or city.get("service_phase","active")!="prospect": return _result(false,"请选择尚未规划的潜在城市。")
+	city.service_phase="planned"
+	city.trend="规划建设中 · 开通前不计供电责任"
+	return _result(true,"%s已纳入接入规划；规划不收费，设施与线路按实际建设付费。" % city.name)
+
+func start_service(sim: RefCounted, id: int) -> Dictionary:
+	var city:=_city(id)
+	if city.is_empty() or city.get("service_phase","active")!="planned": return _result(false,"请先选择城市并规划接入。")
+	# Commissioning checks the public built topology, never a hidden fault state.
+	var connected: Dictionary={}
+	var queue: Array=[]
+	for customer in city.building_ids: queue.append(int(customer)); connected[int(customer)]=true
+	while not queue.is_empty():
+		var current: int=int(queue.pop_back())
+		for line in sim.lines:
+			var other: int=int(line.b) if int(line.a)==current else (int(line.a) if int(line.b)==current else -1)
+			if other>=0 and not connected.has(other): connected[other]=true; queue.append(other)
+	var source:=false
+	for building in sim.buildings:
+		if connected.has(int(building.id)) and str(building.kind) in SOURCE_KINDS: source=true; break
+	if not source: return _result(false,"尚无通往电源或外网接口的已建线路；请先建设接入路径。")
+	city.service_phase="active"
+	city.service=0.0
+	city.trend="服务已开通 · 开始核对真实交付"
+	return _result(true,"%s服务已开通：从现在开始计入实际用电、收入及失供责任。" % city.name)
+
+func service_active(building: Dictionary) -> bool:
+	if not active or not building.has("city_id"): return true
+	var city:=_city(int(building.city_id))
+	return city.is_empty() or city.get("service_phase","active")=="active"
+
+func billable_building(building: Dictionary) -> bool:
+	return building.get("ownership","player")!="municipal" or service_active(building)
 
 func advance(sim: RefCounted, dt: float) -> void:
 	if not active or not is_finite(dt) or dt <= 0.0:
@@ -131,6 +174,9 @@ func advance(sim: RefCounted, dt: float) -> void:
 	if check_expansion:
 		expansion_clock = fmod(expansion_clock, 6.0)
 	for city in cities:
+		if city.get("service_phase","active")!="active":
+			city.growth=0.0
+			continue
 		# A removed urban block leaves displaced residents/businesses awaiting replacement.
 		var demand := float(city.get("displaced_demand",0.0)) * float(city.population) / float(city.base_population)
 		var served := 0.0
@@ -259,9 +305,10 @@ func demand_multiplier(building: Dictionary) -> float:
 	var city := city_status(int(building.city_id))
 	if city.is_empty():
 		return 1.0
-	var population_factor := float(city.population) / float(city.base_population)
+	if city.get("service_phase","active")!="active": return 0.0
+	var population_factor := float(city.population) / float(city.base_population)*float(city.get("initial_demand_scale",1.0))
 	var role_factor := 1.0
-	if building.kind == "factory":
+	if building.kind == "factory" and bool(city.get("role_effects",true)):
 		match str(city.specialization):
 			"工业": role_factor = 1.35 if current_hour >= 6.0 and current_hour < 22.0 else 1.1
 			"港口": role_factor = 1.2 if current_hour >= 18.0 or current_hour < 7.0 else 0.85
@@ -383,11 +430,16 @@ func summary() -> Dictionary:
 		people += float(city.population)
 		growing += 1 if float(city.growth) > 0.005 else 0
 		declining += 1 if float(city.growth) < -0.005 else 0
-		service += float(city.service)
+		if city.get("service_phase","active")=="active": service += float(city.service)
+	var served_cities:=0
+	var planned_cities:=0
+	for city in cities:
+		if city.get("service_phase","active")=="active": served_cities+=1
+		elif city.get("service_phase","")=="planned": planned_cities+=1
 	return {"active": active, "city_count": cities.size(), "population": people,
 		"growing": growing, "declining": declining,
-		"average_service": service / float(cities.size()) if not cities.is_empty() else 0.0,
-		"max_cities": 8}
+		"average_service": service / float(served_cities) if served_cities>0 else 0.0,
+		"serving_count":served_cities,"planned_count":planned_cities,"prospect_count":cities.size()-served_cities-planned_cities,"max_cities": 8}
 
 func snapshot() -> Dictionary:
 	var saved: Array = []
@@ -408,6 +460,7 @@ func load_snapshot(data: Variant) -> bool:
 		city.anchor = Vector2i(int(city.anchor[0]), int(city.anchor[1]))
 		city.expansions = int(city.expansions)
 		city.displaced_demand = float(city.get("displaced_demand",0.0))
+		city.service_phase = str(city.get("service_phase","active"))
 		var ids: Array[int] = []
 		for id in city.building_ids:
 			ids.append(int(id))
@@ -439,6 +492,9 @@ static func valid_snapshot(data: Variant, buildings_by_id: Dictionary = {}, stri
 		if not city is Dictionary or not _integer(city.get("id"), 0, 7) or city_ids.has(int(city.id)):
 			return false
 		city_ids[int(city.id)] = true
+		if city.has("service_phase") and city.service_phase not in ["prospect","planned","active"]: return false
+		if city.has("role_effects") and not city.role_effects is bool: return false
+		if city.has("initial_demand_scale") and not _number(city.initial_demand_scale,1.0,1.6): return false
 		if not city.get("name") is String or city.name.length() > 80 or city.name.is_empty() or city.get("specialization") not in ROLES:
 			return false
 		if not city.get("trend") is String or city.trend.length() > 160:

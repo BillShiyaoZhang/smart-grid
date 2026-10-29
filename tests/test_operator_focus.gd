@@ -123,6 +123,11 @@ func _test_directory_focus() -> void:
 
 func _test_modal_inputs() -> void:
 	game.market_panel.open()
+	if not game.market_panel.policy_mode.is_visible_in_tree():
+		game.market_panel.trade_advanced.grab_focus()
+		press(KEY_ENTER)
+		await settle()
+	check(game.market_panel.policy_mode.is_visible_in_tree(),"advanced price controls can be expanded with the actual keyboard")
 	var option: OptionButton=game.market_panel.policy_mode
 	option.grab_focus()
 	press(KEY_ENTER)

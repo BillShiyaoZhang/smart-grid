@@ -1,5 +1,6 @@
 extends RefCounted
 ## Shared visual language for the map and all planning windows.
+const Gauge = preload("res://scripts/ui/visual_gauge.gd")
 const SURFACE := Color("112b35")
 const RAISED := Color("1b3943")
 const TEAL := Color("77dbc0")
@@ -118,3 +119,24 @@ static func spacer(parent: Node) -> Control:
 	result.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	parent.add_child(result)
 	return result
+
+static func metric(parent: Node, caption: String, value: float, maximum: float, unit: String="", accent: Color=TEAL, known: bool=true, detail: String="") -> Control:
+	var gauge := Gauge.new()
+	gauge.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	parent.add_child(gauge)
+	gauge.configure(caption,value,maximum,unit,accent,known,detail)
+	return gauge
+
+static func badge(parent: Node, text: String, accent: Color=TEAL) -> Label:
+	var result := label(parent,text,14,accent)
+	result.add_theme_stylebox_override("normal",style(Color(accent,.09),5,Color(accent,.5),6))
+	return result
+
+static func card(parent: Node, accent: Color=Color("36515b"), padding: int=12) -> VBoxContainer:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel",style(SURFACE,8,accent,padding))
+	panel.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	parent.add_child(panel)
+	var body := column(panel,8)
+	body.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	return body

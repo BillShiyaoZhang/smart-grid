@@ -157,7 +157,7 @@ func _test_all_chapter_persistence() -> void:
 		var sim = _chapter(chapter)
 		sim.step(0.1)
 		var saved: Dictionary = sim.snapshot()
-		check(int(saved.schema_version) == 6 and Campaign.valid_snapshot(saved.campaign) and sim._valid_save(saved), "chapter %d produces a fully valid schema 6 save" % chapter)
+		check(int(saved.schema_version) == 7 and Campaign.valid_snapshot(saved.campaign) and sim._valid_save(saved), "chapter %d produces a fully valid schema 7 save" % chapter)
 		var path := "%s/chapter-%02d.json" % [QA_DIR, chapter]
 		check(sim.save_game(path).ok, "chapter %d writes a real isolated save" % chapter)
 		var restored = Sim.new()

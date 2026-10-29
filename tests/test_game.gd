@@ -47,8 +47,9 @@ func _run() -> void:
 	_check(game.build_buttons.size() >= 8, "construction palette exists")
 	game.sim.event_logged.connect(func(_entry: Dictionary): event_count += 1)
 	game.sim.changed.connect(func(): change_count += 1)
-	var begin := _find_button(game.welcome,"开始运营")
-	_check(begin != null, "welcome has an actionable start button")
+	_check(_find_button(game.welcome,"开始运营") != null, "welcome has a primary guided management entry")
+	var begin := _find_button(game.welcome,"自由沙盘")
+	_check(begin != null, "welcome preserves the free sandbox entry for the full simulation workflow")
 	if begin != null:
 		begin.pressed.emit()
 	_check(not game.welcome.visible and not game._modal_open(), "start button enters game")

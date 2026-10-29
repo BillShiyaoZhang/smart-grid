@@ -23,6 +23,13 @@ func text_in(parent: Node) -> String:
 	for child in parent.get_children(): result+=text_in(child)
 	return result
 
+func readout(parent: Node) -> Control:
+	if parent.get_script()==preload("res://scripts/ui/facility_readout.gd"): return parent
+	for child in parent.get_children():
+		var found := readout(child)
+		if found!=null: return found
+	return null
+
 func _run() -> void:
 	game=load("res://scenes/main.tscn").instantiate()
 	root.add_child(game)
@@ -43,7 +50,8 @@ func _run() -> void:
 	check(game.sim.elapsed_hours==before and is_equal_approx(float(game.sim.cash),cash-350.0),"field button pays travel cost without silently advancing time")
 	game.sim.step(.35); game._sync_world(true); game._update_inspector()
 	check(game.sim.get_building(1).dispatch==0.0 and game.sim.digital.field_jobs.is_empty(),"real field execution applies the setting after travel")
-	check("0.00 MW" in text_in(game.inspector_box),"onsite acknowledgement shows a post-execution measurement")
+	var measured := readout(game.inspector_box)
+	check(measured!=null and measured.snapshot.trusted and is_zero_approx(float(measured.snapshot.output)),"onsite acknowledgement updates the visual readout to the measured zero output")
 	game.sim.research(); game.sim.research(); game.sim.step(.05)
 	game._update_inspector()
 	remote=button(game.inspector_box,"远程100%")
