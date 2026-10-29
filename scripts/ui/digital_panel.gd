@@ -22,6 +22,7 @@ var circuit_picker: OptionButton
 var attack_kind: OptionButton
 var policy_picker: OptionButton
 var device_info: Label
+var commission_button: Button
 var link_info: Label
 var circuit_info: Label
 var security_info: Label
@@ -145,6 +146,10 @@ func _build_network() -> void:
 	device_picker = _select(details,"选择设备",276)
 	device_picker.item_selected.connect(func(_i: int): _select_device(_picked(device_picker)))
 	device_info = _text(details,"",CREAM,400,13)
+	commission_button = game._button(details,"投运数字网关",func():
+		var building: Dictionary=game.sim.get_building(selected_device)
+		_commit(game.sim.commission_device(selected_device,"root" if building.get("kind","") in ["sensor","control"] else "device"))
+	,Vector2(0,36))
 	game._button(details,"隔离所选设备",func(): _commit(game.sim.isolate_device(selected_device,true)),Vector2(0,34))
 	game._button(details,"解除设备隔离",func(): _commit(game.sim.isolate_device(selected_device,false)),Vector2(0,34))
 	_primary(game._button(details,"恢复 / 修补设备 · ¥900",func(): _commit(game.sim.recover_device(selected_device)),Vector2(0,34)))
@@ -207,7 +212,7 @@ func _build_security() -> void:
 	attack_kind = _select(drills,"演练类型",310)
 	for text in ["DoS · 通信服务中断","遥测欺骗 · 信息不可置信","非法控制 · 恶意断路"]:
 		attack_kind.add_item(text)
-	_text(drills,"演练会真实影响所选设备的通信与供电。请准备备用路径和恢复方案。",ORANGE)
+	_text(drills,"这是本地注入演练，可绕过外部接入路径；会真实影响已投运设备，请准备恢复方案。",ORANGE)
 	var drill_button: Button=game._button(drills,"启动网络安全演练",_drill,Vector2(0,40))
 	drill_button.add_theme_color_override("font_color",ORANGE)
 	var builds := _split(drills,3)
@@ -298,7 +303,13 @@ func refresh(sync_inputs: bool=false) -> void:
 	_update_quote()
 	var status: Dictionary=sim.communication_status(selected_device)
 	var latency: float=status.get("latency_ms",-1)
-	device_info.text="%s\n可信：%s  ·  时延 %s\nUPS 剩余 %.1f 小时\n%s" % ["调度路径可达" if status.get("reachable",false) else "与调度失联","已校验" if status.get("trusted",false) else "未校验","%.0f ms" % latency if latency>=0 else "不可达",status.get("ups_remaining",0),status.get("reason","")]
+	device_info.text="%s\n可信：%s  ·  时延 %s\nUPS 剩余 %.1f 小时\n%s" % [("调度根" if status.get("root",false) else "普通网关")+" · "+("路径可达" if status.get("reachable",false) else "与调度失联"),"已校验" if status.get("trusted",false) else "未校验","%.0f ms" % latency if latency>=0 else "不可达",status.get("ups_remaining",0),status.get("reason","")]
+	var building: Dictionary=sim.get_building(selected_device)
+	var root_capable: bool=building.get("kind","") in ["sensor","control"]
+	commission_button.text="调度根已投运" if status.get("root",false) else ("投运为调度根" if root_capable else ("数字网关已投运" if status.get("commissioned",false) else "投运数字网关"))
+	commission_button.disabled=(status.get("root",false) or (status.get("commissioned",false) and not root_capable)) or (sim.evolution.heritage and not sim.evolution.has_technology("scada"))
+	commission_button.visible=not status.get("commissioned",false) or (root_capable and not status.get("root",false))
+	commission_button.tooltip_text="智能终端和调度中心可显式设置为调度根；角色会随存档保存，不依赖建筑编号。"
 	if status.get("compromised",false):
 		device_info.text+="\n已确认安全异常：隔离并修补此设备。"
 	_refresh_link()
@@ -406,4 +417,6 @@ func _refresh_incidents() -> void:
 		_jobs_signature=job_signature
 	for job in jobs:
 		var kinds: Dictionary={"switch":"现场开关","patrol":"巡检定位"}
-		job_labels[job.id].text="执行中 · %s\nE%02d · 剩余 %.2f 小时\n%s" % [kinds.get(job.get("kind",""),"远程指令"),job.get("line_id",0),job.get("remaining",0),"现场作业不依赖通信路径。" if job.has("kind") else "指令到达时再次验证通信与控制权限。"]
+		var facility: bool=job.get("kind","")=="facility"
+		var field: bool=game.sim.digital.field_jobs.has(job)
+		job_labels[job.id].text="执行中 · %s\n%s%02d · 剩余 %.2f 小时\n%s" % [("现场设施设置" if field else "远程设施设置") if facility else kinds.get(job.get("kind",""),"远程指令"),"设施 " if facility else "E",job.get("building_id",0) if facility else job.get("line_id",0),job.get("remaining",0),"现场作业不依赖通信路径。" if field else "指令到达时再次验证通信与控制权限。"]

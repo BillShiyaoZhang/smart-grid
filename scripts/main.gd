@@ -328,11 +328,13 @@ func _sync_world(force: bool=false) -> void:
 		label.modulate = RED
 		if overlay == "power":
 			var status: Dictionary=sim.communication_status(int(b.id))
-			label.text = "%.1f MW" % (float(b.get("served",0)) if consumer else float(b.get("output",0))) if status.get("trusted",false) and sim.research_level>=1 else "无遥测"
+			var measurement: Dictionary = sim.facility_observation(int(b.id))
+			label.text = "%.1f MW" % float(measurement.served if consumer else measurement.output) if measurement.trusted else "无遥测"
 			label.modulate = ORANGE if consumer else TEAL
 		elif overlay == "health":
 			var status: Dictionary = sim.communication_status(int(b.id))
-			label.text = "%d%%" % b.get("health",100) if status.get("trusted",false) and sim.research_level>=1 else "?"
+			var measurement: Dictionary = sim.facility_observation(int(b.id))
+			label.text = "%d%%" % measurement.health if measurement.trusted else "?"
 			label.modulate = TEAL if status.get("trusted",false) else Color("95b0b6")
 		elif overlay == "comm":
 			var status: Dictionary = sim.communication_status(int(b.id))
@@ -942,10 +944,10 @@ func _update_hud() -> void:
 		reliability *= 100
 	hud_values.reliability.text = "%.1f%%" % reliability
 	hud_values.reliability.add_theme_color_override("font_color",TEAL if reliability>95 else ORANGE)
-	var renewable: float = float(t.get("renewable_share",0))
+	var renewable: float = float(t.get("renewable_supply_share",0))
 	if renewable <= 1.001:
 		renewable *= 100
-	hud_values.renewables.text = "清洁能源 %.0f%%" % renewable
+	hud_values.renewables.text = "可再生供电 %.0f%%" % renewable
 	hud_values.battery.text = "储能 %.1f MWh" % t.get("battery_mwh",0)
 	var balance: float = float(t.get("income",0))-float(t.get("expenses",0))
 	hud_values.balance.text = ("+ " if balance>=0 else "− ")+"¥"+_number(absf(balance))+"/h"
@@ -1067,6 +1069,9 @@ func _organize_inspector() -> void:
 	var demolition: Node
 	var dispatch_next := false
 	for child in inspector_box.get_children():
+		if child.get_meta("inspector_advanced",false):
+			advanced.append(child)
+			continue
 		if child is Button:
 			if "拆除" in child.text: demolition=child; continue
 			if "运行边界" in child.text or "策略" in child.text or "运行中心" in child.text or "交易中心" in child.text: advanced.append(child)
@@ -1099,49 +1104,58 @@ func _populate_inspector() -> void:
 	if b.is_empty(): return
 	_label(inspector_box,"设施档案  /  ASSET %02d" % int(b.id),11,TEAL)
 	_label(inspector_box,str(b.name),23)
-	var status := "正常运行" if b.get("online",true) else "已停机"
+	var observation: Dictionary = sim.facility_observation(int(b.id))
+	var status: String = str(observation.status) if observation.trusted else "运行状态待核实"
 	if float(b.get("repair_remaining",0)) > 0:
 		status = "抢修中 · %.1f 小时" % b.repair_remaining
-	elif float(b.get("health",100)) <= 0:
+	elif observation.trusted and float(observation.get("health",100)) <= 0:
 		status = "设备故障 · 等待维修"
 	elif b.kind in ["home","factory","hospital"] and not b.get("powered",false):
 		status = "供电中断 · 请检查连接"
-	_label(inspector_box,"●  "+status,12,TEAL if b.get("powered",false) else ORANGE)
+	_paragraph(inspector_box,"●  "+status,TEAL if observation.trusted else ORANGE,14)
 	_stat(inspector_box,"设备等级","L%d" % b.get("level",1))
 	var comm: Dictionary=sim.communication_status(int(b.id))
-	_stat(inspector_box,"设备遥测","可信" if comm.get("trusted",false) else "离线 / 未校验",TEAL if comm.get("trusted",false) else ORANGE)
-	_stat(inspector_box,"资产状况","%.0f%%" % b.get("health",100) if comm.get("trusted",false) and sim.research_level>=1 else "需遥测或现场检查")
-	_stat(inspector_box,"额定容量","%.1f MW" % b.get("capacity",0))
+	_stat(inspector_box,"设备遥测","可信" if observation.trusted else "未确认 / 过时",TEAL if observation.trusted else ORANGE)
+	_stat(inspector_box,"资产状况","%.0f%%" % observation.health if observation.trusted else "需遥测或现场检查")
+	if float(b.get("capacity",0))>0 and b.kind!="substation": _stat(inspector_box,"额定容量","%.1f MW" % b.capacity)
 	if b.kind in ["home","factory","hospital"]:
-		_stat(inspector_box,"当前需求","%.2f MW" % b.get("demand",0))
-		_stat(inspector_box,"实际供电","%.2f MW" % b.get("served",0) if comm.get("trusted",false) and sim.research_level>=1 else ("用户有供电反馈" if b.get("powered",false) else "用户报告停电"),TEAL)
+		_stat(inspector_box,"当前需求","%.2f MW" % observation.demand if observation.trusted else "遥测未确认")
+		_stat(inspector_box,"实际供电","%.2f MW" % observation.served if observation.trusted else ("用户有供电反馈" if b.get("powered",false) else "用户报告停电"),TEAL)
 	else:
-		_stat(inspector_box,"实时出力","%.2f MW" % b.get("output",0) if comm.get("trusted",false) and sim.research_level>=1 else "遥测未确认",TEAL)
+		_stat(inspector_box,"实时出力","%.2f MW" % observation.output if observation.trusted else "遥测未确认",TEAL)
 	if b.kind in ["sensor","control","relay","soc"]:
 		_button(inspector_box,"⌁ 打开数字电网运行中心",func(): digital_panel.open(); digital_panel._select_device(int(b.id)),Vector2(0,34))
 		_button(inspector_box,"⌁ 从这里铺设通信链路",func(): overlay="comm"; _set_tool("datalink"); connection_start=int(b.id); _sync_world(true),Vector2(0,34))
 	if sim.evolution.is_storage(str(b.kind)):
-		_stat(inspector_box,"储存能量","%.2f MWh" % b.get("energy",0),TEAL)
+		_stat(inspector_box,"储存能量","%.2f MWh" % observation.energy if observation.trusted else "遥测未确认",TEAL)
 		_button(inspector_box,"⇄ 储能策略与电价",func(): market_panel.open(); market_panel.tabs.current_tab=2,Vector2(0,32))
 	if sim.evolution.is_terminal(str(b.kind)):
-		_stat(inspector_box,"外网进口","%.2f MW" % b.get("import_mw",0),TEAL)
-		_stat(inspector_box,"富余外售","%.2f MW" % b.get("export_mw",0),ORANGE)
+		_stat(inspector_box,"净交换功率","%+.2f MW" % observation.output if observation.trusted else "遥测未确认",TEAL)
 		_button(inspector_box,"⇄ 打开电力交易中心",func(): market_panel.open(),Vector2(0,32))
 	_button(inspector_box,"运行边界与精细控制  T",func(): planning_panel.open(); planning_panel.select_facility(int(b.id)),Vector2(0,32))
 	var data: Dictionary = sim.catalog.get(b.kind,{})
 	_paragraph(inspector_box,str(data.get("description","")),MUTED,11)
 	var id: int = b.id
 	if b.kind == "gas":
-		_label(inspector_box,"燃气出力上限",11,ORANGE)
-		var dispatch := _row(inspector_box,6)
-		for setting in [0.0,0.5,1.0]:
-			var ratio: float = setting
-			_button(dispatch,"%d%%" % int(ratio*100),func(): _apply(sim.set_dispatch(id,ratio)),Vector2(71,30))
+		var control_group := _column(inspector_box,6)
+		control_group.set_meta("inspector_advanced",true)
+		_label(control_group,"燃气出力上限 · 远程需可信遥测",14,ORANGE)
+		for method in ["remote","field"]:
+			var dispatch := _row(control_group,6)
+			for setting in [0.0,0.5,1.0]:
+				var ratio: float = setting
+				var route: String = method
+				var caption := ("远程" if route=="remote" else "现场")+"%d%%" % int(ratio*100)
+				var button := _button(dispatch,caption,func(): _apply(sim.set_dispatch(id,ratio,route)); _update_inspector(),Vector2(90,34))
+				button.disabled = route=="remote" and not sim.digital.can_configure(sim,id)
+				button.tooltip_text = "远程命令到达后验证执行" if route=="remote" else "派现场设置队，¥350，约21游戏分钟后执行"
 	var actions := _row(inspector_box,8)
-	_button(actions,"↑ 升级 ¥"+_compact(float(data.get("price",0))*0.65*float(b.get("level",1))),func(): _apply(sim.upgrade(id)); _sync_world(true); _update_hud(); _update_inspector(),Vector2(113,34))
+	var upgrade_button := _button(actions,"↑ 升级 ¥"+_compact(float(data.get("price",0))*0.65*float(b.get("level",1))),func(): _apply(sim.upgrade(id)); _sync_world(true); _update_hud(); _update_inspector(),Vector2(113,34))
+	upgrade_button.disabled = not sim.evolution.upgrade_supported(str(b.kind)) or int(b.level)>=3
+	upgrade_button.tooltip_text = sim.evolution.upgrade_effect(str(b.kind)) if sim.evolution.upgrade_supported(str(b.kind)) else "此设施暂无能力升级；可维护设备或增容相连线路"
 	_button(actions,"＋ 维护 ¥1.2k",func(): _apply(sim.repair(id)); _update_inspector(),Vector2(113,34))
 	_button(inspector_box,"⌁  从这里连接线路",func(): _set_tool("line"); connection_start=id; _notify("再点击目标设施，完成接线"),Vector2(0,34))
-	_button(inspector_box,"拆除设施 · 回收部分资金",func(): _apply(sim.demolish(id)); selected_id=-1; _sync_world(true); _update_hud(); _update_inspector(),Vector2(0,30))
+	_button(inspector_box,"拆除设施 · 回收 ¥%s" % _number(float(b.get("refund_basis",data.get("price",0)))*0.35),func(): _apply(sim.demolish(id)); selected_id=-1; _sync_world(true); _update_hud(); _update_inspector(),Vector2(0,30))
 
 func _inspect_line() -> void:
 	var line: Dictionary=sim.get_line(selected_line)

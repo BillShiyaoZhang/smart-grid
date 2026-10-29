@@ -96,8 +96,9 @@ func _test_nuclear_auxiliaries() -> void:
 	sim._refresh()
 	sim.step(.1)
 	check(near(second.ramp_mw,0.0),"a second reactor cannot duplicate cooling and specialist capacity")
-	sim.configure_facility(2,{"enabled":false})
-	check(near(reactor.available,0.0),"losing cooling immediately removes deliverable reactor capacity")
+	check(sim.configure_facility(2,{"enabled":false},"field").ok and bool(sim.get_building(2).enabled),"cooling shutdown is an explicit queued field command")
+	sim.step(.35)
+	check(not bool(sim.get_building(2).enabled) and near(reactor.available,0.0),"executed cooling shutdown removes deliverable reactor capacity")
 
 func _test_reserve_and_shutdown() -> void:
 	var sim = blank()
@@ -105,17 +106,20 @@ func _test_reserve_and_shutdown() -> void:
 	sim._add_building("hospital",Vector2i(4,3))
 	sim._add_line(1,2)
 	storage.energy = 20.0
-	check(sim.configure_facility(1,{"reserve_soc":.05}).ok,"per-facility reserve is an explicit researched control")
+	check(sim._configure_facility_now(1,{"reserve_soc":.05}).ok,"energy fixture uses a validated researched per-facility reserve")
 	sim._solve(1.0)
 	check(near(storage.energy,18.0) and near(storage.output,1.3),"hydrogen energy and reserve constrain delivered power at 65 percent efficiency")
 	conservation(sim)
 	check(not sim.configure_facility(2,{"enabled":false}).ok,"disabling customers cannot erase shortage or operating goals")
 	var generator: Dictionary = sim._add_building("coal",Vector2i(5,3))
 	generator.ramp_mw = 40.0
+	generator.dispatch = 40.0/48.0
 	generator.startup_remaining = 0.0
 	sim._add_line(3,2)
 	sim._refresh()
-	check(sim.configure_facility(3,{"enabled":false}).ok and float(generator.available)>39.9,"requesting shutdown preserves the existing hot operating state")
+	check(sim.configure_facility(3,{"enabled":false},"field").ok and bool(generator.enabled) and float(generator.available)>39.9,"queuing shutdown preserves the existing hot operating state")
+	sim.step(.35)
+	check(not bool(generator.enabled) and near(float(generator.ramp_mw),40.0),"field travel completes before physical down-ramp begins")
 	sim.step(.5)
 	check(float(generator.ramp_mw)>37.4 and float(generator.ramp_mw)<37.6,"time advancement obeys the thermal down-ramp")
 
@@ -135,18 +139,26 @@ func _test_disabled_facilities() -> void:
 	var sim = Sim.new()
 	sim.connect_buildings(2,6)
 	check(float(sim.get_building(7).output)>0.0,"renewable operating fixture has real dispatch")
-	check(sim.configure_facility(7,{"enabled":false}).ok and near(float(sim.get_building(7).output),0.0),"turning off renewable equipment removes actual generation")
+	check(sim.configure_facility(7,{"enabled":false},"field").ok and float(sim.get_building(7).output)>0.0,"renewable shutdown waits for its field crew")
+	sim.step(.35)
+	check(near(float(sim.get_building(7).output),0.0),"executed renewable shutdown removes actual generation")
 	check(sim.communication_status(10).reachable,"digital root begins reachable")
-	check(sim.configure_facility(10,{"enabled":false}).ok and not sim.communication_status(10).reachable,"disabled digital equipment invalidates cached communication paths")
-	check(sim.configure_facility(10,{"enabled":true}).ok and sim.communication_status(10).reachable,"re-enabling digital equipment restores its real path")
+	check(sim.configure_facility(10,{"enabled":false},"field").ok and sim.communication_status(10).reachable,"digital shutdown is queued while the root is still reachable")
+	sim.step(.35)
+	check(not sim.communication_status(10).reachable,"disabled digital equipment invalidates cached communication paths")
+	check(sim.configure_facility(10,{"enabled":true},"field").ok and not sim.communication_status(10).reachable,"offline equipment can receive a real onsite recovery job")
+	sim.step(.35)
+	check(sim.communication_status(10).reachable,"executed onsite recovery restores the real digital path")
 
 func _test_real_storage_coordination() -> void:
 	var sim = Sim.new()
 	sim.connect_buildings(2,6)
-	sim.set_dispatch(1,0.0)
+	sim._configure_facility_now(1,{"dispatch":0.0})
 	sim.evolution.unlocked.assign(sim.evolution.TECHNOLOGIES.keys())
 	sim.research_level = 1
-	check(sim.configure_facility(9,{"storage_mode":"peak","peak_hour":17.0}).ok,"software config reaches the real storage device")
+	check(sim.configure_facility(9,{"storage_mode":"peak","peak_hour":17.0},"field").ok and sim.get_building(9).storage_mode=="auto","software configuration queues without instantly changing physical storage")
+	sim.step(.35)
+	check(sim.get_building(9).storage_mode=="peak","onsite software configuration reaches the real storage device")
 	check(sim.digital.control_reachable(sim,9) and near(float(sim.get_building(9).output),0.0),"trusted coordination reserves physical battery energy outside the peak window")
 	var communication_broken := false
 	for link in sim.digital.links:

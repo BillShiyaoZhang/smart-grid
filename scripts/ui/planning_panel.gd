@@ -20,6 +20,10 @@ var construction_buttons: Dictionary = {}
 var facility_picker: OptionButton
 var selected_facility := 1
 var facility_info: Label
+var facility_method: OptionButton
+var facility_execution: Label
+var facility_guidance: Label
+var _pending_facility := ""
 var enabled_input: CheckButton
 var dispatch_input: SpinBox
 var cooling_input: OptionButton
@@ -231,7 +235,7 @@ func _build_facilities() -> void:
 	body.add_child(facility_modes)
 	var operating_body: VBoxContainer = game._column(facility_modes,12)
 	operating_body.name = "设施运行"
-	_text(operating_body,"选择设施，检查配套与运行边界。参数调整后，点击应用生效。",MUTED,14)
+	_text(operating_body,"选择设施，检查额定配套与已知运行状态。参数调整后，选择远程或现场提交。",MUTED,14)
 	facility_picker = OptionButton.new()
 	facility_picker.custom_minimum_size = Vector2(0,38)
 	facility_picker.add_theme_font_size_override("font_size",15)
@@ -264,8 +268,16 @@ func _build_facilities() -> void:
 	boost_input.text = "强化冷却档 · 更多容量，更高辅机成本"
 	operating_grid.add_child(boost_input)
 	controls.boost = boost_input
+	facility_method = OptionButton.new()
+	facility_method.add_item("远程设置 · 需要可信路径、二级研究与新鲜遥测")
+	facility_method.add_item("现场设置 · ¥350 · 约21游戏分钟 · 占用一支队伍")
+	facility_method.custom_minimum_size = Vector2(0,38)
+	facility_method.fit_to_longest_item = false
+	facility_method.clip_text = true
+	operating.add_child(facility_method)
+	facility_execution = _text(operating,"",ORANGE,14)
 	game._button(operating,"应用设施设置",_apply_facility,Vector2(0,38))
-	_text(operating,"核电需要同岛冷却与人才配套。启动、爬坡与储能策略需要时间及运行条件。",ORANGE,14)
+	facility_guidance = _text(operating,"",ORANGE,14)
 	var catalog_body: VBoxContainer = game._column(facility_modes,12)
 	catalog_body.name = "建造目录"
 	var catalog_header: HBoxContainer = game._row(catalog_body,12)
@@ -434,9 +446,26 @@ func _refresh_facility(sync_inputs: bool) -> void:
 	if building.is_empty():
 		facility_info.text = "选择设施以查看运行边界。"
 		return
-	facility_info.text = "%s · %s\n%s" % [building.name,game.sim.catalog[building.kind].description,game.sim.facility_status(selected_facility)]
+	var observation: Dictionary = game.sim.facility_observation(selected_facility)
+	facility_info.text = "%s · %s\n%s" % [building.name,game.sim.catalog[building.kind].description,observation.status]
+	var execution := "设置先提交队列，执行完成后才生效。"
+	var pending_signature := ""
+	for pair in [[game.sim.digital.pending_commands,"远程"],[game.sim.digital.field_jobs,"现场"]]:
+		for command in pair[0]:
+			if command.get("kind","")=="facility" and int(command.get("building_id",-1))==selected_facility:
+				pending_signature="%d:%d" % [selected_facility,command.id]
+				execution="%s设置执行中 · 剩余 %.2f 游戏小时（设备尚未应用）" % [pair[1],command.remaining]
+	facility_execution.text=execution
+	if not sync_inputs and _pending_facility.begins_with(str(selected_facility)+":") and pending_signature.is_empty(): sync_inputs=true
+	_pending_facility=pending_signature
 	var storage: bool = game.sim.evolution.is_storage(str(building.kind))
 	var generator: bool = game.sim.evolution.is_generator(str(building.kind)) or building.kind=="gas"
+	if storage:
+		facility_guidance.text="保留电量减少即时可用出力；协同削峰需要可信通信，失联退回本地保供。"
+	elif building.kind in ["steam","coal","ccgt","nuclear","fusion"]:
+		facility_guidance.text="热机受到启停、爬坡和最低稳定负荷约束；核电还需要冷却、人才与实际厂用电。"
+	else:
+		facility_guidance.text="运行设置下发后，查看回执确认实际执行结果。"
 	controls["出力上限 %"].visible = generator
 	controls["冷却方式"].visible = building.kind=="cooling"
 	controls["储能运行策略"].visible = storage
@@ -462,6 +491,7 @@ func _refresh_facility(sync_inputs: bool) -> void:
 	peak_input.editable = game.sim.evolution.has_technology("smart_storage")
 	if not sync_inputs:
 		return
+	facility_method.select(0 if game.sim.digital.can_configure(game.sim,selected_facility) else 1)
 	enabled_input.button_pressed = bool(building.get("enabled",true))
 	dispatch_input.value = float(building.get("dispatch",1.0))*100
 	cooling_input.select(1 if building.get("cooling_mode","wet")=="dry" else 0)
@@ -537,7 +567,7 @@ func _apply_facility() -> void:
 		settings.protection_margin = protection_input.value/100
 	if building.kind in ["steam","coal","ccgt"]:
 		settings.flexible_mode = flexible_input.button_pressed
-	_commit(game.sim.configure_facility(selected_facility,settings))
+	_commit(game.sim.configure_facility(selected_facility,settings,"remote" if facility_method.selected==0 else "field"),false)
 
 func _choose_build(kind: String) -> void:
 	close()
@@ -552,11 +582,11 @@ func _advance() -> void:
 	refresh()
 	message_label.text = "已推进 1 游戏小时；研发、城市变化、机组启动和运营费用已结算。"
 
-func _commit(result: Dictionary) -> void:
+func _commit(result: Dictionary, sync_inputs: bool=true) -> void:
 	game._apply(result)
 	game._sync_world(true)
 	game._update_hud()
 	game._update_inspector()
-	refresh(true)
+	refresh(sync_inputs)
 	message_label.text = ("✓ " if result.get("ok",false) else "! ")+str(result.get("message","操作完成"))
 	message_label.add_theme_color_override("font_color",TEAL if result.get("ok",false) else ORANGE)

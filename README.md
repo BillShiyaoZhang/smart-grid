@@ -64,7 +64,7 @@ macOS 已安装 Godot 时，也可直接双击 `run_game.command` 启动游戏�
 | 保存游戏 | F5（运行中的游戏窗口） |
 | 读取游戏 | F9 |
 
-点击线路可发送远程开关命令、派现场队、巡检、增容或抢修。远程命令需要研究、两端可信通信和新鲜遥测，并在延迟后重新验证执行；失联时可现场处置。完成第二级研究后，可向可控负荷启动「需求响应」。手动存档和每 90 秒的自动存档使用独立文件，保存于 Godot 的 `user://` 数据目录。
+点击线路可发送远程开关命令、派现场队、巡检、增容或抢修。远程命令需要研究、两端可信通信和新鲜遥测，并在延迟后重新验证执行；失联时可现场处置。完成第二级研究后，可向可控负荷启动「需求响应」。设施出力、启停与策略设置也需要提交远程命令或派现场队（¥350、约21游戏分钟），排队后才执行。手动存档和每 90 秒的自动存档使用独立文件，保存于 Godot 的 `user://` 数据目录。
 
 市场规划窗口暂停自动时间，可用「推进 1 小时」观察真实结算。字段草案须点击应用才生效，报价刷新不会重复结算。所有价格和资金均为游戏模型。
 
@@ -129,3 +129,7 @@ macOS 已安装 Godot 时，也可直接双击 `run_game.command` 启动游戏�
 建筑、设施和地形由项目脚本创建，采用统一低多边形风格。封面 `assets/art/bay_cover.png` 使用内置 image_gen 工具原创生成，完整提示词见 `assets/art/PROMPT.md`。
 
 中文字体为 **Noto Sans CJK SC Regular**，来自 [Noto CJK 官方仓库](https://github.com/notofonts/noto-cjk)，按 [SIL Open Font License 1.1](https://github.com/notofonts/noto-cjk/blob/main/Sans/LICENSE) 分发；许可证随项目保存在 `assets/fonts/OFL.txt`。
+
+## 跨系统回归
+
+新增五套测试：`test_dispatch_integration.gd`（混合电源、光储来源、孤岛合约与重算守恒）、`test_thermal_integration.gd`（最低负荷、辅机保障、配套与检修）、`test_city_assets.gd`（人工建设归属、拆迁与退款、旧档迁移）、`test_digital_boundaries.gd`（设施命令、观测、历史数字化与攻击边界）、`test_facility_ui.gd`（真实按钮、排队回执与失败反馈）。均可按上面的 Godot `--headless --path . -s tests/<脚本>.gd` 命令运行。当前存档为 schema 5，兼容旧版本；详细验证见 [验证记录](docs/VALIDATION.md)。

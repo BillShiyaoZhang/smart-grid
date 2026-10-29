@@ -5,6 +5,8 @@ extends RefCounted
 
 const MAX_BUILDINGS := 128
 const MAX_EXPANSIONS := 3
+const CUSTOMER_KINDS := ["home", "factory", "hospital"]
+const MAX_CITY_BUILDINGS := 512
 const ROLES := ["居住", "工业", "农业", "服务", "科研", "港口"]
 const SETTLEMENTS := [
 	{"name": "松溪镇", "anchor": Vector2i(24, 6), "role": "农业", "population": 1200.0},
@@ -47,26 +49,26 @@ func activate(sim: RefCounted) -> Dictionary:
 			reserved[cell] = true
 			pair.append(cell)
 		placements.append(pair)
-	var starter_ids: Array[int] = []
+	cities.append(_new_city(0, "青屿湾", Vector2i(8, 7), "服务", 4600.0, []))
+	for index in SETTLEMENTS.size():
+		var spec: Dictionary = SETTLEMENTS[index]
+		cities.append(_new_city(index+1, spec.name, spec.anchor, spec.role, float(spec.population), []))
+	active = true
+	# Register all pre-existing customers without changing their ownership.
 	for building in sim.buildings:
-		if float(building.base_demand) > 0.0:
-			building.city_id = 0
-			starter_ids.append(int(building.id))
-	cities.append(_new_city(0, "青屿湾", Vector2i(8, 7), "服务", 4600.0, starter_ids))
+		register_building(sim, building, 0)
 	for index in SETTLEMENTS.size():
 		var spec: Dictionary = SETTLEMENTS[index]
 		var ids: Array[int] = []
 		for part in 2:
 			var kind := "home" if part == 0 else ("hospital" if spec.role == "服务" else "factory")
-			var building: Dictionary = sim._add_building(kind, placements[index][part])
-			building.city_id = index + 1
+			var building: Dictionary = sim._add_building(kind, placements[index][part], {
+				"city_id":index+1,"ownership":"municipal","invested_capital":0.0,"refund_basis":0.0,
+				"base_demand":1.4 if part==0 else (2.8 if spec.role in ["工业","港口"] else 1.8)})
 			building.name = "%s · %s" % [spec.name, "住宅" if part == 0 else str(spec.role) + "片区"]
-			# Seed towns begin small enough to extend an operating regional grid.
-			building.base_demand = 1.4 if part == 0 else (2.8 if spec.role in ["工业", "港口"] else 1.8)
+			register_building(sim, building, index+1)
 			ids.append(int(building.id))
 		sim._add_line(ids[0], ids[1])
-		cities.append(_new_city(index + 1, spec.name, spec.anchor, spec.role, float(spec.population), ids))
-	active = true
 	current_hour = float(sim.time_hours)
 	sim._log("区域沙盘开启：七座城镇等待接入。稳定、可负担的电力吸引人口与产业；长期失供会引发衰落。", "info")
 	return _result(true, "七座城镇已出现。先查看区域地图，再逐城规划馈线与电源。")
@@ -76,7 +78,7 @@ func _new_city(id: int, city_name: String, anchor: Vector2i, role: String, peopl
 		"base_population": people, "specialization": role, "prosperity": 0.55,
 		"service": 1.0 if id == 0 else 0.0, "growth": 0.0,
 		"trend": "等待接网" if id != 0 else "观察供电与电价", "building_ids": ids,
-		"expansions": 0, "role_pressure": 0.0, "unserved_hours": 0.0}
+		"expansions": 0, "role_pressure": 0.0, "unserved_hours": 0.0, "displaced_demand":0.0}
 
 func advance(sim: RefCounted, dt: float) -> void:
 	if not active or not is_finite(dt) or dt <= 0.0:
@@ -88,7 +90,8 @@ func advance(sim: RefCounted, dt: float) -> void:
 	if check_expansion:
 		expansion_clock = fmod(expansion_clock, 6.0)
 	for city in cities:
-		var demand := 0.0
+		# A removed urban block leaves displaced residents/businesses awaiting replacement.
+		var demand := float(city.get("displaced_demand",0.0)) * float(city.population) / float(city.base_population)
 		var served := 0.0
 		var surviving_ids: Array[int] = []
 		for id in city.building_ids:
@@ -174,25 +177,27 @@ func _expand(sim: RefCounted, city: Dictionary) -> void:
 		city.trend = "周边用地不足 · 城市暂缓扩张"
 		return
 	var kind := "home" if int(city.expansions) % 2 == 0 else "factory"
-	var building: Dictionary = sim._add_building(kind, cell)
-	building.city_id = int(city.id)
+	var building: Dictionary = sim._add_building(kind, cell, {
+		"city_id":int(city.id),"ownership":"municipal","invested_capital":0.0,"refund_basis":0.0,
+		"base_demand":0.7 if kind=="home" else 1.0})
 	building.name = "%s · 新%s" % [city.name, "街区" if kind == "home" else "产业园"]
-	building.base_demand = 0.7 if kind == "home" else 1.0
 	# The urban street feeder grows with its town, but long distance generation
 	# and regional capacity remain the player's responsibility.
-	if not city.building_ids.is_empty():
-		var nearest_id := int(city.building_ids[0])
-		var nearest_distance := INF
-		for id in city.building_ids:
-			var neighbor: Dictionary = sim.get_building(int(id))
-			if neighbor.is_empty():
-				continue
-			var distance := Vector2(neighbor.cell).distance_to(Vector2(cell))
-			if distance < nearest_distance:
-				nearest_distance = distance
-				nearest_id = int(id)
+	var nearest_id := -1
+	var nearest_distance := INF
+	for id in city.building_ids:
+		if int(id)==int(building.id):
+			continue
+		var neighbor: Dictionary = sim.get_building(int(id))
+		if neighbor.is_empty():
+			continue
+		var distance := Vector2(neighbor.cell).distance_to(Vector2(cell))
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest_id = int(id)
+	if nearest_id>=0:
 		sim._add_line(nearest_id, int(building.id))
-	city.building_ids.append(int(building.id))
+	register_building(sim, building, int(city.id))
 	city.expansions = int(city.expansions) + 1
 	sim._log("%s扩建了一个%s，电力需求与馈线负载增加。" % [city.name, "住宅街区" if kind == "home" else "产业园区"], "success")
 
@@ -208,7 +213,7 @@ func _free_cell(sim: RefCounted, anchor: Vector2i, reserved: Dictionary = {}) ->
 	return Vector2i(-1, -1)
 
 func demand_multiplier(building: Dictionary) -> float:
-	if not active or not building.has("city_id"):
+	if not active or building.get("kind","") not in CUSTOMER_KINDS or not building.has("city_id"):
 		return 1.0
 	var city := city_status(int(building.city_id))
 	if city.is_empty():
@@ -225,12 +230,100 @@ func demand_multiplier(building: Dictionary) -> float:
 			_: role_factor = 0.8
 	return clampf(population_factor * role_factor, 0.2, 4.5)
 
+func _city(id: int) -> Dictionary:
+	for city in cities:
+		if int(city.id)==id:
+			return city
+	return {}
+
+func register_building(_sim: RefCounted, building: Dictionary, city_id: int=-1) -> bool:
+	if not active or building.get("kind","") not in CUSTOMER_KINDS:
+		return false
+	var target := city_id if city_id>=0 else int(building.get("city_id",-1))
+	if _city(target).is_empty():
+		var nearest := INF
+		for city in cities:
+			var distance := Vector2(building.cell).distance_squared_to(Vector2(city.anchor))
+			if distance<nearest:
+				nearest = distance
+				target = int(city.id)
+	var destination := _city(target)
+	if destination.is_empty():
+		return false
+	var already_registered := false
+	for city in cities:
+		if int(building.id) in city.building_ids:
+			already_registered = true
+			if int(city.id)!=target:
+				city.building_ids.erase(int(building.id))
+	if int(building.id) not in destination.building_ids:
+		destination.building_ids.append(int(building.id))
+	building.city_id = target
+	if not already_registered:
+		destination.displaced_demand = maxf(0.0,float(destination.get("displaced_demand",0.0))-float(building.base_demand))
+	return true
+
+func unregister_building(sim: RefCounted, building: Dictionary, demolished: bool=false) -> void:
+	if not active or building.get("kind","") not in CUSTOMER_KINDS:
+		return
+	for city in cities:
+		if int(building.id) not in city.building_ids:
+			continue
+		if demolished:
+			var total_base := 0.0
+			for id in city.building_ids:
+				var item: Dictionary = sim.get_building(int(id))
+				total_base += float(item.get("base_demand",0.0))
+			var lost := maxf(0.0,float(building.base_demand))
+			var fraction := clampf(lost/maxf(0.001,total_base),0.0,1.0)
+			city.displaced_demand = float(city.get("displaced_demand",0.0))+lost
+			city.population = maxf(float(city.base_population)*0.35,float(city.population)*(1.0-0.1*fraction))
+			city.prosperity = maxf(0.0,float(city.prosperity)-0.1*fraction)
+			city.trend = "城区拆迁 · 居民与企业等待替代用地"
+		city.building_ids.erase(int(building.id))
+	building.erase("city_id")
+
+func reconcile_buildings(sim: RefCounted, legacy_assets: bool=false) -> void:
+	if not active:
+		return
+	# Older regions may include auxiliaries as city customers; remove those and
+	# attach formerly unregistered player-built customers using the same rule.
+	for city in cities:
+		city.displaced_demand = float(city.get("displaced_demand",0.0))
+		var kept: Array[int] = []
+		for id in city.building_ids:
+			var building: Dictionary = sim.get_building(int(id))
+			if building.is_empty():
+				continue
+			if building.get("kind","") not in CUSTOMER_KINDS:
+				building.erase("city_id")
+				continue
+			kept.append(int(id))
+		city.building_ids = kept
+	for building in sim.buildings:
+		if building.get("kind","") not in CUSTOMER_KINDS:
+			building.erase("city_id")
+			continue
+		if legacy_assets:
+			# Generated legacy blocks have an explicit city-name prefix. Ordinary
+			# player assets retain their catalog names and their invested basis.
+			var city := _city(int(building.get("city_id",-1)))
+			if not city.is_empty() and str(building.name).begins_with(str(city.name)+" · "):
+				var level: int = int(building.get("level",1))
+				var upgrades: float = float(sim.catalog[building.kind].price)*0.65*float(level*(level-1))/2.0
+				building.ownership = "municipal"
+				building.invested_capital = upgrades
+				building.refund_basis = upgrades
+		register_building(sim,building)
+
 func prune(sim: RefCounted) -> void:
-	# Call after demolition so a save taken before the next tick stays valid.
+	# External removals cannot create invalid references. Public demolition must
+	# call unregister_building before erasing to retain its city consequences.
 	for city in cities:
 		var ids: Array[int] = []
 		for id in city.building_ids:
-			if not sim.get_building(int(id)).is_empty():
+			var building: Dictionary = sim.get_building(int(id))
+			if not building.is_empty() and building.get("kind","") in CUSTOMER_KINDS:
 				ids.append(int(id))
 		city.building_ids = ids
 
@@ -273,6 +366,7 @@ func load_snapshot(data: Variant) -> bool:
 		city.id = int(city.id)
 		city.anchor = Vector2i(int(city.anchor[0]), int(city.anchor[1]))
 		city.expansions = int(city.expansions)
+		city.displaced_demand = float(city.get("displaced_demand",0.0))
 		var ids: Array[int] = []
 		for id in city.building_ids:
 			ids.append(int(id))
@@ -285,7 +379,7 @@ func load_snapshot(data: Variant) -> bool:
 	expansion_clock = float(data.expansion_clock)
 	return true
 
-static func valid_snapshot(data: Variant, buildings_by_id: Dictionary = {}) -> bool:
+static func valid_snapshot(data: Variant, buildings_by_id: Dictionary = {}, strict_registration: bool=false) -> bool:
 	if not data is Dictionary or not data.get("active") is bool or not data.get("cities") is Array:
 		return false
 	if data.cities.size() != (8 if data.active else 0):
@@ -313,7 +407,9 @@ static func valid_snapshot(data: Variant, buildings_by_id: Dictionary = {}) -> b
 				return false
 		if not _number(city.get("growth"), -0.04, 0.035) or not _number(city.get("role_pressure"), 0.0, 48.0) or not _number(city.get("unserved_hours"), 0.0, 1e12) or not _integer(city.get("expansions"), 0, MAX_EXPANSIONS):
 			return false
-		if not city.get("building_ids") is Array or city.building_ids.size() > MAX_BUILDINGS:
+		if city.has("displaced_demand") and not _number(city.displaced_demand,0.0,1e9):
+			return false
+		if not city.get("building_ids") is Array or city.building_ids.size() > MAX_CITY_BUILDINGS:
 			return false
 		for id in city.building_ids:
 			if not _integer(id, 1, 1000000000) or building_ids.has(int(id)):
@@ -321,7 +417,17 @@ static func valid_snapshot(data: Variant, buildings_by_id: Dictionary = {}) -> b
 			if not buildings_by_id.is_empty():
 				if not buildings_by_id.has(int(id)) or int(buildings_by_id[int(id)].get("city_id", -1)) != int(city.id):
 					return false
+				if strict_registration and buildings_by_id[int(id)].get("kind","") not in CUSTOMER_KINDS:
+					return false
 			building_ids[int(id)] = true
+	if strict_registration and not buildings_by_id.is_empty():
+		for id in buildings_by_id:
+			var building: Dictionary = buildings_by_id[id]
+			if data.active and building.get("kind","") in CUSTOMER_KINDS:
+				if not building_ids.has(int(id)) or not city_ids.has(int(building.get("city_id",-1))):
+					return false
+			elif building.has("city_id"):
+				return false
 	return true
 
 static func _number(value: Variant, minimum: float, maximum: float) -> bool:

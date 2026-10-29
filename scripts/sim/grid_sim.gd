@@ -7,11 +7,12 @@ extends RefCounted
 signal changed
 signal event_logged(entry: Dictionary)
 
-const SCHEMA_VERSION := 4
+const SCHEMA_VERSION := 5
 const MarketModel = preload("res://scripts/sim/power_market.gd")
 const DigitalModel = preload("res://scripts/sim/digital_grid.gd")
 const EvolutionModel = preload("res://scripts/sim/grid_evolution.gd")
 const RegionModel = preload("res://scripts/sim/region_world.gd")
+const Dispatch = preload("res://scripts/sim/grid_dispatch.gd")
 const NetworkSolver = preload("res://scripts/sim/dc_network_solver.gd")
 const GRID_SIZE := 48
 const LINE_COST := 1600.0
@@ -133,16 +134,19 @@ func reset(seed_value: int = 42) -> void:
 		{"id": "resilience", "title": "风暴之后", "description": "经历一次风暴，并修复所有故障线路、恢复至少 98% 的供电。", "reward": 25000, "done": false, "progress": 0.0}
 	]
 	digital.reset(self)
+	digital.commission_initial(self,10)
 	_update_weather()
 	_solve(0.0)
 	_log("欢迎来到海湾市。先连接东部工业园区，再建设更清洁、更可靠的电网。", "info")
 	changed.emit()
 
-func _add_building(kind: String, cell: Vector2i) -> Dictionary:
+func _add_building(kind: String, cell: Vector2i, metadata: Dictionary = {}) -> Dictionary:
 	var item: Dictionary = catalog[kind]
 	var building := {
 		"id": next_building_id, "kind": kind, "cell": cell,
 		"name": item.name, "capacity": float(item.capacity), "base_demand": float(item.demand),
+		"ownership": "player", "invested_capital": float(item.price), "refund_basis": float(item.price),
+		"renewable_energy_mwh": 0.0, "renewable_served_mw": 0.0,
 		"demand": 0.0, "output": 0.0, "served": 0.0, "powered": false,
 		"health": 100.0, "level": 1, "online": true, "soc": 0.5,
 		"energy": float(item.get("energy", 0.0)) * 0.5,
@@ -151,9 +155,11 @@ func _add_building(kind: String, cell: Vector2i) -> Dictionary:
 		"voltage": 1.0, "angle": 0.0, "available": 0.0,
 		"import_mw": 0.0, "export_mw": 0.0, "curtailment_mw": 0.0, "grid_capacity": 0.0
 	}
+	building.merge(metadata,true)
 	evolution.initialize_building(building)
 	next_building_id += 1
 	buildings.append(building)
+	region.register_building(self,building,int(building.get("city_id",-1)))
 	digital.sync_devices(self)
 	return building
 
@@ -238,17 +244,17 @@ func upgrade(id: int) -> Dictionary:
 	var building := get_building(id)
 	if building.is_empty():
 		return _fail("设施不存在。")
+	if not evolution.upgrade_supported(str(building.kind)):
+		return _fail("此设施暂无可购买的能力升级；可维护设备或增容相连线路。")
 	if int(building.level) >= 3:
 		return _fail("已达到最高等级。")
 	var price: float = catalog[building.kind].price * 0.65 * float(building.level)
 	if cash < price:
 		return _fail("资金不足。")
 	cash -= price
-	building.level += 1
-	building.capacity *= 1.5
-	building.base_demand *= 1.3
-	building.energy_capacity *= 1.5
-	building.health = 100.0
+	evolution.apply_upgrade(building)
+	building.invested_capital = float(building.get("invested_capital",catalog[building.kind].price))+price
+	building.refund_basis = float(building.get("refund_basis",catalog[building.kind].price))+price
 	_log("%s升级为 %d 级。" % [building.name, building.level], "success")
 	_refresh()
 	return _ok("设施已升级。", id)
@@ -297,7 +303,7 @@ func repair_line(id: int) -> Dictionary:
 	if float(line.repair_remaining) > 0:
 		return _fail("维修队正在作业。")
 	for job in digital.field_jobs:
-		if int(job.line_id) == id:
+		if int(job.get("line_id",-1)) == id:
 			return _fail("该线路已有现场任务。")
 	if active_repairs() >= 2:
 		return _fail("两支维修队都在作业，请稍候。")
@@ -345,24 +351,21 @@ func demolish(id: int) -> Dictionary:
 		return _fail("设施不存在。")
 	if float(building.repair_remaining) > 0:
 		return _fail("检修期间无法拆除。")
-	cash += float(catalog[building.kind].price) * 0.35
+	var refund: float = float(building.get("refund_basis",catalog[building.kind].price)) * 0.35
+	cash += refund
+	region.unregister_building(self,building,true)
 	for index in range(lines.size() - 1, -1, -1):
 		if int(lines[index].a) == id or int(lines[index].b) == id:
 			lines.remove_at(index)
 	buildings.erase(building)
 	digital.prune(self)
 	region.prune(self)
-	_log("已拆除%s，回收 35%% 基础建造费用。" % building.name, "info")
+	_log("已拆除%s，按玩家实际投资回收 ¥%.0f；市政免费资产不产生建造退款。" % [building.name,refund], "info")
 	_refresh()
 	return _ok("拆除完成。", id)
 
-func set_dispatch(id: int, ratio: float) -> Dictionary:
-	var building := get_building(id)
-	if building.is_empty() or building.kind != "gas":
-		return _fail("仅燃气机组可设置调度上限。")
-	building.dispatch = clampf(ratio, 0.0, 1.0)
-	_refresh()
-	return _ok("燃气出力上限已调整。", id)
+func set_dispatch(id: int, ratio: float, method: String="remote") -> Dictionary:
+	return configure_facility(id,{"dispatch":ratio},method)
 
 func research() -> Dictionary:
 	if evolution.heritage and not evolution.has_technology("scada"):
@@ -412,12 +415,20 @@ func research_technology(id: String) -> Dictionary:
 		_refresh()
 	return result
 
-func configure_facility(id: int, settings: Dictionary) -> Dictionary:
-	var result: Dictionary = evolution.configure(self, id, settings)
-	if result.ok:
-		_log(result.message, "info")
-		_refresh()
+func configure_facility(id: int, settings: Dictionary, method: String="remote") -> Dictionary:
+	return _digital_result(digital.queue_facility(self,id,settings,method))
+
+func _configure_facility_now(id: int, settings: Dictionary) -> Dictionary:
+	# Execution and deterministic fixtures only; player controls always queue.
+	var result: Dictionary = evolution.configure(self,id,settings)
+	if result.ok: _refresh()
 	return result
+
+func facility_observation(id: int) -> Dictionary:
+	return digital.facility_observation(self,id)
+
+func commission_device(id: int, role: String="device") -> Dictionary:
+	return _digital_result(digital.commission_device(self,id,role))
 
 func facility_status(id: int) -> String:
 	var building := get_building(id)
@@ -463,7 +474,7 @@ func _advance_sandbox_goal(dt: float) -> void:
 				if float(city.get("service", 0.0)) >= 0.98:
 					supplied += 1
 			qualifies = qualifies and region.active and supplied >= 4
-		"clean": qualifies = qualifies and float(totals.renewable_share) >= 0.7
+		"clean": qualifies = qualifies and float(totals.get("renewable_supply_share",0.0)) >= 0.7
 		"profitable": qualifies = qualifies and float(totals.income) > float(totals.expenses)
 	sandbox_goal_hours = sandbox_goal_hours + dt if qualifies else 0.0
 	var required := 12.0 if sandbox_goal == "clean" else 24.0
@@ -794,7 +805,7 @@ func _solve(dt: float) -> void:
 				building.demand *= 0.8
 	for line in lines:
 		line.flow = 0.0
-		if line.closed and not line.fault and float(line.repair_remaining) <= 0 and adjacency.has(int(line.a)) and adjacency.has(int(line.b)):
+		if electrical_line_active(line) and adjacency.has(int(line.a)) and adjacency.has(int(line.b)):
 			adjacency[int(line.a)].append(int(line.b))
 			adjacency[int(line.b)].append(int(line.a))
 	var visited := {}
@@ -830,9 +841,11 @@ func _solve(dt: float) -> void:
 	var curtailment := 0.0
 	var grid_capacity := 0.0
 	var retail_income := 0.0
+	var renewable_served := 0.0
 	for building in buildings:
 		demand += float(building.demand)
 		served += float(building.served)
+		renewable_served += float(building.get("renewable_served_mw",0.0))
 		var customer_rate := minf(145.0, float(market.state.retail_price)) if building.kind == "hospital" else float(market.state.retail_price)
 		retail_income += float(building.served) * customer_rate
 		if not evolution.is_terminal(str(building.kind)):
@@ -865,6 +878,7 @@ func _solve(dt: float) -> void:
 	for line in lines:
 		max_loading = maxf(max_loading, absf(float(line.flow)) / maxf(0.1, float(line.capacity)))
 	totals = {"demand": demand, "generation": generation, "served": served,
+		"renewable_supply_share": renewable_served / served if served > 0.000001 else 0.0,
 		"renewable_share": renewable / (generation + import_mw) if generation + import_mw > 0.0001 else 0.0,
 		"reliability": served / demand if demand > 0.0001 else 1.0,
 		"income": retail_income + export_income, "expenses": fuel_cost + maintenance_cost + outage_cost + import_cost + contract_cost,
@@ -891,151 +905,15 @@ func _terminal_capacity(building: Dictionary) -> float:
 	return evolution.terminal_capacity(self, building)
 
 func _solve_component(ids: Array[int], dt: float) -> float:
-	var generators: Array[Dictionary] = []
-	var renewable: Array[Dictionary] = []
-	var batteries: Array[Dictionary] = []
-	var loads: Array[Dictionary] = []
-	var terminals: Array[Dictionary] = []
-	var demand := 0.0
-	var renewable_available := 0.0
-	var gas_available := 0.0
-	var minimum_available := 0.0
-	var transfer_capacity := 0.0
-	for id in ids:
-		var building := get_building(id)
-		if float(building.demand) > 0.0:
-			loads.append(building)
-			if building.online:
-				demand += float(building.demand)
-		if not building.online:
-			continue
-		var derating := 0.7 + float(building.health) * 0.003
-		if building.kind == "solar" or building.kind == "wind":
-			if not bool(building.get("enabled", true)):
-				continue
-			var factor := solar_factor() if building.kind == "solar" else wind_factor()
-			building.available = float(building.capacity) * factor * derating
-			renewable_available += float(building.available)
-			renewable.append(building)
-		elif evolution.is_generator(str(building.kind)):
-			building.available = evolution.generator_available(self, building, ids)
-			gas_available += float(building.available)
-			minimum_available += minf(float(building.available), evolution.generator_minimum(building))
-			generators.append(building)
-		elif evolution.is_storage(str(building.kind)):
-			if bool(building.get("enabled", true)):
-				batteries.append(building)
-		elif evolution.is_terminal(str(building.kind)):
-			terminals.append(building)
-			transfer_capacity += float(building.grid_capacity)
-	var can_trade: bool = transfer_capacity > 0.000001 and market.state.market_mode != "off"
-	var trade_mode: bool = can_trade and market.state.market_mode == "trade"
-	var arbitrage: bool = market.state.storage_mode == "arbitrage"
-	var spot: float = market.state.spot_price
-	var can_buy: bool = can_trade and spot <= float(market.state.buy_limit)
-	var baseload_used := minf(minimum_available, demand)
-	var renew_used := minf(renewable_available, maxf(0.0, demand - baseload_used))
-	var deficit := maxf(0.0, demand - renew_used - baseload_used)
-	# A committed take-or-pay delivery has no extra marginal cost, but cannot
-	# be dispatched across a disconnected island or resold as free energy.
-	var contract_used := minf(deficit, minf(transfer_capacity, _contract_budget)) if can_trade else 0.0
-	_contract_budget -= contract_used
-	var imports := contract_used
-	deficit -= contract_used
-	var battery_discharge := 0.0
-	if arbitrage and spot >= float(market.state.discharge_price):
-		battery_discharge = _discharge_batteries(batteries, deficit, dt, true)
-		deficit -= battery_discharge
-	# Trading substitutes cheap off-peak purchases for fuel. Balanced mode
-	# keeps local generators and reserves ahead of emergency spot imports.
-	if trade_mode and can_buy and spot < 68.0:
-		var cheap_import := minf(deficit, maxf(0.0, transfer_capacity - imports))
-		imports += cheap_import
-		deficit -= cheap_import
-	var gas_extra := minf(maxf(0.0, gas_available - baseload_used), deficit)
-	var gas_used := baseload_used + gas_extra
-	deficit -= gas_extra
-	var battery_extra := _discharge_batteries(batteries, deficit, dt, arbitrage)
-	battery_discharge += battery_extra
-	deficit -= battery_extra
-	if can_buy:
-		var emergency_import := minf(deficit, maxf(0.0, transfer_capacity - imports))
-		imports += emergency_import
-		deficit -= emergency_import
-	var served_supply := maxf(0.0, demand - deficit)
-	var surplus := maxf(0.0, renewable_available - renew_used)
-	var charging := 0.0
-	if battery_discharge <= 0.000001:
-		var baseload_charge := _charge_batteries(batteries, maxf(0.0, minimum_available - gas_used), dt)
-		gas_used += baseload_charge
-		var renewable_charge := _charge_batteries(batteries, surplus, dt)
-		charging = baseload_charge + renewable_charge
-		renew_used += renewable_charge
-		surplus -= renewable_charge
-		if arbitrage and can_trade and deficit <= 0.000001 and spot <= float(market.state.charge_price):
-			var import_room := maxf(0.0, transfer_capacity - imports)
-			var contract_charge := minf(import_room, _contract_budget)
-			var allowed_charge := import_room if can_buy else contract_charge
-			var bought_charge := _charge_batteries(batteries, allowed_charge, dt)
-			var extra_contract := minf(contract_charge, bought_charge)
-			_contract_budget -= extra_contract
-			contract_used += extra_contract
-			imports += bought_charge
-			charging += bought_charge
-	var exports := 0.0
-	if trade_mode and imports <= 0.000001 and float(market.state.export_price) >= float(market.state.sell_floor):
-		var renewable_export := minf(surplus, transfer_capacity)
-		exports += renewable_export
-		renew_used += renewable_export
-		surplus -= renewable_export
-		if arbitrage and spot >= float(market.state.discharge_price) and charging <= 0.000001:
-			var battery_export := _discharge_batteries(batteries, maxf(0.0, transfer_capacity - exports), dt, true)
-			exports += battery_export
-			battery_discharge += battery_export
-		# Serve local customers first, then offer spare dispatchable capacity
-		# only when the export settlement price exceeds marginal fuel cost.
-		if float(market.state.export_price) > 68.0:
-			var gas_export := minf(maxf(0.0, gas_available - gas_used), maxf(0.0, transfer_capacity - exports))
-			gas_used += gas_export
-			exports += gas_export
-	for building in renewable:
-		building.output = float(building.available) * renew_used / renewable_available if renewable_available > 0.0 else 0.0
-		building.curtailment_mw = maxf(0.0, float(building.available) - float(building.output))
-	for building in generators:
-		var committed := minf(float(building.available), evolution.generator_minimum(building))
-		var base_share := committed * minf(1.0, gas_used / minimum_available) if minimum_available > 0.0 else 0.0
-		var flexible_share := (float(building.available) - committed) * maxf(0.0, gas_used - minimum_available) / (gas_available - minimum_available) if gas_available > minimum_available else 0.0
-		building.output = base_share + flexible_share
-		building.curtailment_mw = maxf(0.0, committed - float(building.output))
-	for terminal in terminals:
-		var share := float(terminal.grid_capacity) / transfer_capacity if transfer_capacity > 0.0 else 0.0
-		terminal.import_mw = imports * share
-		terminal.export_mw = exports * share
-		terminal.output = (imports - exports) * share
-	# Allocate critical load first, then proportional service for other users.
-	var remaining_supply := served_supply
-	for building in loads:
-		if building.kind == "hospital" and building.online:
-			building.served = minf(float(building.demand), remaining_supply)
-			remaining_supply -= float(building.served)
-	var normal_demand := 0.0
-	for building in loads:
-		if building.kind != "hospital" and building.online:
-			normal_demand += float(building.demand)
-	for building in loads:
-		if building.kind != "hospital" and building.online:
-			building.served = float(building.demand) * minf(1.0, remaining_supply / normal_demand) if normal_demand > 0.0 else 0.0
-	var energized := renew_used + gas_used + battery_discharge + imports > 0.001 or can_trade
-	for id in ids:
-		var building := get_building(id)
-		if evolution.is_storage(str(building.kind)) and dt > 0.0:
-			var efficiency: float = evolution.storage_efficiency(building)
-			building.energy = clampf(float(building.energy) + float(building.charging) * dt * efficiency - float(building.output) * dt / efficiency, 0.0, float(building.energy_capacity))
-		building.powered = energized and building.online and bool(building.get("enabled", true)) and (float(building.demand) <= 0.0 or float(building.served) >= float(building.demand) * 0.98)
-		building.soc = float(building.energy) / float(building.energy_capacity) if float(building.energy_capacity) > 0.0 else 0.0
-		building.voltage = 1.0 if building.powered else 0.0
-	_solve_dc(ids)
-	return contract_used
+	return Dispatch.solve_component(self,ids,dt)
+
+func electrical_line_active(line: Dictionary) -> bool:
+	if not line.closed or line.fault or float(line.get("repair_remaining",0.0))>0.0: return false
+	for id in [int(line.a),int(line.b)]:
+		var b := get_building(id)
+		if b.is_empty(): return false
+		if b.kind=="substation" and (not b.online or not b.get("enabled",true) or float(b.get("repair_remaining",0.0))>0.0): return false
+	return true
 
 func _discharge_batteries(batteries: Array[Dictionary], requested: float, dt: float, preserve_reserve: bool) -> float:
 	var total := 0.0
@@ -1087,7 +965,7 @@ func _solve_dc(ids: Array[int]) -> void:
 		var building := get_building(ids[i])
 		injections.append(float(building.output) - float(building.served) - float(building.charging))
 	for line in lines:
-		if not line.closed or line.fault or not index.has(int(line.a)) or not index.has(int(line.b)):
+		if not electrical_line_active(line) or not index.has(int(line.a)) or not index.has(int(line.b)):
 			continue
 		var a: int = index[int(line.a)]
 		var b: int = index[int(line.b)]
@@ -1113,7 +991,7 @@ func _solve_dc(ids: Array[int]) -> void:
 	for i in n:
 		get_building(ids[i + 1]).angle = angles[i]
 	for line in lines:
-		if line.closed and not line.fault and index.has(int(line.a)) and index.has(int(line.b)):
+		if electrical_line_active(line) and index.has(int(line.a)) and index.has(int(line.b)):
 			line.flow = (float(get_building(int(line.a)).angle) - float(get_building(int(line.b)).angle)) * _line_weight(line)
 
 func _line_weight(line: Dictionary) -> float:
@@ -1249,6 +1127,12 @@ func load_game(path: String = "user://bay_grid_save.json") -> Dictionary:
 			restored[key] = int(restored[key])
 		for key in ["import_mw", "export_mw", "curtailment_mw", "grid_capacity"]:
 			restored[key] = float(restored.get(key, 0.0))
+		var legacy_investment: float = float(catalog[restored.kind].price)*(1.0+0.65*float(int(restored.level)-1)*float(restored.level)/2.0)
+		for key in ["invested_capital","refund_basis"]:
+			restored[key] = legacy_investment if int(data.schema_version)<5 else float(restored[key])
+		restored.ownership = "player" if int(data.schema_version)<5 else str(restored.ownership)
+		restored.renewable_energy_mwh = 0.0 if int(data.schema_version)<5 else float(restored.renewable_energy_mwh)
+		restored.renewable_served_mw = 0.0
 		restored_evolution.initialize_building(restored)
 		buildings.append(restored)
 	lines.clear()
@@ -1302,6 +1186,8 @@ func load_game(path: String = "user://bay_grid_save.json") -> Dictionary:
 		log_entries.append(item.duplicate(true))
 	if int(data.schema_version) < 3:
 		digital.reset(self, true)
+	digital.migrate_roles(self)
+	region.reconcile_buildings(self,int(data.schema_version)<5)
 	_update_weather()
 	_solve(0.0)
 	_log("存档已载入，电网状态已恢复。", "info")
@@ -1368,6 +1254,11 @@ func _valid_save(data: Dictionary) -> bool:
 			return false
 		if float(building.energy) > float(building.energy_capacity) + 0.00001 or not building.get("online") is bool or not building.get("powered") is bool:
 			return false
+		if int(data.schema_version)>=5:
+			if building.get("ownership") not in ["player","municipal"]: return false
+			for key in ["invested_capital","refund_basis","renewable_energy_mwh"]:
+				if not _saved_number(building.get(key),0.0,1e12): return false
+			if float(building.renewable_energy_mwh)>float(building.energy)+0.000001 or float(building.refund_basis)>float(building.invested_capital)+0.000001: return false
 		if int(data.schema_version) >= 4 and not EvolutionModel.validate_building(building):
 			return false
 		if building.has("city_id") and not _saved_integer(building.city_id, 0, 7):
@@ -1421,7 +1312,7 @@ func _valid_save(data: Dictionary) -> bool:
 			if not entry.get(key) is String:
 				return false
 	if int(data.schema_version) >= 3:
-		if not DigitalModel.valid_snapshot(data.get("digital"), ids, line_ids, float(data.elapsed_hours)):
+		if not DigitalModel.valid_snapshot(data.get("digital"), ids, line_ids, float(data.elapsed_hours),int(data.schema_version)>=5):
 			return false
 		var crews: int = data.digital.field_jobs.size()
 		for item in data.buildings + data.lines + data.digital.links:
@@ -1430,7 +1321,7 @@ func _valid_save(data: Dictionary) -> bool:
 		if crews > 2:
 			return false
 	if int(data.schema_version) >= 4:
-		if not EvolutionModel.valid_snapshot(data.get("evolution")) or not RegionModel.valid_snapshot(data.get("region"), ids):
+		if not EvolutionModel.valid_snapshot(data.get("evolution")) or not RegionModel.valid_snapshot(data.get("region"), ids,int(data.schema_version)>=5):
 			return false
 		if data.get("sandbox_goal") not in ["", "regional", "clean", "profitable"] or not _saved_number(data.get("sandbox_goal_hours"), 0.0, 1e12):
 			return false

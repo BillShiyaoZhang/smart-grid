@@ -161,7 +161,10 @@ func _run() -> void:
 	game._handle_map_click(factory_cell)
 	var factory_id: int = game._building_at(factory_cell)
 	connect_assets(factory_id,2)
-	game.sim.set_dispatch(1,0.0)
+	check(game.sim.set_dispatch(1,0.0,"field").ok,"onsite generation settings are queued")
+	check(float(game.sim.get_building(1).dispatch)>0.0,"pending onsite setting does not immediately change generation")
+	game.sim.step(.35)
+	check(is_zero_approx(float(game.sim.get_building(1).dispatch)),"field arrival applies the generator setting before market delivery")
 	desk.open()
 	desk.policy_mode.select(1)
 	desk.buy_limit.value = 500

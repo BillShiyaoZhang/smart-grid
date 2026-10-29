@@ -53,7 +53,10 @@ func _test_independent_topology_and_cache() -> void:
 	sim.step(0.01)
 	check(sim.line_observation(1).visibility == "verified" and sim.has_telemetry(1), "researched telemetry uses a real trusted communication path")
 	var old_flow: float = sim.line_observation(1).flow
-	sim.toggle_communication(1)
+	var root_link := -1
+	for link in sim.digital.links:
+		if (int(link.a)==10 and int(link.b)==2) or (int(link.a)==2 and int(link.b)==10): root_link=int(link.id)
+	sim.toggle_communication(root_link)
 	check(not sim.communication_status(2).reachable and sim.get_building(2).powered, "cutting communications leaves electrical power independent")
 	check(sim.line_observation(1).visibility == "stale", "loss of communication turns a prior measurement into a stale cache")
 	sim.get_line(1).flow = 999.0
@@ -255,7 +258,7 @@ func _test_forecasts_and_persistence() -> void:
 	sim.step(9.2)
 	check(sim.digital.warning_sent and sim.digital.incidents.is_empty(), "scheduled network event receives an advance warning")
 	var path := "user://test_tidal-grid-digital-test.json"
-	check(sim.save_game(path).ok and Sim.SCHEMA_VERSION == 4, "expanded simulation uses schema four")
+	check(sim.save_game(path).ok and Sim.SCHEMA_VERSION == 5, "cross-system simulation uses schema five")
 	var loaded = Sim.new()
 	check(loaded.load_game(path).ok, "digital topology and cached state load")
 	check(JSON.stringify(sim.digital.snapshot(), "", true, true) == JSON.stringify(loaded.digital.snapshot(), "", true, true), "device timers, observations, forecasts and queues round-trip exactly")

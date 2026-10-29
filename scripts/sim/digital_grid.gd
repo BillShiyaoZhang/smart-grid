@@ -14,6 +14,7 @@ var pending_commands: Array[Dictionary] = []
 var field_jobs: Array[Dictionary] = []
 var devices: Dictionary = {}
 var observations: Dictionary = {}
+var facility_observations: Dictionary = {}
 var next_link_id := 1
 var next_incident_id := 1
 var next_command_id := 1
@@ -31,28 +32,80 @@ func reset(sim: RefCounted, migrate: bool = false) -> void:
 	field_jobs.clear()
 	devices.clear()
 	observations.clear()
+	facility_observations.clear()
+	_path_views.clear()
+	_path_signature = 0
 	next_link_id = 1
 	next_incident_id = 1
 	next_command_id = 1
 	next_attack_at = 10.0 if float(sim.elapsed_hours) < 10.0 else 10.0 + (floorf((float(sim.elapsed_hours) - 10.0) / 36.0) + 1.0) * 36.0
 	warning_sent = false
 	sync_devices(sim)
-	if migrate:
+	if migrate and not bool(sim.evolution.heritage):
 		for line in sim.lines:
-			_add_link(int(line.a), int(line.b), "fiber", sim)
-	else:
-		for pair in [[10, 2], [2, 1], [2, 3], [3, 4], [2, 5], [2, 7], [2, 9], [9, 8]]:
-			if not sim.get_building(pair[0]).is_empty() and not sim.get_building(pair[1]).is_empty():
-				_add_link(pair[0], pair[1], "fiber", sim)
+			_add_link(int(line.a),int(line.b),"fiber",sim)
+		# Schema 1/2 did not store roles; convert their known starter gateway once.
+		var legacy_root: Dictionary=sim.get_building(10)
+		if legacy_root.get("kind","")=="sensor": devices[10].role="root"
 	state.next_attack_in = maxf(0.0, next_attack_at - float(sim.elapsed_hours))
+
+func _digitization_available(sim: RefCounted) -> bool:
+	return not bool(sim.evolution.heritage) or sim.evolution.has_technology("scada")
 
 func sync_devices(sim: RefCounted) -> void:
 	for building in sim.buildings:
 		var id := int(building.id)
 		if not devices.has(id):
-			devices[id] = {"id": id, "ups_remaining": 2.0, "isolated": false,
-				"compromised": false, "intrusion": false, "dos_remaining": 0.0,
-				"spoof_remaining": 0.0, "recover_remaining": 0.0}
+			var commissioned := _digitization_available(sim)
+			devices[id] = {"id":id,"commissioned":commissioned,"role":"root" if building.kind=="control" else "device",
+				"ups_remaining":2.0 if commissioned else 0.0,"isolated":false,"compromised":false,"intrusion":false,
+				"dos_remaining":0.0,"spoof_remaining":0.0,"recover_remaining":0.0}
+
+func commission_initial(sim: RefCounted, root_id: int) -> void:
+	if not _digitization_available(sim): return
+	sync_devices(sim)
+	var root: Dictionary = sim.get_building(root_id)
+	if root.is_empty() or root.kind not in ["sensor","control"]: return
+	devices[root_id].role = "root"
+	devices[root_id].commissioned = true
+	for line in sim.lines:
+		var exists := false
+		for link in links:
+			if [int(link.a),int(link.b)]==[int(line.a),int(line.b)] or [int(link.a),int(link.b)]==[int(line.b),int(line.a)]: exists=true; break
+		if not exists: _add_link(int(line.a),int(line.b),"fiber",sim)
+
+func commission_device(sim: RefCounted, id: int, role: String="device") -> Dictionary:
+	var building: Dictionary=sim.get_building(id)
+	if building.is_empty(): return fail("设备不存在。")
+	if not _digitization_available(sim): return fail("历史开局需先研究 SCADA，再投运数字网关。")
+	if role not in ["device","root"] or (role=="root" and building.kind not in ["sensor","control"]): return fail("仅智能终端或调度中心可以设置为调度根。")
+	sync_devices(sim)
+	devices[id].commissioned=true
+	devices[id].role=role
+	devices[id].ups_remaining=2.0 if building.powered else 0.0
+	_path_signature=0
+	return ok("数字网关已投运，角色："+("调度根" if role=="root" else "普通设备"),id)
+
+func migrate_roles(sim: RefCounted) -> void:
+	# Legacy role is inferred once from scenario metadata and then persisted.
+	for building in sim.buildings:
+		var id:=int(building.id)
+		if not devices.has(id): continue
+		var device: Dictionary=devices[id]
+		if not device.has("commissioned"): device.commissioned=_digitization_available(sim)
+		if not device.has("role"):
+			device.role="root" if building.kind=="control" or (building.kind=="sensor" and id==10 and not bool(sim.evolution.heritage)) else "device"
+		if not _digitization_available(sim):
+			device.commissioned=false
+			device.ups_remaining=0.0
+	if not _digitization_available(sim):
+		links.clear()
+		pending_commands.clear()
+		incidents.clear()
+		observations.clear()
+		facility_observations.clear()
+	sync_devices(sim)
+	_path_signature=0
 
 func prune(sim: RefCounted) -> void:
 	for key in devices.keys():
@@ -66,8 +119,10 @@ func prune(sim: RefCounted) -> void:
 			observations.erase(key)
 	for queue in [pending_commands, field_jobs]:
 		for i in range(queue.size() - 1, -1, -1):
-			if sim.get_line(int(queue[i].line_id)).is_empty():
+			if (queue[i].get("kind","")=="facility" and sim.get_building(int(queue[i].get("building_id",-1))).is_empty()) or (queue[i].get("kind","")!="facility" and sim.get_line(int(queue[i].get("line_id",-1))).is_empty()):
 				queue.remove_at(i)
+	for key in facility_observations.keys():
+		if sim.get_building(int(key)).is_empty(): facility_observations.erase(key)
 	for i in range(incidents.size() - 1, -1, -1):
 		if sim.get_building(int(incidents[i].target_id)).is_empty():
 			incidents.remove_at(i)
@@ -79,7 +134,7 @@ func prune(sim: RefCounted) -> void:
 			incidents[i].affected_ids = affected
 
 func _device(id: int) -> Dictionary:
-	return devices.get(id, {"id": id, "ups_remaining": 2.0, "isolated": false,
+	return devices.get(id, {"id": id, "commissioned":false,"role":"device", "ups_remaining": 0.0, "isolated": false,
 		"compromised": false, "intrusion": false, "dos_remaining": 0.0,
 		"spoof_remaining": 0.0, "recover_remaining": 0.0})
 
@@ -88,16 +143,16 @@ func _operational(sim: RefCounted, id: int) -> bool:
 	if building.is_empty() or not building.online or not bool(building.get("enabled", true)):
 		return false
 	var device := _device(id)
-	return not device.isolated and float(device.dos_remaining) <= 0.0 and float(device.recover_remaining) <= 0.0 and (building.powered or float(device.ups_remaining) > 0.000001)
+	return bool(device.get("commissioned",false)) and not device.isolated and float(device.dos_remaining) <= 0.0 and float(device.recover_remaining) <= 0.0 and (building.powered or float(device.ups_remaining) > 0.000001)
 
 func _root(building: Dictionary) -> bool:
-	return building.kind == "control" or (building.kind == "sensor" and int(building.id) == 10)
+	return bool(_device(int(building.id)).get("commissioned",false)) and _device(int(building.id)).get("role","device")=="root"
 
 func _network_signature(sim: RefCounted) -> int:
 	var parts: Array = [state.policy]
 	for building in sim.buildings:
 		var device := _device(int(building.id))
-		parts.append([int(building.id), building.kind, bool(building.online), bool(building.get("enabled", true)), bool(building.powered),
+		parts.append([int(building.id), building.kind, device.get("role","device"), device.get("commissioned",false), bool(building.online), bool(building.get("enabled", true)), bool(building.powered),
 			float(device.ups_remaining) > 0.000001, bool(device.isolated), bool(device.compromised),
 			float(device.dos_remaining) > 0.0, float(device.recover_remaining) > 0.0])
 	for link in links:
@@ -166,7 +221,9 @@ func _status(sim: RefCounted, id: int, private: bool = true) -> Dictionary:
 	var reachable := _paths(sim, false)
 	var trusted := _paths(sim, true, not private)
 	var reason := "可信通信正常"
-	if device.isolated:
+	if not bool(device.get("commissioned",false)):
+		reason = "数字网关尚未投运"
+	elif device.isolated:
 		reason = "设备已隔离"
 	elif float(device.recover_remaining) > 0.0:
 		reason = "补丁恢复中"
@@ -183,7 +240,7 @@ func _status(sim: RefCounted, id: int, private: bool = true) -> Dictionary:
 	return {"reachable": reachable.has(id), "trusted": trusted.has(id),
 		"latency_ms": float(trusted.get(id, reachable.get(id, -1.0))),
 		"ups_remaining": float(device.ups_remaining), "isolated": bool(device.isolated),
-		"compromised": bool(device.compromised) if private else _known_compromised(id), "root": _root(building), "reason": reason}
+		"compromised": bool(device.compromised) if private else _known_compromised(id), "commissioned":bool(device.get("commissioned",false)),"role":str(device.get("role","device")), "root": _root(building), "reason": reason}
 
 func get_link(id: int) -> Dictionary:
 	for link in links:
@@ -200,6 +257,7 @@ func link_cost(sim: RefCounted, a: int, b: int, kind: String) -> float:
 	return 1000.0 + distance * 150.0 if kind == "fiber" else 650.0 + distance * 75.0
 
 func connect_link(sim: RefCounted, a: int, b: int, kind: String = "fiber") -> Dictionary:
+	if not _digitization_available(sim): return fail("历史开局需先研究 SCADA，再建设通信网络。")
 	var first: Dictionary = sim.get_building(a)
 	var second: Dictionary = sim.get_building(b)
 	if first.is_empty() or second.is_empty() or a == b or kind not in ["fiber", "wireless"]:
@@ -217,6 +275,8 @@ func connect_link(sim: RefCounted, a: int, b: int, kind: String = "fiber") -> Di
 	sim.cash -= cost
 	var link := _add_link(a, b, kind, sim)
 	sync_devices(sim)
+	for endpoint in [a,b]:
+		devices[endpoint].commissioned=true
 	return ok("独立通信链路已建成。", int(link.id))
 
 func _add_link(a: int, b: int, kind: String, sim: RefCounted) -> Dictionary:
@@ -315,6 +375,60 @@ func _sample(sim: RefCounted, line: Dictionary, source: String) -> void:
 		"closed": bool(line.closed), "flow": float(line.flow), "health": float(line.health),
 		"heat": float(line.heat), "sampled_at": float(sim.elapsed_hours), "source": source}
 
+func _sample_facility(sim: RefCounted, building: Dictionary, source: String) -> void:
+	facility_observations[int(building.id)]={"building_id":int(building.id),"source":source,"sampled_at":float(sim.elapsed_hours),
+		"available":float(building.get("available",0)),"output":float(building.get("output",0)),"served":float(building.get("served",0)),
+		"demand":float(building.get("demand",0)),"energy":float(building.get("energy",0)),"health":float(building.get("health",100)),
+		"fuel_cost":sim.evolution.fuel_cost(building),"status":sim.evolution.facility_status(sim,building)}
+
+func facility_observation(sim: RefCounted, id: int) -> Dictionary:
+	var result: Dictionary={"visibility":"unknown","trusted":false,"reason":"尚无可信设施遥测","age_hours":0.0,
+		"available":null,"output":null,"served":null,"demand":null,"energy":null,"health":null,"fuel_cost":null,
+		"status":"遥测未确认；额定参数和已提交设定可查看"}
+	if sim.get_building(id).is_empty(): result.reason="设施不存在"; return result
+	var sample: Dictionary=facility_observations.get(id,{})
+	if sample.is_empty(): return result
+	var age:=maxf(0.0,float(sim.elapsed_hours)-float(sample.sampled_at))
+	result.age_hours=age
+	var field_fresh: bool=sample.source=="field" and age<=1.0
+	var telemetry_fresh: bool=sample.source=="telemetry" and int(sim.research_level)>=1 and control_reachable(sim,id) and age<=0.20
+	if not field_fresh and not telemetry_fresh:
+		result.visibility="stale"
+		result.reason="通信中断或设施记录过时；当前状态不可用"
+		return result
+	result.visibility="field" if field_fresh else "verified"
+	result.trusted=true
+	result.reason="现场核实记录" if field_fresh else "可信设施遥测"
+	for key in ["available","output","served","demand","energy","health","fuel_cost","status"]: result[key]=sample[key]
+	return result
+
+func can_configure(sim: RefCounted, id: int) -> bool:
+	if int(sim.research_level)<2 or not control_reachable(sim,id): return false
+	return facility_observation(sim,id).visibility=="verified"
+
+func queue_facility(sim: RefCounted, id: int, settings: Dictionary, method: String="remote") -> Dictionary:
+	var building: Dictionary=sim.get_building(id)
+	if building.is_empty() or settings.is_empty() or method not in ["remote","field"]: return fail("请选择有效设施、运行设置和执行方式。")
+	var validation: Dictionary=sim.evolution.configure(sim,id,settings,false)
+	if not validation.ok: return validation
+	if float(building.get("repair_remaining",0))>0: return fail("设施正在检修，暂不能提交运行设置。")
+	for queue in [pending_commands,field_jobs]:
+		for existing in queue:
+			if existing.get("kind","")=="facility" and int(existing.get("building_id",-1))==id: return fail("该设施已有在途设置命令。")
+	var delay:=0.35
+	if method=="remote":
+		if not can_configure(sim,id): state.remote_rejected+=1; return fail("设施远程控制需要二级研究、可信低时延路径和新鲜设施遥测。")
+		delay=0.05+float(_status(sim,id).latency_ms)/6000.0
+	else:
+		if sim.active_repairs()>=2: return fail("两支现场队均已派出。")
+		if float(sim.cash)<350.0: return fail("现场设置需要 ¥350。")
+		sim.cash-=350.0
+	var command: Dictionary={"id":next_command_id,"kind":"facility","building_id":id,"settings":settings.duplicate(true),"remaining":delay}
+	next_command_id+=1
+	if method=="remote": pending_commands.append(command)
+	else: field_jobs.append(command)
+	return ok("远程设施命令已排队，到达时重新验证。" if method=="remote" else "现场设置队已派出，约21游戏分钟后执行。",int(command.id))
+
 func control_reachable(sim: RefCounted, id: int) -> bool:
 	var device_status := _status(sim, id)
 	return device_status.trusted and float(device_status.latency_ms) <= 250.0
@@ -337,7 +451,7 @@ func queue_remote(sim: RefCounted, line_id: int, target_closed: bool) -> Diction
 		state.remote_rejected += 1
 		return fail("远程控制需要两端可信、低时延通信和新鲜遥测。")
 	for command in pending_commands:
-		if int(command.line_id) == line_id:
+		if command.get("kind","")!="facility" and int(command.get("line_id",-1)) == line_id:
 			return fail("该线路已有在途远程命令。")
 	var line: Dictionary = sim.get_line(line_id)
 	if target_closed and (line.fault or float(line.repair_remaining) > 0.0):
@@ -357,7 +471,7 @@ func queue_field(sim: RefCounted, line_id: int, kind: String) -> Dictionary:
 	if sim.active_repairs() >= 2 or float(line.repair_remaining) > 0.0:
 		return fail("两支现场队已派出，或线路正在检修。")
 	for job in field_jobs:
-		if int(job.line_id) == line_id:
+		if job.get("kind","")!="facility" and int(job.get("line_id",-1)) == line_id:
 			return fail("该线路已有现场队任务。")
 	var cost := 500.0 if kind == "patrol" else 350.0
 	if float(sim.cash) < cost:
@@ -424,13 +538,13 @@ func operating_cost(sim: RefCounted) -> Dictionary:
 			security += 35.0
 	return {"communication": communication, "security": security, "total": communication + security}
 
-func trigger_attack(sim: RefCounted, kind: String = "dos", target_id: int = -1) -> Dictionary:
+func trigger_attack(sim: RefCounted, kind: String = "dos", target_id: int = -1, drill: bool=true) -> Dictionary:
 	if kind not in ["dos", "spoof", "intrusion"]:
 		return fail("未知演练类型。")
 	sync_devices(sim)
 	var candidates: Array[int] = []
 	for building in sim.buildings:
-		if _operational(sim, int(building.id)):
+		if _operational(sim, int(building.id)) and (drill or _paths(sim,false).has(int(building.id))):
 			candidates.append(int(building.id))
 	if target_id < 0:
 		if candidates.is_empty():
@@ -438,13 +552,15 @@ func trigger_attack(sim: RefCounted, kind: String = "dos", target_id: int = -1) 
 		target_id = candidates[sim.rng.randi_range(0, candidates.size() - 1)]
 	if sim.get_building(target_id).is_empty():
 		return fail("目标设备不存在。")
+	if not bool(_device(target_id).get("commissioned",false)): return fail("目标设备尚未投运数字网关。")
+	if not drill and not _paths(sim,false).has(target_id): return fail("设备没有暴露的通信路径。")
 	var score := int(state.security_level) + (2 if state.policy == "zero_trust" else (1 if state.policy == "segmented" else 0)) + (1 if _soc_online(sim) else 0)
 	var threshold := 3 if kind == "dos" else 2
 	var blocked: bool = not _operational(sim, target_id) or score >= threshold or (kind == "intrusion" and state.policy == "zero_trust")
 	var incident := {"id": next_incident_id, "kind": kind, "target_id": target_id,
 		"status": "blocked" if blocked else "active", "detected": blocked, "remaining": 0.4 if blocked else (1.5 if kind == "dos" else (2.0 if kind == "spoof" else 4.0)),
 		"detection_remaining": 0.6 / (1.0 + float(state.security_level) + (2.0 if _soc_online(sim) else 0.0)),
-		"description": "安全策略已拦截异常请求。" if blocked else "异常事件尚在分析中。", "affected_ids": [target_id]}
+		"description": "安全策略已拦截异常请求。" if blocked else "异常事件尚在分析中。", "drill":drill, "affected_ids": [target_id]}
 	next_incident_id += 1
 	incidents.append(incident)
 	if incidents.size() > 24:
@@ -469,7 +585,7 @@ func trigger_attack(sim: RefCounted, kind: String = "dos", target_id: int = -1) 
 				line.trip_reason = "控制异常"
 				sim._log("部分区域报告供电异常，控制状态需要现场或可信遥测核实。", "warning")
 				break
-	return ok("抽象网络事件已启动，监测与核实需要游戏时间。", int(incident.id))
+	return ok(("本地注入演练" if drill else "外部网络事件")+"已启动，监测与核实需要游戏时间。", int(incident.id))
 
 func _apply_compromise(id: int, kind: String) -> void:
 	var device: Dictionary = devices[id]
@@ -502,7 +618,7 @@ func advance(sim: RefCounted, dt: float) -> void:
 	prune(sim)
 	for building in sim.buildings:
 		var device: Dictionary = devices[int(building.id)]
-		device.ups_remaining = 2.0 if building.powered else maxf(0.0, float(device.ups_remaining) - dt)
+		device.ups_remaining = (2.0 if building.powered else maxf(0.0, float(device.ups_remaining) - dt)) if bool(device.get("commissioned",false)) else 0.0
 		for key in ["dos_remaining", "spoof_remaining", "recover_remaining"]:
 			var previous: float = device[key]
 			device[key] = maxf(0.0, previous - dt)
@@ -524,12 +640,12 @@ func advance(sim: RefCounted, dt: float) -> void:
 				link.health = 100.0
 				sim._log("通信链路修复完成。", "success")
 	_advance_incidents(sim, dt)
-	if not warning_sent and float(sim.elapsed_hours) + 0.000001 >= next_attack_at - 1.0:
+	if not _paths(sim,false).is_empty() and not warning_sent and float(sim.elapsed_hours) + 0.000001 >= next_attack_at - 1.0:
 		warning_sent = true
 		sim._log("通信监测提示异常扫描趋势，请检查网关、安全策略与备用路径。", "warning")
 	if float(sim.elapsed_hours) + 0.000001 >= next_attack_at:
 		var kinds := ["dos", "spoof", "intrusion"]
-		trigger_attack(sim, kinds[sim.rng.randi_range(0, 2)])
+		if not _paths(sim,false).is_empty(): trigger_attack(sim, kinds[sim.rng.randi_range(0, 2)],-1,false)
 		next_attack_at += 36.0
 		warning_sent = false
 	state.next_attack_in = maxf(0.0, next_attack_at - float(sim.elapsed_hours))
@@ -565,6 +681,13 @@ func _advance_incidents(sim: RefCounted, dt: float) -> void:
 func sample_verified(sim: RefCounted) -> void:
 	# Called by the simulation only after a positive-duration physical tick.
 	var trusted_paths := _paths(sim, true)
+	for building in sim.buildings:
+		if int(sim.research_level)>=1 and trusted_paths.has(int(building.id)):
+			_sample_facility(sim,building,"telemetry")
+		else:
+			var sample: Dictionary=facility_observations.get(int(building.id),{})
+			if sample.get("source","")=="field" and absf(float(sample.sampled_at)-float(sim.elapsed_hours))<0.000001:
+				_sample_facility(sim,building,"field")
 	for line in sim.lines:
 		var capable: bool = int(sim.research_level) >= 1 or _local_sensor(sim, line, trusted_paths)
 		if capable and (trusted_paths.has(int(line.a)) or trusted_paths.has(int(line.b))):
@@ -575,35 +698,52 @@ func sample_verified(sim: RefCounted) -> void:
 				_sample(sim, line, "patrol")
 
 func _advance_commands(sim: RefCounted, dt: float) -> void:
-	for index in range(pending_commands.size() - 1, -1, -1):
-		var command: Dictionary = pending_commands[index]
-		command.remaining = maxf(0.0, float(command.remaining) - dt)
-		if float(command.remaining) > 0.000001:
-			continue
-		var line: Dictionary = sim.get_line(int(command.line_id))
-		if not line.is_empty() and can_control(sim, int(command.line_id)) and (not command.target_closed or (not line.fault and float(line.repair_remaining) <= 0.0)):
-			line.closed = bool(command.target_closed)
-			line.heat = 0.0
-			line.trip_reason = ""
-			state.remote_success += 1
-			sim._log("经过验证的远程开关命令已执行。", "success")
+	for index in range(pending_commands.size()-1,-1,-1):
+		var command: Dictionary=pending_commands[index]
+		command.remaining=maxf(0.0,float(command.remaining)-dt)
+		if float(command.remaining)>0.000001: continue
+		if command.get("kind","")=="facility":
+			var building: Dictionary=sim.get_building(int(command.building_id))
+			var result: Dictionary=fail("设施或通信状态已变化。")
+			if not building.is_empty() and float(building.get("repair_remaining",0))<=0 and can_configure(sim,int(command.building_id)):
+				result=sim.evolution.configure(sim,int(command.building_id),command.settings)
+			if result.ok:
+				state.remote_success+=1
+				sim._log("经过验证的远程设施设置已执行。","success")
+			else:
+				state.remote_rejected+=1
+				sim._log("远程设施设置在到达时被拒绝："+str(result.message),"warning")
 		else:
-			state.remote_rejected += 1
-			sim._log("在途远程命令未通过到达时验证，已安全拒绝。", "warning")
+			var line: Dictionary=sim.get_line(int(command.line_id))
+			if not line.is_empty() and can_control(sim,int(command.line_id)) and (not command.target_closed or (not line.fault and float(line.repair_remaining)<=0.0)):
+				line.closed=bool(command.target_closed)
+				line.heat=0.0
+				line.trip_reason=""
+				state.remote_success+=1
+				sim._log("经过验证的远程开关命令已执行。","success")
+			else:
+				state.remote_rejected+=1
+				sim._log("在途远程命令未通过到达时验证，已安全拒绝。","warning")
 		pending_commands.remove_at(index)
-	for index in range(field_jobs.size() - 1, -1, -1):
-		var job: Dictionary = field_jobs[index]
-		job.remaining = maxf(0.0, float(job.remaining) - dt)
-		if float(job.remaining) > 0.000001:
-			continue
-		var line: Dictionary = sim.get_line(int(job.line_id))
-		if not line.is_empty():
-			if job.kind == "switch" and (not job.target_closed or (not line.fault and float(line.repair_remaining) <= 0.0)):
-				line.closed = bool(job.target_closed)
-				line.heat = 0.0
-				line.trip_reason = ""
-			_sample(sim, line, "patrol")
-			sim._log("现场队已核实线路 #%d：%s。" % [int(line.id), "发现设备损伤" if line.fault else "开关与设备已核实"], "info")
+	for index in range(field_jobs.size()-1,-1,-1):
+		var job: Dictionary=field_jobs[index]
+		job.remaining=maxf(0.0,float(job.remaining)-dt)
+		if float(job.remaining)>0.000001: continue
+		if job.kind=="facility":
+			var building: Dictionary=sim.get_building(int(job.building_id))
+			if not building.is_empty() and float(building.get("repair_remaining",0))<=0:
+				var result: Dictionary=sim.evolution.configure(sim,int(job.building_id),job.settings)
+				if result.ok: _sample_facility(sim,building,"field")
+				sim._log("现场设施设置"+("已完成。" if result.ok else "未通过验证："+str(result.message)),"success" if result.ok else "warning")
+		else:
+			var line: Dictionary=sim.get_line(int(job.line_id))
+			if not line.is_empty():
+				if job.kind=="switch" and (not job.target_closed or (not line.fault and float(line.repair_remaining)<=0.0)):
+					line.closed=bool(job.target_closed)
+					line.heat=0.0
+					line.trip_reason=""
+				_sample(sim,line,"patrol")
+				sim._log("现场队已核实线路 #%d：%s。" % [int(line.id),"发现设备损伤" if line.fault else "开关与设备已核实"],"info")
 		field_jobs.remove_at(index)
 
 func summarize(sim: RefCounted) -> Dictionary:
@@ -646,6 +786,7 @@ func snapshot() -> Dictionary:
 	return {"state": state.duplicate(true), "links": links.duplicate(true),
 		"incidents": incidents.duplicate(true), "pending_commands": pending_commands.duplicate(true),
 		"field_jobs": field_jobs.duplicate(true), "devices": saved_devices, "observations": saved_observations,
+		"facility_observations":facility_observations.values().duplicate(true),
 		"next_link_id": next_link_id, "next_incident_id": next_incident_id,
 		"next_command_id": next_command_id, "next_attack_at": next_attack_at, "warning_sent": warning_sent}
 
@@ -675,7 +816,8 @@ func load_snapshot(data: Dictionary) -> void:
 		for item in pair[0]:
 			var command: Dictionary = item.duplicate(true)
 			command.id = int(command.id)
-			command.line_id = int(command.line_id)
+			if command.get("kind","")=="facility": command.building_id=int(command.building_id)
+			else: command.line_id = int(command.line_id)
 			pair[1].append(command)
 	devices.clear()
 	for item in data.devices:
@@ -687,13 +829,18 @@ func load_snapshot(data: Dictionary) -> void:
 		var sample: Dictionary = item.duplicate(true)
 		sample.line_id = int(sample.line_id)
 		observations[int(sample.line_id)] = sample
+	facility_observations.clear()
+	for item in data.get("facility_observations",[]):
+		var sample: Dictionary=item.duplicate(true)
+		sample.building_id=int(sample.building_id)
+		facility_observations[int(sample.building_id)]=sample
 	next_link_id = int(data.next_link_id)
 	next_incident_id = int(data.next_incident_id)
 	next_command_id = int(data.next_command_id)
 	next_attack_at = float(data.next_attack_at)
 	warning_sent = bool(data.warning_sent)
 
-static func valid_snapshot(data: Variant, building_ids: Dictionary, line_ids: Dictionary, elapsed: float) -> bool:
+static func valid_snapshot(data: Variant, building_ids: Dictionary, line_ids: Dictionary, elapsed: float, strict: bool=false) -> bool:
 	if not data is Dictionary or not data.get("state") is Dictionary:
 		return false
 	for key in ["links", "incidents", "pending_commands", "field_jobs", "devices", "observations"]:
@@ -718,10 +865,12 @@ static func valid_snapshot(data: Variant, building_ids: Dictionary, line_ids: Di
 			return false
 	if not _number(data.get("next_attack_at"), 0.0, 1e12) or not data.get("warning_sent") is bool:
 		return false
+	if strict and not data.get("facility_observations") is Array: return false
 	var device_ids := {}
 	for device in data.devices:
 		if not device is Dictionary or not _integer(device.get("id"), 1, 1000000000) or not building_ids.has(int(device.id)) or device_ids.has(int(device.id)):
 			return false
+		if strict and (not device.get("commissioned") is bool or device.get("role") not in ["device","root"]): return false
 		device_ids[int(device.id)] = true
 		for key in ["ups_remaining", "dos_remaining", "spoof_remaining", "recover_remaining"]:
 			if not _number(device.get(key), 0.0, 2.0):
@@ -729,6 +878,9 @@ static func valid_snapshot(data: Variant, building_ids: Dictionary, line_ids: Di
 		for key in ["isolated", "compromised", "intrusion"]:
 			if not device.get(key) is bool:
 				return false
+		if device.has("commissioned") and not device.commissioned is bool: return false
+		if device.has("role") and device.role not in ["device","root"]: return false
+		if device.get("role", "device")=="root" and building_ids[int(device.id)] is Dictionary and building_ids[int(device.id)].kind not in ["sensor","control"]: return false
 		if bool(device.compromised) != (bool(device.intrusion) or float(device.spoof_remaining) > 0.0):
 			return false
 	if device_ids.size() != building_ids.size():
@@ -771,15 +923,30 @@ static func valid_snapshot(data: Variant, building_ids: Dictionary, line_ids: Di
 			if not _number(sample.get(key), 0.0, 10000.0):
 				return false
 	var command_ids := {}
+	var facility_targets := {}
 	for pair in [[data.pending_commands, false], [data.field_jobs, true]]:
 		for command in pair[0]:
 			if not command is Dictionary or not _integer(command.get("id"), 1, int(data.next_command_id) - 1) or command_ids.has(int(command.id)):
 				return false
 			command_ids[int(command.id)] = true
-			if not _integer(command.get("line_id"), 1, 1000000000) or not line_ids.has(int(command.line_id)) or not command.get("target_closed") is bool or not _number(command.get("remaining"), 0.0, 100.0):
-				return false
-			if pair[1] and command.get("kind") not in ["switch", "patrol"]:
-				return false
+			if not _number(command.get("remaining"),0.0,100.0): return false
+			if command.get("kind","")=="facility":
+				if not _integer(command.get("building_id"),1,1000000000) or not building_ids.has(int(command.building_id)): return false
+				if facility_targets.has(int(command.building_id)): return false
+				facility_targets[int(command.building_id)]=true
+				if not _valid_settings(command.get("settings"),str(building_ids[int(command.building_id)].kind)): return false
+			else:
+				if not _integer(command.get("line_id"),1,1000000000) or not line_ids.has(int(command.line_id)) or not command.get("target_closed") is bool: return false
+				if pair[1] and command.get("kind") not in ["switch","patrol"]: return false
+	if data.has("facility_observations"):
+		if not data.facility_observations is Array or data.facility_observations.size()>512: return false
+		var sample_ids: Dictionary={}
+		for sample in data.facility_observations:
+			if not sample is Dictionary or not _integer(sample.get("building_id"),1,1000000000) or not building_ids.has(int(sample.building_id)) or sample_ids.has(int(sample.building_id)): return false
+			sample_ids[int(sample.building_id)]=true
+			if sample.get("source") not in ["telemetry","field"] or not sample.get("status") is String or not _number(sample.get("sampled_at"),0.0,elapsed+0.00001): return false
+			for key in ["available","output","served","demand","energy","health","fuel_cost"]:
+				if not _number(sample.get(key),-1000000.0 if key=="output" else 0.0,1e9): return false
 	if data.field_jobs.size() > 2:
 		return false
 	var incident_ids := {}
@@ -797,6 +964,34 @@ static func valid_snapshot(data: Variant, building_ids: Dictionary, line_ids: Di
 		for id in incident.affected_ids:
 			if not _integer(id, 1, 1000000000) or not building_ids.has(int(id)):
 				return false
+	return true
+
+static func _valid_settings(settings: Variant, kind: String) -> bool:
+	if not settings is Dictionary or settings.is_empty() or settings.size()>12: return false
+	for key in settings:
+		var value: Variant=settings[key]
+		match str(key):
+			"enabled":
+				if not value is bool or (not value and kind in ["home","factory","hospital"]): return false
+			"dispatch":
+				if kind not in ["gas","dc_dynamo","steam","coal","hydro","ccgt","nuclear","fusion"] or not _number(value,0,1): return false
+			"cooling_mode":
+				if kind!="cooling" or value not in ["wet","dry"]: return false
+			"boost_cooling":
+				if kind!="cooling" or not value is bool: return false
+			"flexible_mode":
+				if kind not in ["steam","coal","ccgt"] or not value is bool: return false
+			"storage_mode":
+				if kind not in ["battery","pumped_storage","flow_battery","community_battery","hydrogen","thermal_storage"] or value not in ["auto","hold","peak"]: return false
+			"reserve_soc":
+				if kind not in ["battery","pumped_storage","flow_battery","community_battery","hydrogen","thermal_storage"] or not _number(value,0,.9): return false
+			"peak_hour":
+				if kind not in ["battery","pumped_storage","flow_battery","community_battery","hydrogen","thermal_storage"] or not _number(value,0,23): return false
+			"environmental_release":
+				if kind!="hydro" or not _number(value,.1,.6): return false
+			"protection_margin":
+				if kind!="substation" or not _number(value,.8,1.2): return false
+			_: return false
 	return true
 
 static func _number(value: Variant, minimum: float, maximum: float) -> bool:

@@ -135,7 +135,7 @@ func initialize_building(b: Dictionary) -> void:
 		if not b.has(key):
 			b[key] = defaults[key]
 
-func configure(sim: RefCounted, id: int, settings: Dictionary) -> Dictionary:
+func configure(sim: RefCounted, id: int, settings: Dictionary, apply_changes: bool=true) -> Dictionary:
 	var b: Dictionary = sim.get_building(id)
 	if b.is_empty():
 		return _result(false,"设施不存在。")
@@ -179,9 +179,54 @@ func configure(sim: RefCounted, id: int, settings: Dictionary) -> Dictionary:
 					return _result(false,"保护裕度需要保护协调研究，范围 80—120%。")
 			_:
 				return _result(false,"不支持的设施控制项。")
-	for key in settings:
-		b[key] = settings[key]
-	return _result(true,"设施策略已应用；启停与爬坡将在时间推进后完成。")
+	# A low setpoint cannot redefine a thermal plant's nameplate minimum.
+	# Zero requests a normal down-ramp and cold shutdown.
+	if settings.has("dispatch") or settings.has("flexible_mode"):
+		var dispatch := float(settings.get("dispatch",b.get("dispatch",1.0)))
+		var minimum := minimum_dispatch_ratio(b,settings)
+		if dispatch > 0.000001 and dispatch + 0.000001 < minimum:
+			return _result(false,"此机组最低稳定出力为额定容量的 %.0f%%；请提高上限或设为 0 停机。" % (minimum*100.0))
+	if apply_changes:
+		for key in settings:
+			b[key] = settings[key]
+	return _result(true,"设施策略已应用；启停与爬坡将在时间推进后完成。" if apply_changes else "设施设置校验通过。")
+
+func validate_configuration(sim: RefCounted, id: int, settings: Dictionary) -> Dictionary:
+	return configure(sim,id,settings,false)
+
+func minimum_dispatch_ratio(b: Dictionary, settings: Dictionary={}) -> float:
+	var ratio := float(MINIMUM.get(b.kind,0.0))
+	if bool(settings.get("flexible_mode",b.get("flexible_mode",false))):
+		ratio *= 0.7
+	return ratio
+
+func marginal_cost(b: Dictionary) -> float:
+	return float(FUEL.get(b.kind,0.0))*(1.15 if bool(b.get("flexible_mode",false)) else 1.0)
+
+func upgrade_supported(kind: String) -> bool:
+	return is_generator(kind) or is_storage(kind) or is_terminal(kind) or kind in ["solar","wind","home","factory","hospital","academy","cooling"]
+
+func upgrade_effect(kind: String) -> String:
+	if not upgrade_supported(kind):
+		return "此设施暂无有效等级改造；可升级线路、通信链路或安全策略。"
+	if kind == "cooling": return "增加 1 份基础冷却配额；辅机耗电不增加，维护费随等级增加。"
+	if kind == "academy": return "增加 8 个高级岗位；辅机需求增加 30%，维护费随等级增加。"
+	if is_storage(kind): return "功率与储能上限增加 50%。"
+	if kind in ["home","factory","hospital"]: return "城市用电规模增加 30%。"
+	return "额定功率增加 50%；热机仍需爬坡至新上限。"
+
+func apply_upgrade(b: Dictionary) -> void:
+	if not upgrade_supported(str(b.kind)): return
+	b.level = int(b.level)+1
+	if b.kind in ["home","factory","hospital","academy"]:
+		b.base_demand = float(b.base_demand)*1.3
+	elif b.kind != "cooling":
+		b.capacity = float(b.capacity)*1.5
+		if is_storage(str(b.kind)):
+			b.energy_capacity = float(b.energy_capacity)*1.5
+		if float(b.base_demand)>0.0:
+			b.base_demand = float(b.base_demand)*1.3
+	b.health = 100.0
 
 func advance(sim: RefCounted, dt: float) -> void:
 	if dt <= 0.0:
@@ -198,10 +243,18 @@ func advance(sim: RefCounted, dt: float) -> void:
 		if not is_generator(str(b.kind)) or b.kind == "gas":
 			continue
 		var ids := _component(sim,int(b.id))
+		if b.kind in ["nuclear","fusion"] and float(b.ramp_mw)>0.000001 and float(b.startup_remaining)<=0.000001:
+			var assignment := support_assignment(sim,b,ids)
+			if not support_powered(sim,assignment):
+				# Loss of running auxiliaries is a safety trip, not a new low-load
+				# operating point. Recovery requires a fresh powered cold start.
+				b.ramp_mw = 0.0
+				b.startup_remaining = float(STARTUP[b.kind])
+				continue
 		var viable := bool(b.online) and bool(b.enabled) and float(b.dispatch) > 0.000001 and _support_problem(sim,b,ids).is_empty()
 		if viable and b.kind in ["nuclear","fusion"] and float(b.startup_remaining) > 0.0:
-			viable = _startup_auxiliary_powered(sim,ids)
-		var target := float(b.capacity) * float(b.dispatch) if viable else 0.0
+			viable = support_powered(sim,support_assignment(sim,b,ids))
+		var target := float(b.capacity) * maxf(float(b.dispatch),minimum_dispatch_ratio(b)) if viable else 0.0
 		if viable and float(b.startup_remaining) > 0.0:
 			var startup_time := minf(dt,float(b.startup_remaining))
 			b.startup_remaining = maxf(0.0,float(b.startup_remaining)-dt)
@@ -266,14 +319,14 @@ func generator_available(sim: RefCounted, b: Dictionary, ids: Array[int]) -> flo
 	if b.kind == "hydro":
 		factor *= (0.55+0.25*sin(float(sim.day)*0.45))*(1.0-float(b.get("environmental_release",0.25)))
 	if b.kind in ["nuclear","fusion"]:
-		factor *= _cooling_factor(sim,ids)
+		factor *= float(support_assignment(sim,b,ids).cooling_factor)
 	return maxf(0.0,minf(capacity,float(b.get("ramp_mw",0.0)))*factor)
 
 func generator_minimum(b: Dictionary) -> float:
-	var ratio := float(MINIMUM.get(b.kind,0.0))
-	if bool(b.get("flexible_mode",false)):
-		ratio *= 0.7
-	return minf(float(b.get("available",0.0)),float(b.get("ramp_mw",0.0))*ratio)
+	# Startup and down-ramp may transiently pass below this stable bound, but
+	# the player setpoint never scales the minimum itself.
+	var minimum := float(b.capacity)*minimum_dispatch_ratio(b)
+	return maxf(0.0,minf(minimum,minf(float(b.get("available",0.0)),float(b.get("ramp_mw",0.0)))))
 
 func demand_for(_sim: RefCounted, b: Dictionary) -> float:
 	if not bool(b.get("enabled",true)):
@@ -315,7 +368,7 @@ func fuel_cost(b: Dictionary) -> float:
 	var power := maxf(0.0,float(b.get("output",0.0)))
 	if b.kind in ["steam","coal","ccgt","nuclear","fusion"]:
 		power = maxf(power,generator_minimum(b))
-	return power*float(FUEL.get(b.kind,0.0))*(1.15 if bool(b.get("flexible_mode",false)) else 1.0)
+	return power*marginal_cost(b)
 
 func carbon_rate(b: Dictionary) -> float:
 	var power := maxf(float(b.get("output",0.0)),generator_minimum(b))
@@ -333,6 +386,8 @@ func line_trip_threshold(sim: RefCounted, line: Dictionary) -> float:
 	return multiplier
 
 func facility_status(sim: RefCounted, b: Dictionary) -> String:
+	if not bool(b.online):
+		return "设备停机检修中" if float(b.get("repair_remaining",0.0)) > 0.0 else "设备已离线"
 	if not bool(b.get("enabled",true)):
 		return "正在降载停机" if float(b.get("ramp_mw",0.0)) > 0.001 else "已停运；固定维护费仍在发生"
 	if is_generator(str(b.kind)):
@@ -342,9 +397,11 @@ func facility_status(sim: RefCounted, b: Dictionary) -> String:
 		if not problem.is_empty():
 			return problem
 		if float(b.get("startup_remaining",0.0)) > 0.000001:
-			if b.kind in ["nuclear","fusion"] and not _startup_auxiliary_powered(sim,_component(sim,int(b.id))):
+			if b.kind in ["nuclear","fusion"] and not support_powered(sim,support_assignment(sim,b,_component(sim,int(b.id)))):
 				return "启动等待厂用电：请用燃气、储能或外网为冷却设施与学院供电"
 			return "启动准备：剩余 %.1f 小时" % float(b.startup_remaining)
+		if b.kind in ["nuclear","fusion"] and not support_powered(sim,support_assignment(sim,b,_component(sim,int(b.id)))):
+			return "厂用电不足：配套冷却与学院必须获得实际供电"
 		return "热功率 %.1f MW · 最低负荷 %.1f MW · 每小时燃料 ¥%.0f" % [float(b.get("ramp_mw",b.get("available",0.0))),generator_minimum(b),fuel_cost(b)]
 	if is_storage(str(b.kind)):
 		var coordinated: bool = b.get("storage_mode","auto") == "peak" and has_technology("smart_storage") and int(sim.research_level) >= 1 and sim.digital.control_reachable(sim,int(b.id))
@@ -353,67 +410,99 @@ func facility_status(sim: RefCounted, b: Dictionary) -> String:
 	if b.kind == "academy":
 		return "同岛提供 %d 个高级运行岗位；核能占 6，聚变占 10" % (8*int(b.level))
 	if b.kind == "cooling":
-		return "%s · 支撑 %.0f 份热机需求 · 辅机 %.1f MW" % ["干冷" if b.get("cooling_mode","wet") == "dry" else "湿冷",2.0 if bool(b.get("boost_cooling",false)) else 1.0,demand_for(sim,b)]
+		return "%s · 支撑 %.0f 份热机需求 · 辅机 %.1f MW" % ["干冷" if b.get("cooling_mode","wet") == "dry" else "湿冷",cooling_capacity(b),demand_for(sim,b)]
 	if b.kind == "condenser":
 		return "同岛 HVDC 可用输送上限 +15%（稳定近似）；线路热容量不变；辅机 0.8 MW，维护 ¥55/h"
 	return "设施需要真实电网接入；技术解锁不会自动连接或供电。"
 
-func _support_problem(sim: RefCounted, b: Dictionary, ids: Array[int]) -> String:
-	if b.kind not in ["nuclear","fusion"]:
-		return ""
-	var cooling := 0.0
-	var staff := 0
+func cooling_capacity(b: Dictionary) -> float:
+	return float(b.get("level",1))*(2.0 if bool(b.get("boost_cooling",false)) else 1.0)
+
+func support_assignment(sim: RefCounted, b: Dictionary, ids: Array[int]) -> Dictionary:
+	var empty := {"ok":true,"reason":"","cooling_ids":[],"academy_ids":[],"cooling_allocations":{},"staff_allocations":{},"cooling_factor":1.0}
+	if b.kind not in ["nuclear","fusion"]: return empty
+	var cooling_ids: Array[int] = []
+	var academy_ids: Array[int] = []
+	var cooling_left: Dictionary = {}
+	var staff_left: Dictionary = {}
+	var cooling_total := 0.0
+	var staff_total := 0
 	for id in ids:
 		var support: Dictionary = sim.get_building(id)
-		if not bool(support.online) or not bool(support.get("enabled",true)) or float(support.health) < 30.0:
-			continue
+		if not bool(support.online) or not bool(support.get("enabled",true)) or float(support.health)<30.0: continue
 		if support.kind == "cooling":
-			cooling += 2.0 if bool(support.get("boost_cooling",false)) else 1.0
-		if support.kind == "academy":
-			staff += int(support.level)*8
-	# Stable ID ordering allocates finite specialists/cooling without duplication.
+			cooling_ids.append(id)
+			cooling_left[id] = cooling_capacity(support)
+			cooling_total += float(cooling_left[id])
+		elif support.kind == "academy":
+			academy_ids.append(id)
+			staff_left[id] = int(support.level)*8
+			staff_total += int(staff_left[id])
+	cooling_ids.sort()
+	academy_ids.sort()
 	var advanced_ids: Array[int] = []
 	for id in ids:
 		var candidate: Dictionary = sim.get_building(id)
-		if candidate.kind in ["nuclear","fusion"] and bool(candidate.online) and (bool(candidate.get("enabled",true)) or float(candidate.get("ramp_mw",0.0)) > 0.001):
-			advanced_ids.append(id)
+		if candidate.kind in ["nuclear","fusion"] and bool(candidate.online) and (bool(candidate.get("enabled",true)) or float(candidate.get("ramp_mw",0.0))>0.001): advanced_ids.append(id)
 	advanced_ids.sort()
 	for id in advanced_ids:
 		var candidate: Dictionary = sim.get_building(id)
-		var staff_need := 10 if candidate.kind == "fusion" else 6
-		var cooling_need := 2.0 if candidate.kind == "fusion" else 1.0
-		if id == int(b.id):
-			if cooling < cooling_need:
-				return "缺少同电气岛冷却容量（需要 %.0f 份）" % cooling_need
-			if staff < staff_need:
-				return "同电气岛高级运行岗位不足（需要 %d 个）" % staff_need
-			return ""
-		if cooling >= cooling_need and staff >= staff_need:
-			cooling -= cooling_need
-			staff -= staff_need
-	return ""
+		var staff_need := 10 if candidate.kind=="fusion" else 6
+		var cooling_need := 2.0 if candidate.kind=="fusion" else 1.0
+		if cooling_total+0.000001<cooling_need or staff_total<staff_need:
+			if id==int(b.id):
+				empty.ok = false
+				empty.reason = "缺少同电气岛冷却容量（需要 %.0f 份）" % cooling_need if cooling_total+0.000001<cooling_need else "同电气岛高级运行岗位不足（需要 %d 个）" % staff_need
+				return empty
+			continue
+		var assignment := empty.duplicate(true)
+		var cooling_remaining := cooling_need
+		var staff_remaining := staff_need
+		var factor := 0.0
+		for support_id in cooling_ids:
+			var amount := minf(cooling_remaining,float(cooling_left[support_id]))
+			if amount<=0.000001: continue
+			assignment.cooling_ids.append(support_id)
+			assignment.cooling_allocations[support_id] = amount
+			cooling_left[support_id] = float(cooling_left[support_id])-amount
+			cooling_remaining -= amount
+			var support: Dictionary = sim.get_building(support_id)
+			var wet_factor := 0.72 if sin(float(sim.day)*0.22)>0.65 and float(sim.time_hours)>=12.0 and float(sim.time_hours)<18.0 else 1.0
+			factor += amount*(0.88 if support.get("cooling_mode","wet")=="dry" else wet_factor)
+		for support_id in academy_ids:
+			var amount := mini(staff_remaining,int(staff_left[support_id]))
+			if amount<=0: continue
+			assignment.academy_ids.append(support_id)
+			assignment.staff_allocations[support_id] = amount
+			staff_left[support_id] = int(staff_left[support_id])-amount
+			staff_remaining -= amount
+		assignment.cooling_factor = factor/cooling_need
+		cooling_total -= cooling_need
+		staff_total -= staff_need
+		if id==int(b.id): return assignment
+	return empty
 
-func _cooling_factor(sim: RefCounted, ids: Array[int]) -> float:
-	var dry := false
-	for id in ids:
-		var b: Dictionary = sim.get_building(id)
-		if b.kind == "cooling" and bool(b.online) and bool(b.get("enabled",true)) and b.get("cooling_mode","wet") == "dry":
-			dry = true
-	if dry:
-		return 0.88
-	# A deterministic warm season/water stress encourages diverse cooling.
-	return 0.72 if sin(float(sim.day)*0.22) > 0.65 and float(sim.time_hours) >= 12.0 and float(sim.time_hours) < 18.0 else 1.0
+func support_powered(sim: RefCounted, assignment: Dictionary) -> bool:
+	if not assignment.get("ok",false): return false
+	if assignment.get("cooling_ids",[]).is_empty() or assignment.get("academy_ids",[]).is_empty(): return false
+	for id in assignment.cooling_ids+assignment.academy_ids:
+		var support: Dictionary = sim.get_building(int(id))
+		if support.is_empty() or not bool(support.online) or not bool(support.get("enabled",true)): return false
+		if support.has("served"):
+			var demand := maxf(float(support.get("demand",0.0)),demand_for(sim,support))
+			if float(support.served)+0.000001 < demand*0.98: return false
+		elif not bool(support.get("powered",false)):
+			return false
+	return true
+
+func _support_problem(sim: RefCounted, b: Dictionary, ids: Array[int]) -> String:
+	return str(support_assignment(sim,b,ids).reason)
 
 func _startup_auxiliary_powered(sim: RefCounted, ids: Array[int]) -> bool:
-	var cooling_powered := false
-	var academy_powered := false
 	for id in ids:
 		var b: Dictionary = sim.get_building(id)
-		if not bool(b.online) or not bool(b.get("enabled",true)) or not bool(b.get("powered",false)):
-			continue
-		cooling_powered = cooling_powered or b.kind == "cooling"
-		academy_powered = academy_powered or b.kind == "academy"
-	return cooling_powered and academy_powered
+		if b.kind in ["nuclear","fusion"]: return support_powered(sim,support_assignment(sim,b,ids))
+	return false
 
 func _component(sim: RefCounted, id: int) -> Array[int]:
 	var ids: Array[int] = [id]
@@ -424,6 +513,11 @@ func _component(sim: RefCounted, id: int) -> Array[int]:
 		for line in sim.lines:
 			if not bool(line.closed) or bool(line.fault) or float(line.repair_remaining) > 0.0:
 				continue
+			var isolated_bus := false
+			for endpoint in [int(line.a),int(line.b)]:
+				var bus: Dictionary = sim.get_building(endpoint)
+				if bus.kind=="substation" and (not bool(bus.online) or not bool(bus.get("enabled",true)) or float(bus.get("repair_remaining",0.0))>0.0): isolated_bus=true
+			if isolated_bus: continue
 			var neighbor := int(line.b) if int(line.a) == current else (int(line.a) if int(line.b) == current else -1)
 			if neighbor > 0 and neighbor not in ids:
 				ids.append(neighbor)

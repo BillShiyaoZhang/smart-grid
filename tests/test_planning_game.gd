@@ -78,9 +78,17 @@ func _run() -> void:
 	panel.reserve_input.value = 55
 	panel.storage_input.select(2)
 	panel.peak_input.value = 18
+	panel.facility_method.select(1)
 	panel._apply_facility()
+	_check(game.sim.get_building(9).storage_mode=="auto" and game.sim.digital.field_jobs.size()==1,"Apply queues an explicit field setting without instantaneous device mutation")
+	_check(panel.reserve_input.value==55 and panel.storage_input.selected==2 and panel.peak_input.value==18,"accepted pending settings remain visible as the operator draft until acknowledgement")
+	panel.refresh()
+	_check(panel.reserve_input.value==55 and "执行中" in panel.facility_execution.text,"normal refresh preserves the submitted draft and shows execution progress")
+	game.sim.step(.4)
+	panel.refresh()
 	var battery: Dictionary = game.sim.get_building(9)
-	_check(is_equal_approx(float(battery.reserve_soc),.55) and battery.storage_mode=="peak" and is_equal_approx(float(battery.peak_hour),18),"explicit Apply commits local storage strategy")
+	_check(is_equal_approx(float(battery.reserve_soc),.55) and battery.storage_mode=="peak" and is_equal_approx(float(battery.peak_hour),18),"field execution commits the researched local storage strategy after travel and work")
+	_check(panel.reserve_input.value==55 and panel.storage_input.selected==2 and not "执行中" in panel.facility_execution.text,"acknowledged settings resynchronize with the actual device")
 	panel.close()
 	_check(not panel.visible and not game._modal_open(),"close returns to the live grid")
 	panel.open()
