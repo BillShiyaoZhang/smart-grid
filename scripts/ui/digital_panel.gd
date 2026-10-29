@@ -1,6 +1,7 @@
 extends Control
 ## Player-facing network operations. All truth-sensitive electrical data uses observations.
 const NetworkMap = preload("res://scripts/ui/digital_map.gd")
+const Shell = preload("res://scripts/ui/management_shell.gd")
 const TEAL := Color("77dbc0")
 const BLUE := Color("81c9ee")
 const CREAM := Color("f2eddb")
@@ -12,6 +13,7 @@ var cards: Dictionary = {}
 var tabs: TabContainer
 var network_map: Control
 var device_picker: OptionButton
+var drill_target: OptionButton
 var link_from: OptionButton
 var link_to: OptionButton
 var link_kind: OptionButton
@@ -38,6 +40,10 @@ var _asset_signature := ""
 var _link_signature := ""
 var _circuit_signature := ""
 var syncing := false
+var _incidents_signature := ""
+var _jobs_signature := ""
+var incident_labels: Dictionary = {}
+var job_labels: Dictionary = {}
 
 func setup(owner_game: Node) -> void:
 	game = owner_game
@@ -45,6 +51,7 @@ func setup(owner_game: Node) -> void:
 	_build()
 	hide()
 func open() -> void:
+	game._prepare_center(self)
 	refresh(true)
 	show()
 func close() -> void:
@@ -52,46 +59,26 @@ func close() -> void:
 	game._update_hud()
 	game._update_inspector()
 func _build() -> void:
-	var shade := ColorRect.new()
-	shade.color = Color(.02,.06,.09,.85)
-	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	add_child(shade)
-	var panel: PanelContainer = game._panel(self,Vector2(144,50),Vector2(1312,900),Color("102c38"))
-	var body: VBoxContainer = game._column(panel,12)
-	var header: HBoxContainer = game._row(body,16)
-	var title: VBoxContainer = game._column(header,1)
-	game._label(title,"数字电网运行中心  /  NETWORK OPERATIONS",11,BLUE)
-	game._label(title,"看得见，控得住，恢复得更快。",27,CREAM)
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	header.add_child(spacer)
-	game._label(header,"规划中 · 时间暂停",11,MUTED)
-	game._button(header,"推进 15 分钟",_advance,Vector2(128,40))
-	game._button(header,"返回电网  Esc",close,Vector2(128,40))
-	var stats: HBoxContainer = game._row(body,10)
+	var body: VBoxContainer = Shell.build(self,"数字电网", "推进 15 分钟",_advance,close)
+	var stats := HFlowContainer.new()
+	stats.add_theme_constant_override("h_separation",20)
+	stats.add_theme_constant_override("v_separation",6)
+	body.add_child(stats)
 	for spec in [["coverage","通信可达","0%"],["trusted","可信路径","0%"],["observed","可靠观测","0 / 0"],["links","在线链路","0 / 0"],["incident","已检测事件","0"],["pending","操作队列","0"]]:
-		var card := PanelContainer.new()
-		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		card.add_theme_stylebox_override("panel",game._style(Color("1b3b48"),10))
-		stats.add_child(card)
-		var col: VBoxContainer = game._column(card,3)
-		game._label(col,spec[1],11,MUTED)
-		cards[spec[0]] = game._label(col,spec[2],23,BLUE)
+		var metric: HBoxContainer = game._row(stats,6)
+		game._label(metric,spec[1],14,MUTED)
+		cards[spec[0]] = game._label(metric,spec[2],14,BLUE)
 	tabs = TabContainer.new()
-	tabs.custom_minimum_size = Vector2(0,600)
 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	tabs.add_theme_font_size_override("font_size",15)
 	tabs.add_theme_color_override("font_selected_color",BLUE)
 	tabs.add_theme_color_override("font_unselected_color",MUTED)
-	tabs.add_theme_stylebox_override("panel",game._style(Color("153440"),10))
-	tabs.add_theme_stylebox_override("tab_selected",game._style(Color("234954"),8,BLUE*Color(1,1,1,.4)))
-	tabs.add_theme_stylebox_override("tab_unselected",game._style(Color("102b37"),8))
 	body.add_child(tabs)
 	_build_network()
 	_build_operations()
 	_build_security()
 	_build_incidents()
-	message_label = game._label(body,"通信链路与电力线路独立建设。配置与观测刷新不推进时间。",12,MUTED)
+	message_label = _text(body,"通信与供电独立运行 · 配置修改后应用，观测刷新不推进时间。",MUTED)
 func _tab(title: String) -> VBoxContainer:
 	var scroll := ScrollContainer.new()
 	scroll.name = title
@@ -102,47 +89,70 @@ func _tab(title: String) -> VBoxContainer:
 	return v
 func _box(parent: Node, width: float) -> VBoxContainer:
 	var card := PanelContainer.new()
-	card.custom_minimum_size.x = width
 	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	card.add_theme_stylebox_override("panel",game._style(Color("1b3c49"),10))
+	card.add_theme_stylebox_override("panel",game._style(Color("192f3b"),6))
 	parent.add_child(card)
 	return game._column(card,9)
 func _text(parent: Node, text: String, color: Color=MUTED, width: float=540, font_size: int=12) -> Label:
 	var label: Label = game._label(parent,text,font_size,color)
-	label.custom_minimum_size.x = width
 	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	return label
 func _select(parent: Node, label: String, width: float=250) -> OptionButton:
-	var row: HBoxContainer = game._row(parent,10)
-	var title: Label = game._label(row,label,13,MUTED)
-	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var row: VBoxContainer = game._column(parent,4)
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	game._label(row,label,14,MUTED)
 	var picker := OptionButton.new()
-	picker.custom_minimum_size = Vector2(width,36)
+	picker.custom_minimum_size = Vector2(0,36)
+	picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	picker.fit_to_longest_item = false
+	picker.clip_text = true
 	picker.add_theme_stylebox_override("normal",game._style(Color("102c38"),7))
 	picker.add_theme_color_override("font_color",CREAM)
-	picker.add_theme_font_size_override("font_size",12)
+	picker.add_theme_font_size_override("font_size",14)
 	row.add_child(picker)
 	return picker
+
+func _split(parent: Node, columns: int=2) -> GridContainer:
+	var grid := GridContainer.new()
+	grid.columns = columns
+	grid.add_theme_constant_override("h_separation",16)
+	grid.add_theme_constant_override("v_separation",16)
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	parent.add_child(grid)
+	var collapse_width := 900 if columns==2 else 520
+	grid.resized.connect(func(): grid.columns=1 if grid.size.x<collapse_width else columns)
+	return grid
+
+func _primary(button: Button) -> Button:
+	button.add_theme_stylebox_override("normal",game._style(Color("245348"),6,TEAL.darkened(.3)))
+	button.add_theme_color_override("font_color",CREAM)
+	return button
+
 func _build_network() -> void:
 	var tab := _tab("通信拓扑")
-	var row: HBoxContainer = game._row(tab,14)
+	var row := _split(tab)
 	var graph_box := _box(row,750)
-	game._label(graph_box,"两张网络，同一座城市",18,CREAM)
+	game._label(graph_box,"通信网络",18,CREAM)
 	network_map = NetworkMap.new()
-	network_map.custom_minimum_size = Vector2(710,318)
 	network_map.node_selected.connect(_select_device)
 	network_map.link_selected.connect(func(id: int): selected_link=id; _select_id(link_picker,id); tabs.current_tab=1; refresh())
 	graph_box.add_child(network_map)
-	_text(graph_box,"光纤稳定但造价较高；无线便于扩展，却有范围、时延和风暴风险。端点断电依靠 UPS 临时维持，研究不能替代可用链路。",MUTED,710)
+	network_map.custom_minimum_size = Vector2(520,300)
+	_text(graph_box,"点击节点查看设备，点击链路进入维护。",MUTED)
 	var details := _box(row,440)
-	game._label(details,"设备路径与可信状态",18,BLUE)
+	game._label(details,"所选设备",18,BLUE)
 	device_picker = _select(details,"选择设备",276)
 	device_picker.item_selected.connect(func(_i: int): _select_device(_picked(device_picker)))
 	device_info = _text(details,"",CREAM,400,13)
 	game._button(details,"隔离所选设备",func(): _commit(game.sim.isolate_device(selected_device,true)),Vector2(0,34))
 	game._button(details,"解除设备隔离",func(): _commit(game.sim.isolate_device(selected_device,false)),Vector2(0,34))
-	game._button(details,"恢复 / 修补设备 · ¥900",func(): _commit(game.sim.recover_device(selected_device)),Vector2(0,34))
-	var connect_row: HBoxContainer = game._row(tab,10)
+	_primary(game._button(details,"恢复 / 修补设备 · ¥900",func(): _commit(game.sim.recover_device(selected_device)),Vector2(0,34)))
+	var build_toggle: Button = game._button(tab,"＋ 新建通信连接",func(): pass,Vector2(0,36),true)
+	var construction: VBoxContainer = game._column(tab,10)
+	construction.hide()
+	build_toggle.toggled.connect(func(pressed: bool): construction.visible=pressed)
+	var connect_row := _split(construction,3)
 	link_from = _select(connect_row,"起点",250)
 	link_to = _select(connect_row,"终点",250)
 	link_kind = _select(connect_row,"介质",160)
@@ -150,14 +160,15 @@ func _build_network() -> void:
 	link_kind.add_item("无线")
 	for picker in [link_from,link_to,link_kind]:
 		picker.item_selected.connect(func(_i: int): _update_quote())
-	var actions: HBoxContainer = game._row(tab,10)
-	game._button(actions,"新建通信链路",_connect,Vector2(205,36))
-	game._button(actions,"在地图布设通信线  4",_map_link,Vector2(250,36))
-	game._button(actions,"查看通信地图图层",func(): close(); game.overlay="comm"; game._sync_world(true),Vector2(250,36))
-	link_quote=_text(tab,"",ORANGE,1200,11)
+	var actions := _split(construction,3)
+	_primary(game._button(actions,"新建通信链路",_connect,Vector2(0,36)))
+	game._button(actions,"在地图布设通信线  4",_map_link,Vector2(0,36))
+	game._button(actions,"查看通信地图图层",func(): close(); game.overlay="comm"; game._sync_world(true),Vector2(0,36))
+	link_quote=_text(construction,"",ORANGE)
+	_text(construction,"光纤稳定但造价较高；无线有距离、时延和风暴风险。失电后 UPS 只能临时维持通信。",MUTED)
 func _build_operations() -> void:
 	var tab := _tab("链路与故障处置")
-	var row: HBoxContainer = game._row(tab,14)
+	var row := _split(tab)
 	var link_box := _box(row,585)
 	game._label(link_box,"通信链路维护",18,BLUE)
 	link_picker = _select(link_box,"选择链路",380)
@@ -168,42 +179,45 @@ func _build_operations() -> void:
 	game._button(link_box,"升级通信链路 · ¥2k",func(): _commit(game.sim.upgrade_communication(selected_link)),Vector2(0,36))
 	_text(link_box,"通信中断会使遥测过时、远程指令失败、自愈停止。供电仍由本地物理设备和保护系统决定。")
 	var circuit_box := _box(row,585)
-	game._label(circuit_box,"选择正确的故障处置方式",18,CREAM)
+	game._label(circuit_box,"电力线路处置",18,CREAM)
 	circuit_picker = _select(circuit_box,"电力线路",380)
 	circuit_picker.item_selected.connect(func(_i: int): selected_circuit=_picked(circuit_picker); refresh())
 	circuit_info = _text(circuit_box,"",CREAM)
-	remote_button = game._button(circuit_box,"发送远程开关指令",_remote,Vector2(0,36))
+	remote_button = _primary(game._button(circuit_box,"发送远程开关指令",_remote,Vector2(0,36)))
 	game._button(circuit_box,"派现场开关队 · ¥350",func(): _commit(game.sim.field_switch(selected_circuit)),Vector2(0,36))
 	game._button(circuit_box,"巡检定位 · ¥500",func(): _commit(game.sim.patrol_line(selected_circuit)),Vector2(0,36))
 	_text(circuit_box,"远程命令有回执延迟，到达时会重新检查路径和权限。未知故障先巡检；可信遥测定位能省下现场查线时间。",ORANGE)
 func _build_security() -> void:
 	var tab := _tab("安全策略与演练")
-	var row: HBoxContainer = game._row(tab,14)
+	var row := _split(tab)
 	var policy := _box(row,585)
-	game._label(policy,"用可用性换取多少信任？",18,CREAM)
+	game._label(policy,"安全策略",18,CREAM)
 	policy_picker = _select(policy,"访问策略",310)
 	for text in ["开放互联","网络分区","零信任校验"]:
 		policy_picker.add_item(text)
-	policy_button = game._button(policy,"应用安全策略",func(): _commit(game.sim.set_security_policy(["open","segmented","zero_trust"][policy_picker.selected])),Vector2(0,36))
+	policy_button = _primary(game._button(policy,"应用安全策略",func(): _commit(game.sim.set_security_policy(["open","segmented","zero_trust"][policy_picker.selected])),Vector2(0,36)))
 	security_info = _text(policy,"",BLUE)
 	upgrade_button = game._button(policy,"升级安全防护",func(): _commit(game.sim.upgrade_security()),Vector2(0,36))
 	cost_info = _text(policy,"",ORANGE)
 	_text(policy,"分区限制事件扩散；零信任拒绝不可信控制，但会增加校验时延和运维成本。在线安全中心可以改善检测与响应。")
 	var drills := _box(row,585)
-	game._label(drills,"检验城市的数字韧性",18,BLUE)
+	game._label(drills,"网络安全演练",18,BLUE)
+	drill_target = _select(drills,"目标设备")
+	drill_target.item_selected.connect(func(_i: int): _select_device(_picked(drill_target)))
 	attack_kind = _select(drills,"演练类型",310)
 	for text in ["DoS · 通信服务中断","遥测欺骗 · 信息不可置信","非法控制 · 恶意断路"]:
 		attack_kind.add_item(text)
-	_text(drills,"目标使用「通信拓扑」页的所选设备。演练是游戏事件，会真实影响城内通信与供电。")
-	game._button(drills,"启动网络安全演练",_drill,Vector2(0,40))
-	var builds: HBoxContainer = game._row(drills,8)
+	_text(drills,"演练会真实影响所选设备的通信与供电。请准备备用路径和恢复方案。",ORANGE)
+	var drill_button: Button=game._button(drills,"启动网络安全演练",_drill,Vector2(0,40))
+	drill_button.add_theme_color_override("font_color",ORANGE)
+	var builds := _split(drills,3)
 	for pair in [["control","调度中心"],["relay","通信中继"],["soc","安全中心"]]:
 		var kind: String = pair[0]
 		game._button(builds,pair[1],func(): _build_kind(kind),Vector2(0,36))
 	_text(drills,"建设设施后同时规划供电和通信。隔离可以遏制事件，也会切断设备遥测；修补恢复需要时间。",ORANGE)
 func _build_incidents() -> void:
 	var tab := _tab("告警与指令回执")
-	var row: HBoxContainer = game._row(tab,14)
+	var row := _split(tab)
 	var alerts := _box(row,585)
 	game._label(alerts,"已经检测到的事件",18,ORANGE)
 	incidents_box = game._column(alerts,12)
@@ -221,6 +235,7 @@ func _select_id(picker: OptionButton, id: int) -> void:
 func _select_device(id: int) -> void:
 	selected_device=id
 	_select_id(device_picker,id)
+	_select_id(drill_target,id)
 	refresh()
 func _connect() -> void:
 	_commit(game.sim.connect_communication(_picked(link_from),_picked(link_to),"fiber" if link_kind.selected==0 else "wireless"))
@@ -283,7 +298,7 @@ func refresh(sync_inputs: bool=false) -> void:
 	_update_quote()
 	var status: Dictionary=sim.communication_status(selected_device)
 	var latency: float=status.get("latency_ms",-1)
-	device_info.text="设备 %02d\n%s\n可信：%s  ·  时延 %s\nUPS 剩余 %.1f 小时\n%s" % [selected_device,"调度路径可达" if status.get("reachable",false) else "与调度失联","已校验" if status.get("trusted",false) else "未校验","%.0f ms" % latency if latency>=0 else "不可达",status.get("ups_remaining",0),status.get("reason","")]
+	device_info.text="%s\n可信：%s  ·  时延 %s\nUPS 剩余 %.1f 小时\n%s" % ["调度路径可达" if status.get("reachable",false) else "与调度失联","已校验" if status.get("trusted",false) else "未校验","%.0f ms" % latency if latency>=0 else "不可达",status.get("ups_remaining",0),status.get("reason","")]
 	if status.get("compromised",false):
 		device_info.text+="\n已确认安全异常：隔离并修补此设备。"
 	_refresh_link()
@@ -301,13 +316,14 @@ func _refresh_pickers(force: bool) -> void:
 	if force or signature!=_asset_signature:
 		var old_from:=_picked(link_from)
 		var old_to:=_picked(link_to)
-		for picker in [device_picker,link_from,link_to]:
+		for picker in [device_picker,drill_target,link_from,link_to]:
 			picker.clear()
 			for b in game.sim.buildings:
 				picker.add_item("%02d · %s" % [b.id,b.name],int(b.id))
 		_select_id(device_picker,selected_device)
 		if device_picker.selected>=0:
 			selected_device=_picked(device_picker)
+		_select_id(drill_target,selected_device)
 		_select_id(link_from,old_from if old_from>=0 else 10)
 		_select_id(link_to,old_to if old_to>=0 else 2)
 		_asset_signature=signature
@@ -351,28 +367,43 @@ func _refresh_circuit() -> void:
 	remote_button.disabled=not game.sim.digital.can_control(game.sim,selected_circuit)
 	remote_button.tooltip_text="需要一级研究、新鲜遥测，以及两端可信且不超过 250ms 的控制路径。"
 func _refresh_incidents() -> void:
-	game._clear_children(incidents_box)
-	var found:=false
+	var detected: Array = []
 	for incident in game.sim.digital.incidents:
-		if not incident.get("detected",false):
-			continue
-		found=true
+		if incident.get("detected",false):
+			detected.append(incident)
+	var signature := str(detected.map(func(incident: Dictionary): return "%d:%d" % [incident.id,incident.target_id]))
+	if signature != _incidents_signature or incidents_box.get_child_count()==0:
+		game._clear_children(incidents_box)
+		incident_labels.clear()
+		for incident in detected:
+			incident_labels[incident.id] = _text(incidents_box,"",ORANGE)
+			var target_id: int=incident.get("target_id",-1)
+			game._button(incidents_box,"查看设备与恢复",func(): _select_device(target_id); tabs.current_tab=0,Vector2(0,34))
+		if detected.is_empty():
+			_text(incidents_box,"当前没有已确认的网络安全事件。",TEAL)
+		_incidents_signature=signature
+	for incident in detected:
 		var kinds: Dictionary={"dos":"拒绝服务","spoof":"遥测欺骗","intrusion":"非法控制"}
 		var states: Dictionary={"active":"待处置","blocked":"已阻挡","resolved":"已恢复"}
 		var affected:=PackedStringArray()
 		for id in incident.get("affected_ids",[]):
 			affected.append("%02d" % int(id))
-		_text(incidents_box,"%s · 设备 %02d · %s\n%s\n检测影响设备：%s" % [kinds.get(incident.get("kind",""),"异常"),incident.get("target_id",0),states.get(incident.get("status",""),"待处理"),incident.get("description",""),"、".join(affected)],ORANGE)
-		var target_id: int=incident.get("target_id",-1)
-		game._button(incidents_box,"查看目标与恢复",func(): _select_device(target_id); tabs.current_tab=0,Vector2(0,30))
-	if not found:
-		_text(incidents_box,"当前没有已确认的网络安全事件。",TEAL)
-	game._clear_children(jobs_box)
+		var active: bool=incident.get("status","")=="active"
+		var label: Label=incident_labels[incident.id]
+		label.text="%s · 设备 %02d · %s\n%s\n已检测影响：%s\n%s" % [kinds.get(incident.get("kind",""),"异常"),incident.get("target_id",0),states.get(incident.get("status",""),"待处理"),incident.get("description",""),"、".join(affected),"建议：隔离受影响设备，修补恢复后解除隔离。" if active else "事件已结束，可检查设备与通信路径。"]
+		label.add_theme_color_override("font_color",ORANGE if active else TEAL)
 	var jobs: Array=[]
 	jobs.append_array(game.sim.digital.pending_commands)
 	jobs.append_array(game.sim.digital.field_jobs)
+	var job_signature:=str(jobs.map(func(job: Dictionary): return job.id))
+	if job_signature != _jobs_signature or jobs_box.get_child_count()==0:
+		game._clear_children(jobs_box)
+		job_labels.clear()
+		for job in jobs:
+			job_labels[job.id]=_text(jobs_box,"",BLUE)
+		if jobs.is_empty():
+			_text(jobs_box,"没有等待中的指令或现场作业。",TEAL)
+		_jobs_signature=job_signature
 	for job in jobs:
 		var kinds: Dictionary={"switch":"现场开关","patrol":"巡检定位"}
-		_text(jobs_box,"%s · E%02d · 剩余 %.2f 小时" % [kinds.get(job.get("kind",""),"远程指令"),job.get("line_id",0),job.get("remaining",0)],BLUE)
-	if jobs.is_empty():
-		_text(jobs_box,"没有等待中的指令或现场作业。",TEAL)
+		job_labels[job.id].text="执行中 · %s\nE%02d · 剩余 %.2f 小时\n%s" % [kinds.get(job.get("kind",""),"远程指令"),job.get("line_id",0),job.get("remaining",0),"现场作业不依赖通信路径。" if job.has("kind") else "指令到达时再次验证通信与控制权限。"]

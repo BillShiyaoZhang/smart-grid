@@ -1,6 +1,7 @@
 extends Control
 ## The trading desk submits simulation commands; forecasts and refreshes never settle money.
 const PriceChart = preload("res://scripts/ui/market_chart.gd")
+const Shell = preload("res://scripts/ui/management_shell.gd")
 const TEAL := Color("77dbc0")
 const CREAM := Color("f2eddb")
 const MUTED := Color("95b0b6")
@@ -34,6 +35,11 @@ var ledger_summary: Label
 var advice: Label
 var message_label: Label
 var syncing := false
+var funds_label: Label
+var graph_section: PanelContainer
+var graph_hosts: Array[VBoxContainer] = []
+var split_grids: Array[GridContainer] = []
+var _ledger_signature := ""
 
 func setup(owner_game: Node) -> void:
 	game = owner_game
@@ -42,6 +48,7 @@ func setup(owner_game: Node) -> void:
 	hide()
 
 func open() -> void:
+	game._prepare_center(self)
 	refresh(true)
 	show()
 
@@ -51,94 +58,102 @@ func close() -> void:
 	game._update_inspector()
 
 func _build() -> void:
-	var shade := ColorRect.new()
-	shade.color = Color(0.02,0.06,0.09,0.84)
-	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	add_child(shade)
-	var panel: PanelContainer = game._panel(self,Vector2(144,50),Vector2(1312,900),Color("102c38ff"))
-	var layout: VBoxContainer = game._column(panel,10)
-	var header: HBoxContainer = game._row(layout,14)
-	var title: VBoxContainer = game._column(header,1)
-	game._label(title,"青屿湾电力交易中心  /  ENERGY EXCHANGE",11,TEAL)
-	game._label(title,"让每一度电，都有更好的去处。",27,CREAM)
+	var layout: VBoxContainer = Shell.build(self,"电力市场","推进 1 小时",_advance,close)
+	var summary: HBoxContainer = game._row(layout,24)
+	funds_label = game._label(summary,"",16,CREAM)
+	game._label(summary,"现货买价",14,MUTED)
+	headline.spot = game._label(summary,"",17,TEAL)
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	header.add_child(spacer)
-	game._label(header,"规划中 · 时间暂停",11,MUTED)
-	game._button(header,"推进 1 小时",_advance,Vector2(116,40))
-	game._button(header,"返回电网  Esc",close,Vector2(130,40))
-	var cards: HBoxContainer = game._row(layout,10)
-	for spec in [["spot","现货买价","¥0 / MWh"],["retail","当前零售电价","¥145 / MWh"],["exchange","外网功率","0.0 MW"],["profit","本日运营净收益","¥0"],["satisfaction","用户满意度","85 / 100"]]:
-		var card := PanelContainer.new()
-		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		card.add_theme_stylebox_override("panel",game._style(Color("1b3b48"),10))
-		cards.add_child(card)
-		var v: VBoxContainer = game._column(card,3)
-		game._label(v,spec[1],11,MUTED)
-		headline[spec[0]] = game._label(v,spec[2],23,TEAL)
-	var graph_row: HBoxContainer = game._row(layout,16)
-	var chart_card := PanelContainer.new()
-	chart_card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	chart_card.add_theme_stylebox_override("panel",game._style(Color("0b2531"),10))
-	graph_row.add_child(chart_card)
-	forecast_chart = PriceChart.new()
-	forecast_chart.custom_minimum_size = Vector2(820,140)
-	chart_card.add_child(forecast_chart)
-	var forecast_notes: VBoxContainer = game._column(graph_row,9)
-	forecast_notes.custom_minimum_size.x = 352
-	game._label(forecast_notes,"未来 24 小时 · 参考报价",14,CREAM)
-	advice = _text(forecast_notes,"",MUTED,12,348)
-	connection_label = _text(forecast_notes,"",ORANGE,12,348)
-	var build: Button = game._button(forecast_notes,"＋ 建造市场联络站 · ¥32k",_build_intertie,Vector2(0,34))
-	build.tooltip_text = "联络站是跨区交易的物理节点。建成后用线路连到你的电网。"
+	summary.add_child(spacer)
+	game._label(summary,"本日净收益",14,MUTED)
+	headline.profit = game._label(summary,"",17,TEAL)
 	tabs = TabContainer.new()
-	tabs.custom_minimum_size = Vector2(0,340)
 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	tabs.add_theme_font_size_override("font_size",15)
-	tabs.add_theme_color_override("font_selected_color",TEAL)
-	tabs.add_theme_color_override("font_unselected_color",MUTED)
-	tabs.add_theme_stylebox_override("panel",game._style(Color("153440"),10))
-	tabs.add_theme_stylebox_override("tab_selected",game._style(Color("234954"),8,TEAL*Color(1,1,1,0.4)))
-	tabs.add_theme_stylebox_override("tab_unselected",game._style(Color("102b37"),8))
 	layout.add_child(tabs)
 	_build_trade_tab()
 	_build_tariff_tab()
 	_build_storage_tab()
 	_build_ledger_tab()
-	message_label = game._label(layout,"配置改变后点击应用；报价与账本来自当前仿真。",12,MUTED)
+	_build_graph()
+	tabs.tab_changed.connect(_place_graph)
+	_place_graph(0)
+	message_label = _text(layout,"调整参数后点击应用。查看报价、切换页面不会结算。",MUTED,14)
+	resized.connect(_relayout)
+	_relayout.call_deferred()
+
+func _build_graph() -> void:
+	graph_section = PanelContainer.new()
+	graph_section.add_theme_stylebox_override("panel",game._style(Color("10232d"),6))
+	graph_hosts[0].add_child(graph_section)
+	var row: HBoxContainer = game._row(graph_section,20)
+	var chart_column: VBoxContainer = game._column(row,6)
+	chart_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	game._label(chart_column,"未来 24 小时 · 参考报价",14,CREAM)
+	forecast_chart = PriceChart.new()
+	forecast_chart.custom_minimum_size = Vector2(0,128)
+	chart_column.add_child(forecast_chart)
+	var notes: VBoxContainer = game._column(row,8)
+	notes.custom_minimum_size.x = 285
+	advice = _text(notes,"",MUTED,14)
+	connection_label = _text(notes,"",ORANGE,14)
+	var build: Button = game._button(notes,"＋ 建造市场联络站 · ¥32k",_build_intertie,Vector2(0,34))
+	build.tooltip_text = "联络站是跨区交易的物理节点。建成后用线路连到你的电网。"
+
+func _place_graph(index: int) -> void:
+	graph_section.visible = index < 2
+	if index < 2:
+		if graph_section.get_parent() != graph_hosts[index]:
+			graph_section.reparent(graph_hosts[index])
+		# Keep Apply and the actual outcome above the reference chart in short windows.
+		graph_hosts[index].move_child(graph_section,0 if size.y >= 780 else graph_hosts[index].get_child_count()-1)
+
+func _split(parent: Node) -> GridContainer:
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	grid.add_theme_constant_override("h_separation",20)
+	grid.add_theme_constant_override("v_separation",16)
+	parent.add_child(grid)
+	split_grids.append(grid)
+	return grid
+
+func _relayout() -> void:
+	for grid in split_grids:
+		grid.columns = 1 if size.x < 1150 else 2
+	if graph_section != null:
+		_place_graph(tabs.current_tab)
 
 func _tab(title: String) -> VBoxContainer:
 	var scroll := ScrollContainer.new()
 	scroll.name = title
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	tabs.add_child(scroll)
-	var body: VBoxContainer = game._column(scroll,10)
+	var body: VBoxContainer = game._column(scroll,16)
 	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	return body
 
-func _box(parent: Node, width: float=585) -> VBoxContainer:
+func _box(parent: Node) -> VBoxContainer:
 	var card := PanelContainer.new()
 	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	card.custom_minimum_size.x = width
-	card.add_theme_stylebox_override("panel",game._style(Color("1b3c49"),10))
+	card.add_theme_stylebox_override("panel",game._style(Color("182f39"),6))
 	parent.add_child(card)
 	return game._column(card,10)
 
-func _text(parent: Node, value: String, color: Color=MUTED, font_size: int=12, width: float=540) -> Label:
+func _text(parent: Node, value: String, color: Color=MUTED, font_size: int=14, width: float=0) -> Label:
 	var label: Label = game._label(parent,value,font_size,color)
 	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	label.custom_minimum_size.x = width
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	return label
 
 func _select(parent: Node, title: String, choices: Array) -> OptionButton:
 	var line: HBoxContainer = game._row(parent,12)
-	var label: Label = game._label(line,title,13,CREAM)
-	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_text(line,title,CREAM)
 	var select := OptionButton.new()
 	select.custom_minimum_size = Vector2(222,36)
-	select.add_theme_stylebox_override("normal",game._style(Color("102c38"),7))
 	select.add_theme_color_override("font_color",CREAM)
-	select.add_theme_font_size_override("font_size",13)
+	select.add_theme_font_size_override("font_size",14)
 	for choice in choices:
 		select.add_item(choice)
 	line.add_child(select)
@@ -146,59 +161,64 @@ func _select(parent: Node, title: String, choices: Array) -> OptionButton:
 
 func _spin(parent: Node, title: String, low: float, high: float, step_: float, suffix: String="¥ / MWh") -> SpinBox:
 	var line: HBoxContainer = game._row(parent,12)
-	var label: Label = game._label(line,title,13,MUTED)
-	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_text(line,title,MUTED)
 	var spin := SpinBox.new()
 	spin.min_value = low
 	spin.max_value = high
 	spin.step = step_
 	spin.suffix = suffix
 	spin.custom_minimum_size = Vector2(222,35)
-	spin.get_line_edit().add_theme_stylebox_override("normal",game._style(Color("102c38"),7))
 	spin.get_line_edit().add_theme_color_override("font_color",CREAM)
-	spin.get_line_edit().add_theme_font_size_override("font_size",13)
+	spin.get_line_edit().add_theme_font_size_override("font_size",14)
 	line.add_child(spin)
 	return spin
 
 func _build_trade_tab() -> void:
 	var body := _tab("购售电策略")
-	var row: HBoxContainer = game._row(body,14)
+	graph_hosts.append(body)
+	var row := _split(body)
 	var config := _box(row)
-	game._label(config,"决定什么时候与外网交易",18,CREAM)
+	game._label(config,"交易策略",20,CREAM)
 	policy_mode = _select(config,"运行策略",["离网运行 · 禁用交易","缺电保供 · 只补缺额","经济交易 · 择价购售"])
 	buy_limit = _spin(config,"最高现货买价",0,500,5)
 	sell_floor = _spin(config,"最低外售电价",0,500,5)
 	game._button(config,"应用交易策略",_apply_policy,Vector2(0,37))
 	var notes := _box(row)
-	game._label(notes,"线路会决定交易能否落地",18,TEAL)
+	game._label(notes,"实际交易与线路约束",18,CREAM)
+	headline.exchange = _text(notes,"",TEAL,18)
 	trade_status = _text(notes,"")
-	_text(notes,"保供模式：本地电源优先，供应不足才买电。经济交易：比较燃气成本、现货报价与储能策略，在阈值内购售电。")
-	_text(notes,"外网通过联络站接入，进口功率必须沿你的线路送达用户。线路跳闸会断开下游；联络站容量和风暴降额限制交易规模。")
-	_text(notes,"外售结算价为现货买价的 72%，同一电气岛不会同时购电与售电。高峰时段留出备用容量更稳妥。",ORANGE)
+	_text(notes,"保供模式优先使用本地电源；经济交易按燃气成本、现货报价与储能策略择价购售。")
+	_text(notes,"外网电力经联络站与电缆送达用户。容量、断线及风暴均会限制交付；同一电气岛不会同时购电与售电。")
+	_text(notes,"外售结算价为现货买价的 72%。",ORANGE)
 
 func _build_tariff_tab() -> void:
 	var body := _tab("零售电价")
-	var row: HBoxContainer = game._row(body,14)
+	graph_hosts.append(body)
+	var row := _split(body)
 	var config := _box(row)
-	game._label(config,"给用户一份可持续的电费账单",18,CREAM)
+	game._label(config,"零售电价方案",20,CREAM)
 	tariff_mode = _select(config,"电价方案",["统一电价","峰谷电价","自定峰平谷"])
 	tariff_mode.item_selected.connect(_tariff_selected)
 	valley_rate = _spin(config,"谷价 · 23:00–07:00",20,500,5)
-	flat_rate = _spin(config,"平价 · 07:00–17:00 / 21:00–23:00",20,500,5)
+	flat_rate = _spin(config,"平价 · 日间与晚间",20,500,5)
+	flat_rate.tooltip_text = "07:00–17:00、21:00–23:00"
 	peak_rate = _spin(config,"峰价 · 17:00–21:00",20,500,5)
 	game._button(config,"应用零售电价",_apply_tariff,Vector2(0,37))
 	var notes := _box(row)
-	game._label(notes,"收入不只取决于单价",18,TEAL)
+	game._label(notes,"用户与经营反馈",18,CREAM)
+	var readouts: HBoxContainer = game._row(notes,16)
+	headline.retail = _text(readouts,"",TEAL,18)
+	headline.satisfaction = _text(readouts,"",TEAL,18)
 	tariff_status = _text(notes,"")
 	_text(notes,"高价会压低住宅与工业的需求。高账单和停电降低满意度，低于 60 后用户逐步流失。医院不减少需求，保持关键负荷优先。")
-	_text(notes,"统一电价使用平价覆盖全天；峰谷方案与自定方案按右上方曲线结算。先观察晚高峰购电成本，再决定峰价与储能策略。")
+	_text(notes,"统一电价使用平价覆盖全天；峰谷和自定方案按上方曲线结算。观察晚高峰购电成本，再决定峰价与储能策略。")
 	_text(notes,"价格单位为 ¥/MWh。普通用户按挂牌价结算，医院适用最高 ¥145/MWh 的医疗保供价；提价无法提高医院账单。",ORANGE)
 
 func _build_storage_tab() -> void:
 	var body := _tab("储能与锁价合约")
-	var row: HBoxContainer = game._row(body,14)
+	var row := _split(body)
 	var storage := _box(row)
-	game._label(storage,"把低价时段留给未来",18,CREAM)
+	game._label(storage,"储能运行策略",20,CREAM)
 	storage_mode = _select(storage,"电池策略",["保供备用","峰谷套利"])
 	charge_price = _spin(storage,"现货低于此价购电充能",0,500,5)
 	discharge_price = _spin(storage,"现货高于此价释放储能",0,500,5)
@@ -206,7 +226,7 @@ func _build_storage_tab() -> void:
 	game._button(storage,"应用储能策略",_apply_storage,Vector2(0,37))
 	storage_status = _text(storage,"",MUTED,11)
 	var contract := _box(row)
-	game._label(contract,"锁定未来 12 小时购电价格",18,TEAL)
+	game._label(contract,"12 小时锁价合约",20,CREAM)
 	contract_label = _text(contract,"",CREAM,13)
 	contract_mw = _spin(contract,"约定购电功率",1,14,1,"MW")
 	contract_mw.value_changed.connect(func(_value: float): _update_commitment())
@@ -218,14 +238,19 @@ func _build_storage_tab() -> void:
 func _build_ledger_tab() -> void:
 	var body := _tab("运营结算账本")
 	game._label(body,"逐小时计费，按游戏日归集",18,CREAM)
-	ledger_summary = _text(body,"",TEAL,14,1200)
+	ledger_summary = _text(body,"",TEAL,16)
+	var table_scroll := ScrollContainer.new()
+	table_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	table_scroll.custom_minimum_size.y = 110
+	table_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body.add_child(table_scroll)
 	ledger_grid = GridContainer.new()
 	ledger_grid.columns = 10
 	ledger_grid.add_theme_constant_override("h_separation",12)
 	ledger_grid.add_theme_constant_override("v_separation",14)
-	body.add_child(ledger_grid)
-	_text(body,"净收益 = 零售收入 + 外售收入 − 现货购电 − 锁价合约 − 燃气燃料 − 运维 − 失供补偿。",CREAM,12,1200)
-	_text(body,"账本仅记录运营现金流；建设、研究、维护派单和委托奖励会改变总资金，单独保留在调度日志中。刷新报价和切换页面不会重复结算。",MUTED,11,1200)
+	table_scroll.add_child(ledger_grid)
+	_text(body,"净收益 = 零售收入 + 外售收入 − 现货购电 − 锁价合约 − 燃气燃料 − 运维 − 失供补偿。",CREAM)
+	_text(body,"账本记录运营现金流；建设、研究、维护派单和委托奖励保留在调度日志中。刷新报价和切换页面不会重复结算。")
 
 func _tariff_selected(index: int) -> void:
 	if syncing:
@@ -281,13 +306,14 @@ func refresh(sync_inputs: bool=false) -> void:
 	var sim: RefCounted = game.sim
 	var state: Dictionary = sim.market.state
 	var t: Dictionary = sim.totals
+	funds_label.text = "资金  ¥%s" % game._number(float(sim.cash))
 	headline.spot.text = "¥%.2f / MWh" % state.get("spot_price",0)
-	headline.retail.text = "¥%.0f / MWh" % state.get("retail_price",145)
+	headline.retail.text = "零售 ¥%.0f / MWh" % state.get("retail_price",145)
 	var imports: float = t.get("import_mw",0)
 	var exports: float = t.get("export_mw",0)
-	headline.exchange.text = "↑ %.1f   ↓ %.1f MW" % [imports,exports]
+	headline.exchange.text = "进口 %.1f  /  外售 %.1f MW" % [imports,exports]
 	var satisfaction: float = state.get("satisfaction",85)
-	headline.satisfaction.text = "%.0f / 100" % satisfaction
+	headline.satisfaction.text = "满意度 %.0f / 100" % satisfaction
 	headline.satisfaction.add_theme_color_override("font_color",TEAL if satisfaction>=70 else ORANGE)
 	var day_net := 0.0
 	for entry in sim.market.ledger:
@@ -340,6 +366,10 @@ func _update_commitment() -> void:
 	commitment_label.text = "本次承诺：%.1f MW × 12h × ¥%.2f\n合计约 ¥%s，无论实际用电量都需支付。" % [contract_mw.value,price,game._number(contract_mw.value*12*price)]
 
 func _refresh_ledger() -> void:
+	var signature := str(game.sim.market.ledger)+str(game.sim.day)
+	if signature == _ledger_signature:
+		return
+	_ledger_signature = signature
 	game._clear_children(ledger_grid)
 	for title in ["游戏日","零售收入","外售收入","现货购电","锁价合约","燃料成本","运维成本","失供补偿","净收益","购 / 售 MWh"]:
 		var heading: Label = game._label(ledger_grid,title,11,MUTED)

@@ -43,7 +43,7 @@ func _run() -> void:
 	_check(game.is_ready, "main scene creates world and UI")
 	_check(game.welcome.visible and game._modal_open(), "welcome modal initially blocks gameplay")
 	_check(game.sim.buildings.size() == 10 and game.visuals.size() == 10, "ten initial assets have matching visuals")
-	_check(game.hud_values.size() == 6, "all six dashboard indicators exist")
+	_check(game.hud_values.size() == 6, "six readings are available across status rail and statistics")
 	_check(game.build_buttons.size() >= 8, "construction palette exists")
 	game.sim.event_logged.connect(func(_entry: Dictionary): event_count += 1)
 	game.sim.changed.connect(func(): change_count += 1)
@@ -125,7 +125,7 @@ func _run() -> void:
 	game.selected_id = -1
 	game.selected_line = -1
 	game._update_inspector()
-	_check(game.topology != null, "default inspector creates topology chart")
+	_check(game.topology != null, "statistics retains topology while empty inspector stays hidden")
 	game.selected_line = 1
 	game._update_inspector()
 	await process_frame
@@ -205,10 +205,10 @@ func _run() -> void:
 	_check(event_count > 10 and change_count > 10, "UI mutations emit model events and state changes")
 
 	# Saving and loading must restore both data and derived scene representations.
-	var save_path := "/tmp/tidal_grid_integration_save.json"
+	var save_path := "user://test_tidal_grid_integration_save.json"
 	var saved_cash: float = game.sim.cash
 	var saved_count: int = game.sim.buildings.size()
-	_check(game.sim.save_game(save_path).ok, "integration snapshot saves outside user data")
+	_check(game.sim.save_game(save_path).ok, "isolated portable integration snapshot saves")
 	game.sim.demolish(new_id)
 	game._sync_world(true)
 	_check(not game.visuals.has(new_id), "demolition removes visual model")
@@ -221,7 +221,7 @@ func _run() -> void:
 
 	game.speed = 3
 	game._toggle_pause()
-	_check(game.speed == 0 and "暂停" in game.time_label.text, "pause updates simulation speed and HUD")
+	_check(game.speed == 0 and game.hud.pause_button.button_pressed, "pause updates simulation speed and HUD")
 	game._toggle_pause()
 	_check(game.speed == 3, "resume restores chosen speed")
 	game.help_modal.show()

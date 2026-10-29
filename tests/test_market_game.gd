@@ -91,14 +91,23 @@ func _run() -> void:
 	check(is_equal_approx(float(game.sim.elapsed_hours),before_hours),"market planning pauses automatic simulation time")
 	key(KEY_ESCAPE)
 	check(not desk.visible and not game._modal_open(),"Escape returns to grid")
-	press(game.root_ui,"电力市场")
+	press(game.root_ui,"市场 M")
 	check(desk.visible,"top navigation opens market")
 	desk.close()
-	press(game.root_ui,"电价 · 交易 · 结算")
+	press(game.root_ui,"市场 M")
 	check(desk.visible,"market ticker opens trading desk")
 	check(desk.tabs.get_tab_count() == 4 and desk.headline.size() == 5,"four market tabs and five live indicators are available")
 	check(desk.forecast_chart.points.size() == 24,"forecast chart contains twenty-four actual market quotes")
 	check(desk.forecast_chart.points[0].has("day") and desk.forecast_chart.points[0].has("hour"),"forecast quotes retain their simulation time")
+	desk.tabs.current_tab = 0
+	check(desk.forecast_chart.is_visible_in_tree(),"trading page shows its reference price chart")
+	desk.tabs.current_tab = 1
+	check(desk.forecast_chart.is_visible_in_tree(),"tariff page shows reference prices beside the tariff decision")
+	desk.tabs.current_tab = 2
+	check(not desk.forecast_chart.is_visible_in_tree(),"storage and contract decisions do not carry an unrelated price chart")
+	desk.tabs.current_tab = 3
+	check(not desk.forecast_chart.is_visible_in_tree(),"ledger uses the full work area without a price chart")
+	desk.tabs.current_tab = 0
 
 	# Draft controls do not execute policy changes or settlement.
 	var cash_before: float = game.sim.cash
@@ -106,6 +115,10 @@ func _run() -> void:
 	var old_rate: float = game.sim.market.state.flat_rate
 	desk.flat_rate.value = 180
 	desk.buy_limit.value = 250
+	desk.tabs.current_tab = 1
+	desk.tabs.current_tab = 2
+	desk.tabs.current_tab = 1
+	check(is_equal_approx(float(desk.flat_rate.value),180) and is_equal_approx(float(desk.buy_limit.value),250),"changing work pages preserves drafts until explicit Apply")
 	desk.refresh(false)
 	check(is_equal_approx(float(desk.flat_rate.value),180) and is_equal_approx(float(desk.buy_limit.value),250),"live refresh preserves unapplied user drafts")
 	check(is_equal_approx(float(game.sim.market.state.flat_rate),old_rate),"editing tariff draft does not change simulation tariff")
@@ -218,7 +231,7 @@ func _run() -> void:
 	check(not desk.visible,"M also closes an open trading desk")
 
 	# Reopening after snapshot load must bind the current market model.
-	var path := "/tmp/tidal_market_ui_save.json"
+	var path := "user://test_tidal_market_ui_save.json"
 	var saved_market: Dictionary = game.sim.market.snapshot().duplicate(true)
 	check(game.sim.save_game(path).ok,"market integration state saves successfully")
 	game.sim.set_tariff("flat",85,100,220)

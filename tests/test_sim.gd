@@ -171,7 +171,7 @@ func _test_determinism_and_save() -> void:
 	first.trigger_storm()
 	second.trigger_storm()
 	check(JSON.stringify(first.snapshot()) == JSON.stringify(second.snapshot()), "same seed and commands produce identical state")
-	var path := "/tmp/tidal-grid-sim-test.json"
+	var path := "user://test_tidal-grid-sim-test.json"
 	check(first.save_game(path).ok, "snapshot saves to JSON")
 	var loaded = Sim.new()
 	check(loaded.load_game(path).ok, "snapshot loads successfully")
@@ -193,14 +193,14 @@ func _test_determinism_and_save() -> void:
 	check(near(first.totals.served, loaded.totals.served), "loaded simulation continues identically")
 	check(near(first.get_building(9).energy, loaded.get_building(9).energy), "battery state continues identically")
 	check(first.rng.state == loaded.rng.state, "random generator state persists")
-	var bad_file := FileAccess.open("/tmp/tidal-grid-bad-save.json", FileAccess.WRITE)
+	var bad_file := FileAccess.open("user://test_tidal-grid-bad-save.json", FileAccess.WRITE)
 	bad_file.store_string('{"schema_version":1,"buildings":[]}')
 	bad_file.close()
 	var cash_before: float = loaded.cash
-	check(not loaded.load_game("/tmp/tidal-grid-bad-save.json").ok, "malformed save is rejected")
+	check(not loaded.load_game("user://test_tidal-grid-bad-save.json").ok, "malformed save is rejected")
 	check(near(loaded.cash, cash_before), "invalid load does not mutate current game")
 	DirAccess.remove_absolute(path)
-	DirAccess.remove_absolute("/tmp/tidal-grid-bad-save.json")
+	DirAccess.remove_absolute("user://test_tidal-grid-bad-save.json")
 
 func _test_research_and_objectives() -> void:
 	var sim = Sim.new()
@@ -279,7 +279,7 @@ func _test_scheduled_storms_and_compensation() -> void:
 	sim.step(0.2)
 	check(warning_count(sim) == 1 and sim.storm_warning_sent, "one-hour warning is emitted once")
 	check(near(sim.totals.storm_in, 0.9), "forecast countdown follows simulated time")
-	var path := "/tmp/tidal-grid-forecast-test.json"
+	var path := "user://test_tidal-grid-forecast-test.json"
 	check(sim.save_game(path).ok, "pre-storm forecast can be saved")
 	var loaded = Sim.new()
 	check(loaded.load_game(path).ok, "pre-storm forecast can be loaded")

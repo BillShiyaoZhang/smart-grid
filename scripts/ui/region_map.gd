@@ -9,7 +9,7 @@ const ORANGE := Color("efbb7d")
 const CREAM := Color("f2eddb")
 
 func _ready() -> void:
-	custom_minimum_size = Vector2(650, 290)
+	custom_minimum_size = Vector2(0, 270)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	resized.connect(queue_redraw)
 
@@ -17,7 +17,7 @@ func refresh() -> void:
 	queue_redraw()
 
 func _position(cell: Vector2i) -> Vector2:
-	return Vector2(35, 24) + Vector2(cell) / 47.0 * (size - Vector2(70, 62))
+	return Vector2(35, 24) + Vector2(cell) / 47.0 * (size - Vector2(70, 86))
 
 func _draw() -> void:
 	if sim == null:
@@ -49,10 +49,13 @@ func _draw() -> void:
 		draw_circle(at, radius, color)
 		if int(city.id) == selected_id:
 			draw_arc(at, radius + 5, 0, TAU, 32, CREAM, 1.5, true)
-		var offset := Vector2(12, -11) if int(city.id) % 2 == 0 else Vector2(12, 13)
-		draw_string(font, at + offset, "%s · %s" % [city.name, city.specialization], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, CREAM)
-		draw_string(font, at + offset + Vector2(0, 15), "%d 人  供电 %.0f%%" % [int(city.population), float(city.service) * 100.0], HORIZONTAL_ALIGNMENT_LEFT, -1, 10, color)
-	draw_string(font, Vector2(16, size.y - 9), "点击城市定位  ·  圆点大小表示人口  ·  绿色 稳定供电  /  橙色 需要改善", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, MUTED)
+		var caption := str(city.name)
+		var caption_width := font.get_string_size(caption,HORIZONTAL_ALIGNMENT_LEFT,-1,14).x
+		var caption_at := at+Vector2(14,-10 if int(city.id)%2==0 else 17)
+		caption_at.x = clampf(caption_at.x,12,maxf(12,size.x-caption_width-12))
+		draw_string(font,caption_at,caption,HORIZONTAL_ALIGNMENT_LEFT,-1,14,CREAM)
+	draw_string(font, Vector2(16, size.y - 28), "点击城市定位 · 圆点大小表示人口", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, MUTED)
+	draw_string(font, Vector2(16, size.y - 9), "青色 稳定供电 / 琥珀色 需要改善", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, MUTED)
 
 func _background() -> StyleBoxFlat:
 	var style := StyleBoxFlat.new()

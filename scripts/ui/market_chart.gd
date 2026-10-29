@@ -9,10 +9,10 @@ const MINT := Color("77dbc0")
 const ORANGE := Color("efbb7d")
 const TEXT := Color("b6cbd0")
 const GRID := Color(0.55, 0.72, 0.76, 0.14)
-const FONT_SIZE := 11
+const FONT_SIZE := 14
 
 func _init() -> void:
-	custom_minimum_size = Vector2(700, 145)
+	custom_minimum_size = Vector2(0, 144)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 
 func _ready() -> void:
@@ -21,16 +21,19 @@ func _ready() -> void:
 	mouse_exited.connect(_clear_hover)
 
 func set_points(value: Array) -> void:
-	points.clear()
+	var next_points: Array[Dictionary] = []
 	for item in value:
 		if item is Dictionary:
-			points.append(item.duplicate())
+			next_points.append(item.duplicate())
+	if points == next_points:
+		return
+	points = next_points
 	_hovered = -1
 	tooltip_text = ""
 	queue_redraw()
 
 func _plot_rect() -> Rect2:
-	return Rect2(Vector2(54, 35), Vector2(maxf(1, size.x - 70), maxf(1, size.y - 61)))
+	return Rect2(Vector2(54, 38), Vector2(maxf(1, size.x - 70), maxf(1, size.y - 66)))
 
 func _maximum() -> float:
 	var maximum := 100.0
@@ -90,7 +93,8 @@ func _draw() -> void:
 			draw_dashed_line(Vector2(x, area.position.y), Vector2(x, area.end.y), Color(TEXT, 0.35), 1, 3, true)
 			draw_string(font, Vector2(minf(x + 4, area.end.x - 31), area.position.y + 12), "D+%d" % (day - first_day), HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SIZE, TEXT)
 		last_day = day
-		if i % 4 == 0:
+		var label_stride := 6 if area.size.x < 340 else 4
+		if i % label_stride == 0:
 			var label := "现在" if i == 0 else "%02d:00" % hour
 			var width := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SIZE).x
 			draw_string(font, Vector2(clampf(x - width * 0.5, area.position.x - 6, size.x - width - 5), area.end.y + 18), label, HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SIZE, TEXT)

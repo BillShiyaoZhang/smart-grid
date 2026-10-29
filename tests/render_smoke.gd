@@ -1,5 +1,6 @@
 extends SceneTree
 ## Render actual scenes through the game renderer for visual QA.
+var capture_failures := 0
 var game: Node
 
 func _initialize() -> void:
@@ -58,7 +59,7 @@ func _run() -> void:
 	game._update_inspector()
 	await _capture("night")
 	print("RENDER SMOKE: six real game states captured")
-	quit()
+	quit(1 if capture_failures>0 else 0)
 
 func _capture(title: String) -> void:
 	await process_frame
@@ -66,4 +67,7 @@ func _capture(title: String) -> void:
 	await RenderingServer.frame_post_draw
 	var img := root.get_texture().get_image()
 	DirAccess.make_dir_recursive_absolute("res://docs/screenshots")
-	img.save_png("res://docs/screenshots/"+title+".png")
+	var result: Error = img.save_png("res://docs/screenshots/"+title+".png")
+	if result != OK:
+		capture_failures += 1
+		push_error("Screenshot save failed: "+title)

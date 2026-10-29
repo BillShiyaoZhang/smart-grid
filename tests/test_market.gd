@@ -290,7 +290,7 @@ func _test_save_and_validation() -> void:
 	sim.set_tariff("custom", 70.0, 150.0, 240.0)
 	sim.sign_supply_contract(8.0, 12.0)
 	sim.step(0.25)
-	var path := "/tmp/tidal-grid-market-test.json"
+	var path := "user://test_tidal-grid-market-test.json"
 	check(sim.save_game(path).ok and Sim.SCHEMA_VERSION == 4, "market snapshot uses current schema")
 	var restored = Sim.new()
 	check(restored.load_game(path).ok, "market snapshot loads")

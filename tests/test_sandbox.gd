@@ -167,7 +167,7 @@ func _test_regional_save() -> void:
 	check(sim.set_sandbox_goal("regional").ok,"continuing regional goals are player selected")
 	check(sim.research_technology("ac_systems").ok,"a live regional research project can be persisted")
 	sim.step(.4)
-	var path := "/tmp/tidal-sandbox-roundtrip.json"
+	var path := "user://test_tidal-sandbox-roundtrip.json"
 	check(sim.save_game(path).ok,"complete regional state saves")
 	var restored = Sim.new()
 	check(restored.load_game(path).ok,"complete regional state restores atomically")

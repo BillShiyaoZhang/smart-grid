@@ -97,13 +97,27 @@ func _run() -> void:
 	check(is_equal_approx(float(game.sim.elapsed_hours),before+0.25),"explicit advance executes fifteen game minutes inside modal")
 	key(KEY_ESCAPE)
 	check(not desk.visible and not game._modal_open(),"Escape closes digital operations modal")
-	press(game.root_ui,"数字电网  N")
+	press(game.root_ui,"电网 N")
 	check(desk.visible and desk.tabs.get_tab_count() == 4 and desk.cards.has("observed") and desk.cards.has("trusted"),"navigation opens four digital tabs with distinct path and observation indicators")
 	var pure_snapshot: Dictionary = game.sim.snapshot().duplicate(true)
 	for i in 4:
 		desk.tabs.current_tab = i
 		desk.refresh(i%2 == 0)
 	check(same_values(game.sim.snapshot(),pure_snapshot),"digital queries and tab refresh do not advance observations queues or costs")
+	choose(desk.drill_target,2)
+	check(desk.selected_device==2 and desk.device_picker.get_selected_id()==2,"security target directly selects the shared device without visiting topology")
+	choose(desk.device_picker,10)
+	check(desk.drill_target.get_selected_id()==10,"topology selection keeps the explicit security target synchronized")
+	desk.policy_picker.select(1)
+	desk.refresh()
+	check(desk.policy_picker.selected==1 and game.sim.digital.state.policy=="open","routine refresh preserves an unapplied security policy draft")
+	desk.refresh(true)
+	desk.tabs.current_tab=0
+	var construction_toggle := button_in(desk,"＋ 新建通信连接")
+	construction_toggle.button_pressed=true
+	check(desk.link_quote.is_visible_in_tree(),"link construction details open on demand")
+	construction_toggle.button_pressed=false
+	check(not desk.link_quote.is_visible_in_tree(),"link construction details collapse without changing the simulation")
 
 	# Build a real relay, then prove communication does not supply electrical power.
 	press(desk,"通信中继")
@@ -225,6 +239,10 @@ func _run() -> void:
 	check(not game.sim.digital.incidents.back().detected and "当前没有已确认" in labels(desk.incidents_box),"unconfirmed incident details are absent from public alert UI")
 	advance(3)
 	check(game.sim.digital.incidents.back().detected and "设备 02" in labels(desk.incidents_box),"time and detection make the incident target available to the player")
+	var detected_id: int=game.sim.digital.incidents.back().id
+	var incident_label: Label=desk.incident_labels[detected_id]
+	desk.refresh()
+	check(desk.incident_labels[detected_id]==incident_label and is_instance_valid(incident_label),"routine event refresh retains the existing detail control and its reading position")
 	press(desk,"恢复 / 修补设备")
 	check(float(game.sim.digital.devices[2].recover_remaining) > 0.0,"recovery button starts a timed patch job")
 	advance(3)
@@ -276,7 +294,7 @@ func _run() -> void:
 	press(desk,"发送远程开关指令")
 	choose(desk.circuit_picker,4)
 	press(desk,"巡检定位")
-	var path := "/tmp/tidal_digital_ui_save.json"
+	var path := "user://test_tidal_digital_ui_save.json"
 	var saved_digital: Dictionary = game.sim.digital.snapshot().duplicate(true)
 	check(game.sim.save_game(path).ok,"digital graph observations and pending work save successfully")
 	game.sim.step(0.25)

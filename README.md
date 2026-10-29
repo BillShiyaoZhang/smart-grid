@@ -33,6 +33,14 @@ macOS 已安装 Godot 时，也可直接双击 `run_game.command` 启动游戏�
 
 开局可先选择「连线」，连接中央变电站与东侧工业园区，完成「点亮海湾」。更详细的模型和上手说明见 [架构与玩法说明](docs/ARCHITECTURE.md)。
 
+## 界面与信息层级
+
+地图默认仅显示当前委托、底部工具栏与经营状态。点击发电、输电、储能、城市或数字设施展开分类建设托盘，目录覆盖全部 29 种设施；选中地图对象后，右侧检查器显示读数与操作，高级控制按需展开。
+
+左侧「图层」「统计」提供专题视图、供需曲线、拓扑和详细运行指标；左上委托详情提供研究、需求响应与风暴演练。右上角集中已知告警、日志、存读档与帮助。轻量面板不暂停时间，Esc 优先收起浮层，再取消当前工具。
+
+市场、数字电网与科技中心采用统一规划窗口，保留自动暂停与手动推进时间。科技中心提供六时代导航，设施运行与建设目录分开，历史开局位于「场景选项」。窗口最低支持 1280 × 720，默认 1440 × 900。
+
 ## 操作
 
 以下快捷键由主程序实现；若修改输入逻辑，请同步本表。
@@ -79,6 +87,8 @@ macOS 已安装 Godot 时，也可直接双击 `run_game.command` 启动游戏�
 /Applications/Godot.app/Contents/MacOS/Godot --headless --path . -s tests/test_planning_game.gd --log-file /tmp/tidal-planning-game-test.log
 /Applications/Godot.app/Contents/MacOS/Godot --headless --path . -s tests/test_dc_solver.gd --log-file /tmp/tidal-dc-solver-test.log
 ```
+
+新增 `tests/test_hud.gd` 验证情境面板、分类目录、真实键盘输入、经营中心互斥和四种窗口尺寸；`tests/render_ui_matrix.gd` 将 76 个界面与尺寸组合截图保存到 `.godot/ui-qa/`。Windows 可使用安装目录内的 `Godot_v4.7.2-stable_win64_console.exe` 执行相同命令。测试存档使用隔离的 `user://test_*` 路径并在结束时删除。
 
 仿真测试检查网络功率守恒、环网分流、储能能量、保护和维修、确定性、存档、任务和自动恢复；集成测试实例化真实主场景，验证界面操作、地图建造接线及模型同步。
 

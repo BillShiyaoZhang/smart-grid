@@ -254,7 +254,7 @@ func _test_forecasts_and_persistence() -> void:
 	sim.next_storm_at = 10000.0
 	sim.step(9.2)
 	check(sim.digital.warning_sent and sim.digital.incidents.is_empty(), "scheduled network event receives an advance warning")
-	var path := "/tmp/tidal-grid-digital-test.json"
+	var path := "user://test_tidal-grid-digital-test.json"
 	check(sim.save_game(path).ok and Sim.SCHEMA_VERSION == 4, "expanded simulation uses schema four")
 	var loaded = Sim.new()
 	check(loaded.load_game(path).ok, "digital topology and cached state load")

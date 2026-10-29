@@ -1,5 +1,7 @@
 extends Node3D
 
+const UI = preload("res://scripts/ui/ui_kit.gd")
+const GameHud = preload("res://scripts/ui/game_hud.gd")
 const Sim = preload("res://scripts/sim/grid_sim.gd")
 const Models = preload("res://scripts/art/model_factory.gd")
 const Island = preload("res://scripts/art/island_factory.gd")
@@ -17,6 +19,8 @@ const RED := Color("f38a79")
 const GRID_SIZE := 16
 const SPACING := 2.0
 
+var hud: Control
+var inspector_selection := ""
 var sim: RefCounted
 var camera: Camera3D
 var world: Node3D
@@ -542,6 +546,12 @@ func _process(delta: float) -> void:
 		autosave_clock = 0
 		sim.save_game("user://autosave.json")
 
+func _input(event: InputEvent) -> void:
+	# Reserve pause before focused HUD buttons receive the default Space accept.
+	if is_ready and not _modal_open() and event is InputEventKey and event.keycode == KEY_SPACE:
+		if event.pressed and not event.echo: _toggle_pause()
+		get_viewport().set_input_as_handled()
+
 func _unhandled_input(event: InputEvent) -> void:
 	if not is_ready:
 		return
@@ -557,6 +567,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				help_modal.hide()
 			elif welcome.visible:
 				welcome.hide()
+			elif end_modal.visible:
+				end_modal.hide()
+			elif hud.close_top():
+				pass
 			else:
 				_set_tool("select")
 			return
@@ -655,6 +669,8 @@ func _handle_map_click(cell: Vector2i) -> void:
 		_sync_world()
 	_update_inspector()
 	_update_hud()
+	if connection_start >= 0 and tool in ["line","datalink"]:
+		hint_label.text = "起点 %s · 选择终点 · 右键取消" % sim.get_building(connection_start).get("name","")
 
 func _nearest_communication(point: Vector3) -> int:
 	var nearest: int=-1
@@ -723,6 +739,8 @@ func _update_hover() -> void:
 			tooltip_label.hide()
 			return
 	tooltip_label.position = get_viewport().get_mouse_position()+Vector2(18,18)
+	tooltip_label.position.x = minf(tooltip_label.position.x,get_viewport().get_visible_rect().size.x-tooltip_label.size.x-12)
+	tooltip_label.position.y = minf(tooltip_label.position.y,get_viewport().get_visible_rect().size.y-tooltip_label.size.y-12)
 	tooltip_label.show()
 
 func _apply(result: Variant) -> void:
@@ -734,6 +752,8 @@ func _apply(result: Variant) -> void:
 
 func _set_tool(value: String) -> void:
 	tool = value
+	if value == "datalink": overlay = "comm"
+	if value == "select" and hud != null: hud.close_tray()
 	connection_start = -1
 	if ghost:
 		ghost.hide()
@@ -749,17 +769,17 @@ func _set_tool(value: String) -> void:
 	elif tool == "repair":
 		text = "抢修模式 · 点击设施或故障线路派遣队伍"
 	elif tool == "build":
-		text = "建造 %s · 点击空地放置 · 记得连接电缆" % sim.catalog[build_kind].name
+		text = "%s · ¥%s · 点击空地放置 · 右键取消" % [sim.catalog[build_kind].name,_number(sim.catalog[build_kind].price)]
 	hint_label.text = text
 	mode_label.text = "建造规划" if tool == "build" else ("通信布线" if tool=="datalink" else ("电网布线" if tool == "line" else "运行视图"))
 	if communication_root:
 		communication_root.visible=overlay=="comm" or tool=="datalink"
 		cable_root.visible=not communication_root.visible
+	hud.refresh_context()
 
 func _set_build_category(category: String) -> void:
-	build_category=category
-	for kind in build_buttons:
-		build_buttons[kind].visible = kind in ["sensor","control","relay","soc"] if category=="digital" else kind not in ["control","relay","soc"]
+	build_category = category
+	hud.toggle_category(category)
 
 func _toggle_pause() -> void:
 	if speed == 0:
@@ -781,6 +801,9 @@ func _load(path: String="user://tidal_grid_save.json") -> void:
 		item.queue_free()
 	visuals.clear()
 	chart.history.clear()
+	hud.close_popups()
+	hud.close_tray()
+	inspector_selection = ""
 	market_panel.hide()
 	digital_panel.hide()
 	planning_panel.hide()
@@ -800,17 +823,8 @@ func _notify(message: String, positive: bool=true) -> void:
 	notice_label.show()
 	notice_timer = 5.0
 
-func _style(color: Color, radius: int=14, border: Color=Color(0.5,0.7,0.75,0.15)) -> StyleBoxFlat:
-	var s := StyleBoxFlat.new()
-	s.bg_color = color
-	s.set_corner_radius_all(radius)
-	s.border_color = border
-	s.set_border_width_all(1)
-	s.content_margin_left = 18
-	s.content_margin_right = 18
-	s.content_margin_top = 14
-	s.content_margin_bottom = 14
-	return s
+func _style(color: Color, radius: int=8, border: Color=Color("36515b")) -> StyleBoxFlat:
+	return UI.style(color,mini(radius,8),border)
 
 func _panel(parent: Node, position_: Vector2, size_: Vector2, color: Color=PANEL) -> PanelContainer:
 	var p := PanelContainer.new()
@@ -821,44 +835,16 @@ func _panel(parent: Node, position_: Vector2, size_: Vector2, color: Color=PANEL
 	return p
 
 func _label(parent: Node, text: String, font_size: int=16, color: Color=CREAM) -> Label:
-	var l := Label.new()
-	l.text = text
-	l.add_theme_font_size_override("font_size",font_size)
-	l.add_theme_color_override("font_color",color)
-	parent.add_child(l)
-	return l
+	return UI.label(parent,text,font_size,color)
 
-func _button(parent: Node, text: String, callback: Callable, min_size: Vector2=Vector2(0,38), toggle: bool=false) -> Button:
-	var b := Button.new()
-	b.text = text
-	b.custom_minimum_size = min_size
-	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	b.toggle_mode = toggle
-	b.focus_mode = Control.FOCUS_NONE
-	for spec in [["normal",Color("1c3e4b"),Color(0.5,0.7,0.75,0.15)],["hover",Color("2b5260"),TEAL*Color(1,1,1,0.5)],["pressed",Color("3d6a69"),TEAL]]:
-		var box := _style(spec[1],8,spec[2])
-		box.content_margin_top = 7
-		box.content_margin_bottom = 7
-		box.content_margin_left = 9
-		box.content_margin_right = 9
-		b.add_theme_stylebox_override(spec[0],box)
-	b.add_theme_color_override("font_color",CREAM)
-	b.add_theme_font_size_override("font_size",14)
-	b.pressed.connect(callback)
-	parent.add_child(b)
-	return b
+func _button(parent: Node, text: String, callback: Callable, min_size: Vector2=Vector2(0,36), toggle: bool=false) -> Button:
+	return UI.button(parent,text,callback,min_size,toggle)
 
 func _column(parent: Node, separation: int=10) -> VBoxContainer:
-	var v := VBoxContainer.new()
-	v.add_theme_constant_override("separation",separation)
-	parent.add_child(v)
-	return v
+	return UI.column(parent,separation)
 
 func _row(parent: Node, separation: int=10) -> HBoxContainer:
-	var h := HBoxContainer.new()
-	h.add_theme_constant_override("separation",separation)
-	parent.add_child(h)
-	return h
+	return UI.row(parent,separation)
 
 func _setup_ui() -> void:
 	var layer := CanvasLayer.new()
@@ -867,156 +853,65 @@ func _setup_ui() -> void:
 	root_ui.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	root_ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(root_ui)
-	var theme := Theme.new()
-	var font := load("res://assets/fonts/NotoSansCJKsc-Regular.otf") as Font
-	theme.default_font = font
-	theme.default_font_size = 16
-	root_ui.theme = theme
-	# Top navigation.
-	var top := _panel(root_ui,Vector2(22,20),Vector2(1556,65),Color("102a36f5"))
-	var row := _row(top,18)
-	var emblem := _label(row,"ϟ",34,TEAL)
-	emblem.custom_minimum_size.x = 27
-	var brand := _column(row,0)
-	_label(brand,"潮汐电网",23)
-	_label(brand,"T I D A L   G R I D",9,MUTED)
-	var divider := VSeparator.new()
-	row.add_child(divider)
-	var place := _column(row,1)
-	_label(place,"青屿湾  /  QINGYU BAY",14)
-	weather_label = _label(place,"沿海试点 · 晴朗",11,MUTED)
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(spacer)
-	time_label = _label(row,"第 1 天  08:00",17)
-	_button(row,"Ⅱ",_toggle_pause,Vector2(42,36))
-	for value in [1,3,8]:
-		_button(row,"%d×" % value,func(): speed=value; _update_hud(),Vector2(40,36))
-	_button(row,"存档",_save)
-	_button(row,"读档",_load)
-	_button(row,"电力市场  M",func(): market_panel.open())
-	_button(row,"数字电网  N",func(): digital_panel.open())
-	_button(row,"?",func(): help_modal.show(),Vector2(36,36))
-	# Live indicators.
-	var stats := HBoxContainer.new()
-	stats.position = Vector2(22,100)
-	stats.size = Vector2(1556,77)
-	stats.add_theme_constant_override("separation",10)
-	root_ui.add_child(stats)
-	for spec in [["cash","可用资金","¥ 180,000"],["supply","供电 / 需求","0 / 0 MW"],["reliability","供电可靠率","100.0%"],["renewables","可再生能源","0%"],["battery","储能余量","0 MWh"],["balance","每小时净收益","+ ¥0"]]:
-		var card := PanelContainer.new()
-		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		card.add_theme_stylebox_override("panel",_style(Color("153440ee"),11))
-		stats.add_child(card)
-		var v := _column(card,2)
-		_label(v,spec[1],11,MUTED)
-		hud_values[spec[0]] = _label(v,spec[2],23,TEAL if spec[0] in ["reliability","renewables"] else CREAM)
-	# Left mission board.
-	var mission_panel := _panel(root_ui,Vector2(22,195),Vector2(246,422))
-	var left := _column(mission_panel,8)
-	_label(left,"运营委托",12,TEAL)
-	_label(left,"让每一盏灯亮起",20)
-	var intro := _label(left,"把海湾小城变成可靠、\n清洁的智能电网示范区。",12,MUTED)
-	intro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	mission_box = _column(left,8)
-	var divider2 := HSeparator.new()
-	left.add_child(divider2)
-	research_button = _button(left,"↗ 遥测研究 · ¥16k",_research,Vector2(0,36))
-	research_button.tooltip_text = "一级研究允许通过可信通信获取遥测；二级自愈与需求响应仍需要可达、可信且低时延的控制路径。"
-	var operations := _row(left,6)
-	response_button = _button(operations,"⇄ 需求响应",func(): _apply(sim.demand_response()); _update_hud(),Vector2(100,32))
-	response_button.tooltip_text = "需要二级研究。花费 ¥1,000，让普通用户负荷减少 20%，持续两游戏小时。"
-	_button(operations,"⚑ 风暴演练",_storm,Vector2(100,32))
-	var event_panel := _panel(root_ui,Vector2(22,639),Vector2(246,188))
-	var e := _column(event_panel,6)
-	_label(e,"调度日志",12,TEAL)
-	events_label = RichTextLabel.new()
-	events_label.bbcode_enabled = true
-	events_label.custom_minimum_size = Vector2(204,120)
-	events_label.scroll_active = false
-	events_label.add_theme_font_size_override("normal_font_size",11)
-	events_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	e.add_child(events_label)
-	# Right inspector and chart.
-	var inspector := _panel(root_ui,Vector2(1280,195),Vector2(298,445))
-	var inspect_scroll := ScrollContainer.new()
-	inspect_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	inspector.add_child(inspect_scroll)
-	inspector_box = _column(inspect_scroll,9)
-	inspector_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var graph_panel := _panel(root_ui,Vector2(1280,662),Vector2(298,180))
-	var graph_v := _column(graph_panel,8)
-	_label(graph_v,"供需趋势",13,CREAM)
-	_label(graph_v,"● 本地发电 + 进口    ● 需求",10,MUTED)
-	chart = Chart.new()
-	chart.custom_minimum_size = Vector2(258,94)
-	graph_v.add_child(chart)
-	# Map controls.
-	var map_tools := _panel(root_ui,Vector2(292,195),Vector2(570,52),Color("102c38d5"))
-	var m := _row(map_tools,8)
-	mode_label = _label(m,"运行视图",12,TEAL)
-	for spec in [["select","↖ 选择 1"],["line","⌁ 连线 2"],["repair","＋ 抢修 3"],["datalink","⌁ 通信 4"]]:
-		var key: String = spec[0]
-		tool_buttons[key] = _button(m,spec[1],func(): _set_tool(key),Vector2(0,30),true)
-	tool_buttons.select.button_pressed = true
-	var overlays := _panel(root_ui,Vector2(915,195),Vector2(341,52),Color("102c38d5"))
-	var ov := _row(overlays,7)
-	_label(ov,"图层",11,MUTED)
-	for spec in [["normal","景观"],["power","功率"],["health","健康"],["comm","通信"]]:
-		var key: String = spec[0]
-		_button(ov,spec[1],func(): overlay=key; _sync_world(),Vector2(0,30))
-	# Construction palette.
-	var dock := _panel(root_ui,Vector2(292,856),Vector2(964,116),Color("102b38f5"))
-	var dock_v := _column(dock,7)
-	var dock_head := _row(dock_v)
-	_label(dock_head,"基础建设",12,TEAL)
-	_label(dock_head,"BUILD THE NEXT CURRENT",10,MUTED)
-	_button(dock_head,"电力设施",func(): _set_build_category("power"),Vector2(0,24))
-	_button(dock_head,"数字设施",func(): _set_build_category("digital"),Vector2(0,24))
-	_button(dock_head,"代际科技 · 区域沙盘  T",func(): planning_panel.open(),Vector2(0,24))
-	var palette := _row(dock_v,7)
-	for kind in ["gas","solar","wind","battery","substation","home","factory","sensor","intertie","control","relay","soc"]:
-		if not Sim.CATALOG.has(kind):
-			continue
-		var data: Dictionary = Sim.CATALOG[kind]
-		var caption: String = ("市场联络" if kind=="intertie" else str(data.name))+"\n¥"+_compact(float(data.get("price",10000)))
-		var key: String = kind
-		var btn := _button(palette,caption,func(): build_kind=key; _set_tool("build"),Vector2(96,56),true)
-		var icon_path := "res://assets/icons/%s.png" % kind
-		if ResourceLoader.exists(icon_path):
-			btn.icon = load(icon_path)
-			btn.expand_icon = true
-			btn.add_theme_constant_override("icon_max_width",26)
-			btn.add_theme_font_size_override("font_size",12)
-			btn.add_theme_constant_override("h_separation",2)
-		btn.tooltip_text = str(data.get("description",""))
-		build_buttons[kind] = btn
-	_set_build_category("power")
-	var market_card := _panel(root_ui,Vector2(1280,864),Vector2(298,108),Color("102b38f5"))
-	var market_box := _column(market_card,4)
-	market_ticker = _label(market_box,"现货 ¥0 / MWh",15,TEAL)
-	_button(market_box,"⇄ 电价 · 交易 · 结算   M",func(): market_panel.open(),Vector2(0,32))
-	var digital_bar:=_panel(root_ui,Vector2(292,784),Vector2(964,45),Color("102b38ed"))
-	var digital_row:=_row(digital_bar,12)
-	digital_ticker=_label(digital_row,"通信与安全状态",12,Color("81c9ee"))
-	digital_ticker.size_flags_horizontal=Control.SIZE_EXPAND_FILL
-	_button(digital_row,"数字运行中心  N",func(): digital_panel.open(),Vector2(0,24))
-	# Footers.
-	var footer := _column(root_ui,4)
-	footer.position = Vector2(26,875)
-	_label(footer,"青屿湾电力管理局",12,INK)
-	_label(footer,"WASD / 中键  平移\n滚轮  缩放   Q/E  旋转\n空格  暂停   M  电力市场\nT  科技与区域沙盘",11,INK)
-	hint_label = _label(root_ui,"选择设施，查看运行状态",12,INK)
-	hint_label.position = Vector2(302,752)
-	notice_label = _label(root_ui,"",15,TEAL)
-	notice_label.position = Vector2(476,696)
-	notice_label.add_theme_stylebox_override("normal",_style(Color("0c2531e8"),8))
-	notice_label.hide()
-	tooltip_label = _label(root_ui,"",12)
-	tooltip_label.add_theme_stylebox_override("normal",_style(Color("0c2531f5"),6))
-	tooltip_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	tooltip_label.hide()
+	root_ui.theme = UI.create_theme()
+	hud = GameHud.new()
+	root_ui.add_child(hud)
+	hud.setup(self)
+	hud.tool_requested.connect(_set_tool)
+	hud.build_requested.connect(func(kind: String): build_kind=kind; _set_tool("build"))
+	hud.overlay_requested.connect(func(value: String): overlay=value; _sync_world(true); hud.refresh_context())
+	hud.center_requested.connect(_open_center)
+	hud.action_requested.connect(_hud_action)
+	hud_values = hud.values
+	tool_buttons = hud.tool_buttons
+	build_buttons = hud.build_buttons
+	inspector_box = hud.inspector_box
+	mission_box = hud.mission_box
+	events_label = hud.events_label
+	research_button = hud.research_button
+	response_button = hud.response_button
+	time_label = hud.time_label
+	weather_label = hud.weather_label
+	hint_label = hud.hint_label
+	mode_label = hud.mode_label
+	notice_label = hud.notice_label
+	tooltip_label = hud.tooltip_label
+	market_ticker = hud.market_ticker
+	digital_ticker = hud.digital_ticker
+	chart = hud.chart
+	topology = hud.topology
 	_setup_modals()
+
+func _prepare_center(center: Control) -> void:
+	for other in [market_panel,digital_panel,planning_panel]:
+		if other != null and other != center: other.hide()
+	hud.close_popups()
+	hud.close_tray()
+	tooltip_label.hide()
+	if ghost: ghost.hide()
+
+func _open_center(value: String) -> void:
+	match value:
+		"market": market_panel.open()
+		"network": digital_panel.open()
+		"planning": planning_panel.open()
+
+func _hud_action(value: String) -> void:
+	match value:
+		"pause": _toggle_pause()
+		"speed_1", "speed_3", "speed_8": speed=int(value.trim_prefix("speed_")); previous_speed=speed; _update_hud()
+		"save": _save()
+		"load": _load()
+		"help": help_modal.show()
+		"research": _research()
+		"response": _apply(sim.demand_response()); _update_hud()
+		"storm": _storm()
+		"clear_selection":
+			selected_id=-1
+			selected_line=-1
+			selected_comm_line=-1
+			_update_inspector()
+			_sync_world()
 
 func _compact(value: float) -> String:
 	if absf(value) >= 1000:
@@ -1050,15 +945,15 @@ func _update_hud() -> void:
 	var renewable: float = float(t.get("renewable_share",0))
 	if renewable <= 1.001:
 		renewable *= 100
-	hud_values.renewables.text = "%.0f%%" % renewable
-	hud_values.battery.text = "%.1f MWh" % t.get("battery_mwh",0)
+	hud_values.renewables.text = "清洁能源 %.0f%%" % renewable
+	hud_values.battery.text = "储能 %.1f MWh" % t.get("battery_mwh",0)
 	var balance: float = float(t.get("income",0))-float(t.get("expenses",0))
-	hud_values.balance.text = ("+ " if balance>=0 else "− ")+"¥"+_number(absf(balance))
+	hud_values.balance.text = ("+ " if balance>=0 else "− ")+"¥"+_number(absf(balance))+"/h"
 	hud_values.balance.add_theme_color_override("font_color",TEAL if balance>=0 else RED)
 	var hours: float = fmod(float(sim.time_hours),24)
-	time_label.text = "第 %d 天  %02d:%02d  %s" % [sim.day,int(hours),int(fmod(hours,1)*60),"暂停" if speed==0 else "%d×" % speed]
+	time_label.text = "第 %d 天  %02d:%02d" % [sim.day,int(hours),int(fmod(hours,1)*60)]
 	var translated := {"clear":"晴朗","sunny":"晴朗","cloudy":"多云","storm":"风暴","windy":"海风"}
-	weather_label.text = "沿海试点 · "+str(translated.get(sim.weather,sim.weather))
+	weather_label.text = str(translated.get(sim.weather,sim.weather))
 	research_button.text = ["↗ 遥测研究 · ¥16k","↗ 自愈研究 · ¥32k","✓ 数字化研究完成"][mini(2,int(sim.research_level))]
 	research_button.disabled = sim.research_level >= 2 or (sim.evolution.heritage and not sim.evolution.has_technology("scada"))
 	for kind in build_buttons:
@@ -1073,14 +968,14 @@ func _update_hud() -> void:
 			var name_: String = str(objective.get("title",objective.get("name","运营目标")))
 			var l := _label(mission_box,("✓  " if done else "○  ")+name_,12,TEAL if done else CREAM)
 			l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-			l.custom_minimum_size.x = 207
+			l.custom_minimum_size.x = 260
 			if not done and first_active:
 				first_active = false
 				var desc: String = str(objective.get("description",objective.get("detail","")))
 				if not desc.is_empty():
 					var d := _label(mission_box,desc,10,MUTED)
 					d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-					d.custom_minimum_size.x = 207
+					d.custom_minimum_size.x = 260
 		mission_snapshot = mission_text
 	var all_finished := true
 	for objective in sim.objectives:
@@ -1093,13 +988,14 @@ func _update_hud() -> void:
 		last_finished = true
 		_show_result(false)
 	var logs := ""
-	for i in range(maxi(0,sim.log_entries.size()-4),sim.log_entries.size()):
+	for i in range(maxi(0,sim.log_entries.size()-30),sim.log_entries.size()):
 		var entry: Variant = sim.log_entries[i]
 		if entry is Dictionary:
 			logs += "[color=#7ed9c2]•[/color] "+str(entry.get("message",entry.get("text","")))+"\n\n"
 		else:
 			logs += "• "+str(entry)+"\n\n"
 	events_label.text = logs
+	hud.refresh_context()
 
 func _number(value: float) -> String:
 	var whole := roundi(value)
@@ -1124,38 +1020,83 @@ func _paragraph(parent: Node, text: String, color: Color=MUTED, font_size: int=1
 	return l
 
 func _update_inspector() -> void:
-	topology = null
-	_clear_children(inspector_box)
-	inspector_box.add_theme_constant_override("separation",9)
-	if selected_comm_line>=0:
-		_inspect_communication()
+	hud.refresh_context()
+	if selected_id < 0 and selected_line < 0 and selected_comm_line < 0: return
+	var selection := str([selected_id,selected_line,selected_comm_line])
+	if selection != inspector_selection:
+		inspector_selection = selection
+		_clear_children(inspector_box)
+		_populate_inspector()
+		_organize_inspector()
+		hud.inspector_scroll.scroll_vertical = 0
 		return
-	if selected_line >= 0:
-		_inspect_line()
-		return
+	# Build a detached presentation and reconcile values in place. Existing buttons,
+	# focus and scroll survive normal simulation refreshes.
+	var live := inspector_box
+	var draft := VBoxContainer.new()
+	inspector_box = draft
+	_populate_inspector()
+	_organize_inspector()
+	inspector_box = live
+	if _ui_shape(live) == _ui_shape(draft):
+		_sync_ui_values(live,draft)
+	else:
+		var scroll: int = hud.inspector_scroll.scroll_vertical
+		_clear_children(live)
+		for child in draft.get_children(): draft.remove_child(child); live.add_child(child)
+		hud.inspector_scroll.set_deferred("scroll_vertical",scroll)
+	draft.free()
+
+func _ui_shape(node: Node) -> String:
+	var result := node.get_class()
+	for child in node.get_children(): result += "("+_ui_shape(child)+")"
+	return result
+
+func _sync_ui_values(live: Node, draft: Node) -> void:
+	if live is Label:
+		live.text = draft.text
+		live.add_theme_color_override("font_color",draft.get_theme_color("font_color"))
+	elif live is Button:
+		live.text = draft.text
+		live.disabled = draft.disabled
+		live.tooltip_text = draft.tooltip_text
+	for i in live.get_child_count(): _sync_ui_values(live.get_child(i),draft.get_child(i))
+
+func _organize_inspector() -> void:
+	var advanced: Array[Node] = []
+	var demolition: Node
+	var dispatch_next := false
+	for child in inspector_box.get_children():
+		if child is Button:
+			if "拆除" in child.text: demolition=child; continue
+			if "运行边界" in child.text or "策略" in child.text or "运行中心" in child.text or "交易中心" in child.text: advanced.append(child)
+		elif child is Label and "燃气出力上限" in child.text:
+			advanced.append(child)
+			dispatch_next = true
+		elif dispatch_next:
+			advanced.append(child)
+			dispatch_next = false
+	if not advanced.is_empty():
+		var toggle := _button(inspector_box,"高级控制  ▾",func(): hud.advanced_open=not hud.advanced_open; _set_advanced_visible(),Vector2(0,34),true)
+		toggle.button_pressed = hud.advanced_open
+		var box := _column(inspector_box,8)
+		box.name = "AdvancedControls"
+		box.visible = hud.advanced_open
+		for child in advanced: inspector_box.remove_child(child); box.add_child(child)
+	if demolition:
+		inspector_box.move_child(demolition,inspector_box.get_child_count()-1)
+		demolition.add_theme_color_override("font_color",RED)
+
+func _set_advanced_visible() -> void:
+	var box := inspector_box.get_node_or_null("AdvancedControls")
+	if box: box.visible = hud.advanced_open
+
+func _populate_inspector() -> void:
+	inspector_box.add_theme_constant_override("separation",8)
+	if selected_comm_line >= 0: _inspect_communication(); return
+	if selected_line >= 0: _inspect_line(); return
 	var b: Dictionary = sim.get_building(selected_id) if selected_id >= 0 else {}
-	if b.is_empty():
-		inspector_box.add_theme_constant_override("separation",4)
-		_label(inspector_box,"调度控制台",12,TEAL)
-		_label(inspector_box,"八座城，一张网" if sim.region.active else "一座岛，一张网",22)
-		var sep := HSeparator.new()
-		inspector_box.add_child(sep)
-		_stat(inspector_box,"联网设施","%d 座" % sim.buildings.size())
-		_stat(inspector_box,"电力线路","%d 条" % sim.lines.size())
-		_stat(inspector_box,"数字化等级","L%d" % sim.research_level,TEAL)
-		_button(inspector_box,"代际科技与区域规划  T",func(): planning_panel.open(),Vector2(0,30))
-		_stat(inspector_box,"抢修队伍","%d / 2 作业" % sim.totals.get("crews_busy",0))
-		_stat(inspector_box,"风暴预报","%.1f 小时后" % sim.totals.get("storm_in",6),ORANGE)
-		_stat(inspector_box,"瞬时发电","%.2f MW" % sim.totals.get("generation",0))
-		_stat(inspector_box,"失供补偿","¥%.0f / h" % sim.totals.get("outage_cost",0))
-		_stat(inspector_box,"碳排放","%.1f t/h" % sim.totals.get("carbon",0))
-		_stat(inspector_box,"累计可靠率","%.1f%%" % (100*float(sim.totals.get("reliability_lifetime",1))),TEAL)
-		topology = Chart.new()
-		topology.mode = "topology"
-		topology.sim = sim
-		topology.custom_minimum_size = Vector2(242,76)
-		inspector_box.add_child(topology)
-		return
+	if b.is_empty(): return
 	_label(inspector_box,"设施档案  /  ASSET %02d" % int(b.id),11,TEAL)
 	_label(inspector_box,str(b.name),23)
 	var status := "正常运行" if b.get("online",true) else "已停机"
@@ -1201,7 +1142,6 @@ func _update_inspector() -> void:
 	_button(actions,"＋ 维护 ¥1.2k",func(): _apply(sim.repair(id)); _update_inspector(),Vector2(113,34))
 	_button(inspector_box,"⌁  从这里连接线路",func(): _set_tool("line"); connection_start=id; _notify("再点击目标设施，完成接线"),Vector2(0,34))
 	_button(inspector_box,"拆除设施 · 回收部分资金",func(): _apply(sim.demolish(id)); selected_id=-1; _sync_world(true); _update_hud(); _update_inspector(),Vector2(0,30))
-	topology = null
 
 func _inspect_line() -> void:
 	var line: Dictionary=sim.get_line(selected_line)
@@ -1264,13 +1204,20 @@ func _storm() -> void:
 	_update_hud()
 	_update_inspector()
 
-func _modal(parent: Node, width: float=780, height: float=570) -> Control:
+func _modal(parent: Node, width: float=780, height: float=600) -> Control:
 	var shade := ColorRect.new()
-	shade.color = Color(0.025,0.075,0.1,0.72)
+	shade.color = Color(.025,.065,.08,.86)
 	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	parent.add_child(shade)
-	var panel := _panel(shade,Vector2((1600-width)/2,(1000-height)/2),Vector2(width,height),Color("102d3bf9"))
+	var panel := PanelContainer.new()
 	panel.name = "Dialog"
+	panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	panel.offset_left = -width/2
+	panel.offset_right = width/2
+	panel.offset_top = -height/2
+	panel.offset_bottom = height/2
+	panel.add_theme_stylebox_override("panel",UI.style(UI.SURFACE,10,Color("46616a"),20,true))
+	shade.add_child(panel)
 	return shade
 
 func _setup_modals() -> void:
@@ -1278,45 +1225,70 @@ func _setup_modals() -> void:
 	dialog_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	dialog_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root_ui.add_child(dialog_layer)
-	welcome = _modal(dialog_layer,780,582)
-	var v := _column(welcome.get_node("Dialog"),12)
+	welcome = _modal(dialog_layer,740,600)
+	var v := _column(welcome.get_node("Dialog"),10)
 	if ResourceLoader.exists("res://assets/art/bay_cover.png"):
 		var art := TextureRect.new()
 		art.texture = load("res://assets/art/bay_cover.png")
-		art.custom_minimum_size = Vector2(740,212)
+		art.custom_minimum_size = Vector2(0,190)
 		art.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		art.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
 		v.add_child(art)
-	else:
-		_label(v,"T I D A L   G R I D",13,TEAL)
-	_label(v,"潮汐电网",38)
+	_label(v,"潮汐电网",34)
 	_label(v,"让清洁能源，点亮一座海湾。",19,TEAL)
 	_paragraph(v,"你接手了青屿湾的供电网络。建设发电设施，连接城区，平衡昼夜供需，并在风暴来临时守住每一盏灯。",CREAM,15)
-	var steps := _row(v,12)
-	for text in ["01  建造与接线","02  调度与储能","03  抢修与升级"]:
-		_label(steps,text,15,ORANGE)
-	_label(v,"左键交互 · 右键取消 · 滚轮缩放 · 空格暂停 · H 操作指南",12,MUTED)
-	_button(v,"开始运营   →",func(): welcome.hide(); _notify("先用连线工具，把东部工业园区接到中央变电站。"),Vector2(0,48))
-	help_modal = _modal(dialog_layer,750,850)
+	UI.spacer(v).size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_label(v,"建造与接线  →  调度与储能  →  抢修与扩建",15,ORANGE)
+	_label(v,"左键交互 · 右键取消 · 空格暂停 · H 调度员手册",14,MUTED)
+	var begin := _button(v,"开始运营   →",func(): welcome.hide(); _notify("用接线工具连接中央变电站与东部工业园区。"),Vector2(0,48))
+	begin.add_theme_stylebox_override("normal",UI.style(Color("28584f"),6,TEAL,10))
+	help_modal = _modal(dialog_layer,1040,620)
 	var h := _column(help_modal.get_node("Dialog"),14)
-	_label(h,"调度员手册",28)
-	_paragraph(h,"建设 → 接线 → 平衡供需 → 观察线路 → 处理故障 → 升级扩建",TEAL,17)
-	for pair in [["建设与接线","在下方选择设施，点击空地建造。选择「连线」，依次点击两座设施。所有设施都需要电气连接，电池本身不能发电。"],["调度与储能","光伏随太阳变化，风机随天气变化。燃气提供可调备用。电池在富余时充电、短缺时放电；MW 是功率，MWh 是储存能量。"],["故障与恢复","橙色线路接近过载，红色线路已故障。点击线路可派抢修队或操作断路器。建设第二条供电路径能分散潮流，提高韧性。"],["数字化升级","左侧「遥测研究 / 自愈研究」解锁全网遥测，随后开放自动恢复和需求响应。研究费用显示在按钮上。"],["经营目标","完成左侧委托获得奖励。自然风暴在第 1 天 14:00 抵达，每 30 小时再来；失供电按 ¥60/MWh 支付补偿。每 90 秒写入独立自动存档。"]]:
-		_label(h,pair[0],15,ORANGE)
-		_paragraph(h,pair[1],CREAM,13)
-	_label(h,"电力市场与零售定价",15,ORANGE)
-	_paragraph(h,"建造市场联络站并接线后，按 M 配置购售电、峰平谷电价、储能与锁价合约。高价会减少需求、损害满意度；合约用不完仍需付费。交易中心可推进 1 小时检查真实账单。",CREAM,13)
-	_label(h,"通信、定位与网络安全",15,ORANGE)
-	_paragraph(h,"按 N 管理独立通信网，按 4 在地图铺线。可信遥测可以定位故障，远程命令须经过路径验证；失联先巡检或派现场开关队。研究与安全中心改善自愈和检测，隔离与修补会占用时间。",CREAM,13)
-	_label(h,"WASD / 中键平移 · Q/E 旋转 · M 市场 · N 数字电网 · T 科技/区域 · F5 / F9 存读档",12,MUTED)
-	_button(h,"返回海湾",func(): help_modal.hide(),Vector2(0,40))
+	var head := _row(h)
+	_label(head,"调度员手册",26)
+	UI.spacer(head)
+	_button(head,"返回海湾  Esc",func(): help_modal.hide())
+	var area := _row(h,24)
+	area.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var topics := _column(area,6)
+	topics.custom_minimum_size.x = 172
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	area.add_child(scroll)
+	var content := _column(scroll,16)
+	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var title := _label(content,"",23,TEAL)
+	var prose := _paragraph(content,"",CREAM,16)
+	prose.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var manual := [
+		["建设与接线","从底部选择发电、输电、储能、城市或数字设施，展开建设目录。选择设施后点击空地放置；接线工具需要依次点击两座设施。所有电力设施都需要电气连接。\n\n右键取消当前工具；Esc 优先关闭展开面板。点击地图上的设施或线路，在右侧查看详情和操作。"],
+		["调度与储能","光伏随太阳变化，风机随天气变化。燃气提供可调备用，电池在富余时充电、短缺时放电。MW 表示当前功率，MWh 表示储存能量。\n\n左侧统计入口提供供需曲线、电网拓扑、清洁能源与储能数据。选中设施后，可从高级控制进入精细调度。"],
+		["故障与恢复","图层入口提供景观、功率、健康和通信视图。可靠观测或现场巡检决定你能看到哪些故障，未知读数不能作为确定信息。\n\n点击线路可以巡检定位、派现场开关队或抢修；远程控制需要可信路径。备用供电路径可以分散潮流，提高韧性。"],
+		["委托与运营","点击左上角当前委托查看完整目标、研究、需求响应和风暴演练。研究解锁能力后仍然需要真实通信路径。\n\n自然风暴首次在第1天14:00抵达，此后每30游戏小时再来；失供电按每MWh ¥60支付补偿。一般操作显示短暂回执，已知异常在右上角告警中保留。"],
+		["电价与交易","按 M 进入市场，配置购售电、零售电价、储能策略和12小时锁价合约。建造市场联络站并接线后才可以交付电力；合约用不完仍需付费。\n\n配置修改后点击应用；刷新、切页和报价不会结算。推进1小时可以观察真实账单。"],
+		["数字电网","按 N 管理独立通信网，按4进入地图通信布线。通信线与电力线分别建设。可信遥测帮助定位故障；失联时可先巡检或派现场队。\n\n安全页面选择明确的演练目标，事件页查看已检测事件与作业回执。隔离和修补需要时间；推进15分钟观察恢复。"],
+		["科技与区域","按 T 浏览六代科技，选中节点后查看前置、费用、时间与解锁设施。研发需要游戏时间，一次开展一个项目。\n\n设施页区分运行设置与建设目录。区域页可以开启八城沙盘、定位城市并设定长期目标。历史开局与恢复位于科技页的场景选项。"],
+		["快捷键与存档","WASD／鼠标中键：平移\n滚轮：缩放　Q／E：旋转\n1：选择　2：接线　3：抢修　4：通信\n空格：暂停／继续　M／N／T：经营中心\nH：手册　F5：保存　F9：读取\n\n右上菜单也提供存读档入口。每90秒写入独立自动存档；经营中心暂停自动时间，返回后继续原有倍率。"]
+	]
+	var topic_buttons: Array[Button] = []
+	for i in manual.size():
+		var index: int = i
+		var button := _button(topics,manual[i][0],func():
+			title.text=manual[index][0]
+			prose.text=manual[index][1]
+			scroll.scroll_vertical=0
+			for j in topic_buttons.size(): topic_buttons[j].button_pressed=j==index
+		,Vector2(0,38),true)
+		topic_buttons.append(button)
+	topic_buttons[0].pressed.emit()
 	help_modal.hide()
-	end_modal = _modal(dialog_layer,650,350)
+	end_modal = _modal(dialog_layer,650,410)
 	end_modal.hide()
 	market_panel = MarketDesk.new()
 	dialog_layer.add_child(market_panel)
 	market_panel.setup(self)
-	digital_panel=DigitalDesk.new()
+	digital_panel = DigitalDesk.new()
 	dialog_layer.add_child(digital_panel)
 	digital_panel.setup(self)
 	planning_panel = PlanningDesk.new()
@@ -1327,14 +1299,18 @@ func _show_result(victory: bool) -> void:
 	var panel := end_modal.get_node("Dialog")
 	_clear_children(panel)
 	var v := _column(panel,18)
-	_label(v,"青屿湾示范区  /  运营报告",12,TEAL)
-	_label(v,"海湾的每一盏灯，都有你的答案。" if victory else "运营资金告急",25,CREAM)
+	_label(v,"青屿湾示范区  /  运营报告",14,MUTED)
+	_label(v,"运营委托完成" if victory else "运营资金告急",26,TEAL if victory else RED)
 	_paragraph(v,"你完成了建设、清洁转型、数字化和风暴恢复四项委托。青屿湾已成为智能电网示范区，接下来按 T 研究更多代际科技、开启八城区域沙盘，或设定长期运营目标。" if victory else "累计亏损已经超过应急额度。你可以继续调整电网与成本，也可以重新接手一座全新的海湾。",CREAM,14)
 	_stat(v,"当前资金","¥ "+_number(sim.cash))
 	_stat(v,"电网规模","%d 设施 · %d 线路" % [sim.buildings.size(),sim.lines.size()])
+	UI.spacer(v).size_flags_vertical = Control.SIZE_EXPAND_FILL
 	var actions := _row(v,12)
-	_button(actions,"继续运营",func(): end_modal.hide(),Vector2(250,44))
-	_button(actions,"重新开始",_new_game,Vector2(250,44))
+	var continue_button := _button(actions,"继续运营",func(): end_modal.hide(),Vector2(0,44))
+	continue_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	continue_button.add_theme_stylebox_override("normal",UI.style(Color("28584f"),6,TEAL,10))
+	var restart := _button(actions,"重新开始",_new_game,Vector2(0,44))
+	restart.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	end_modal.show()
 
 func start_heritage_game(backup_path: String="user://before_heritage.json") -> void:
@@ -1358,6 +1334,9 @@ func _new_game(heritage: bool=false) -> void:
 		item.queue_free()
 	visuals.clear()
 	chart.history.clear()
+	hud.close_popups()
+	hud.close_tray()
+	inspector_selection = ""
 	market_panel.hide()
 	digital_panel.hide()
 	planning_panel.hide()

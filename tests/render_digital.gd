@@ -1,4 +1,5 @@
 extends SceneTree
+var capture_failures := 0
 var game: Node
 func _initialize() -> void:
 	_run.call_deferred()
@@ -48,9 +49,12 @@ func _run() -> void:
 	game._update_inspector()
 	await _capture("digital_observation")
 	print("DIGITAL RENDER: six actual game states captured")
-	quit()
+	quit(1 if capture_failures>0 else 0)
 func _capture(title: String) -> void:
 	await process_frame
 	await process_frame
 	await RenderingServer.frame_post_draw
-	root.get_texture().get_image().save_png("res://docs/screenshots/"+title+".png")
+	var result: Error = root.get_texture().get_image().save_png("res://docs/screenshots/"+title+".png")
+	if result != OK:
+		capture_failures += 1
+		push_error("Screenshot save failed: "+title)
