@@ -2,6 +2,7 @@ extends Control
 ## Player-facing network operations. All truth-sensitive electrical data uses observations.
 const NetworkMap = preload("res://scripts/ui/digital_map.gd")
 const Shell = preload("res://scripts/ui/management_shell.gd")
+const Drafts = preload("res://scripts/ui/config_drafts.gd")
 const TEAL := Color("77dbc0")
 const BLUE := Color("81c9ee")
 const CREAM := Color("f2eddb")
@@ -47,6 +48,30 @@ var _incidents_signature := ""
 var _jobs_signature := ""
 var incident_labels: Dictionary = {}
 var job_labels: Dictionary = {}
+var drafts: RefCounted = Drafts.new()
+var policy_draft: Label
+var _inputs_ready := false
+var _map_selection := Vector3i(-2,-2,-2)
+
+func reset_session() -> void:
+	drafts.clear()
+	_inputs_ready=false
+	_map_selection=Vector3i(-2,-2,-2)
+	_asset_signature=""; _link_signature=""; _circuit_signature=""; _incidents_signature=""; _jobs_signature=""
+	selected_device=10; selected_link=-1; selected_circuit=1
+	if tabs!=null: tabs.current_tab=0
+	if link_kind!=null: link_kind.select(0)
+	if attack_kind!=null: attack_kind.select(0)
+	if link_from!=null: link_from.select(-1)
+	if link_to!=null: link_to.select(-1)
+
+func inherit_selection(building_id: int=-1,line_id: int=-1,comm_line_id: int=-1) -> void:
+	var selected := Vector3i(building_id,line_id,comm_line_id)
+	if selected==_map_selection: return
+	_map_selection=selected
+	if building_id>=0 and not game.sim.get_building(building_id).is_empty(): selected_device=building_id
+	if line_id>=0 and not game.sim.get_line(line_id).is_empty(): selected_circuit=line_id
+	if comm_line_id>=0: selected_link=comm_line_id
 
 func setup(owner_game: Node) -> void:
 	game = owner_game
@@ -54,11 +79,14 @@ func setup(owner_game: Node) -> void:
 	_build()
 	hide()
 func open() -> void:
+	inherit_selection(int(game.selected_id),int(game.selected_line),int(game.selected_comm_line))
 	game._prepare_center(self)
 	refresh(true)
 	show()
 func close() -> void:
+	_capture_policy()
 	hide()
+	if drafts.dirty("security"): game._notify("安全策略草案已保留，尚未应用。")
 	game._update_hud()
 	game._update_inspector()
 func _build() -> void:
@@ -72,11 +100,13 @@ func _build() -> void:
 		game._label(metric,spec[1],14,MUTED)
 		cards[spec[0]] = game._label(metric,spec[2],14,BLUE)
 	tabs = TabContainer.new()
+	tabs.use_hidden_tabs_for_min_size=false
 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	tabs.add_theme_font_size_override("font_size",15)
 	tabs.add_theme_color_override("font_selected_color",BLUE)
 	tabs.add_theme_color_override("font_unselected_color",MUTED)
 	body.add_child(tabs)
+	tabs.tab_changed.connect(_scroll_page_top)
 	_build_network()
 	_build_operations()
 	_build_security()
@@ -86,10 +116,14 @@ func _tab(title: String) -> VBoxContainer:
 	var scroll := ScrollContainer.new()
 	scroll.name = title
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	tabs.add_child(scroll)
 	var v: VBoxContainer = game._column(scroll,12)
 	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	return v
+func _scroll_page_top(_index: int) -> void:
+	var outer: Node=tabs.get_parent().get_parent()
+	if outer is ScrollContainer: outer.scroll_vertical=0
 func _box(parent: Node, width: float) -> VBoxContainer:
 	var card := PanelContainer.new()
 	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -204,7 +238,9 @@ func _build_security() -> void:
 	policy_picker = _select(policy,"访问策略",310)
 	for text in ["开放互联","网络分区","零信任校验"]:
 		policy_picker.add_item(text)
-	policy_button = _primary(game._button(policy,"应用安全策略",func(): _commit(game.sim.set_security_policy(["open","segmented","zero_trust"][policy_picker.selected])),Vector2(0,36)))
+	policy_button = _primary(game._button(policy,"应用安全策略",_apply_policy,Vector2(0,36)))
+	policy_draft=_text(policy,"",ORANGE)
+	game._button(policy,"重置安全策略草案",reset_policy_draft,Vector2(0,34))
 	security_info = _text(policy,"",BLUE)
 	upgrade_button = game._button(policy,"升级安全防护",func(): _commit(game.sim.upgrade_security()),Vector2(0,36))
 	cost_info = _text(policy,"",ORANGE)
@@ -251,7 +287,6 @@ func _connect() -> void:
 func _map_link() -> void:
 	close()
 	game.communication_kind = "fiber" if link_kind.selected==0 else "wireless"
-	game.overlay = "comm"
 	game._set_tool("datalink")
 	game._sync_world(true)
 func _remote() -> void:
@@ -288,6 +323,7 @@ func refresh(sync_inputs: bool=false) -> void:
 		return
 	var sim: RefCounted=game.sim
 	var state: Dictionary=sim.digital.state
+	_capture_policy()
 	network_map.sim=sim
 	network_map.selected_id=selected_device
 	network_map.queue_redraw()
@@ -322,14 +358,40 @@ func refresh(sync_inputs: bool=false) -> void:
 		device_info.text+="\n已确认安全异常：隔离并修补此设备。"
 	_refresh_link()
 	_refresh_circuit()
-	if sync_inputs:
-		policy_picker.select(maxi(0,["open","segmented","zero_trust"].find(state.get("policy","open"))))
+	var policy_values: Dictionary=drafts.retain("security",_effective_policy())
+	policy_picker.select(int(policy_values.mode))
+	_inputs_ready=true
+	var policies: Array[String]=["开放互联","网络分区","零信任校验"]
+	policy_draft.text="未应用草案 · %s → %s" % [policies[int(drafts.baselines.security.mode)],policies[policy_picker.selected]] if drafts.dirty("security") else "✓ 当前策略已生效"
 	security_info.text="安全防护 L%d  ·  已阻挡 %d 次事件\n远程成功 %d 次 / 拒绝 %d 次" % [state.get("security_level",0),state.get("blocked_attacks",0),state.get("remote_success",0),state.get("remote_rejected",0)]
 	var level:=int(state.get("security_level",0))
 	upgrade_button.text="安全研究完成" if level>=2 else "↑ 升级安全防护 · ¥%s" % ("10k" if level==0 else "22k")
 	upgrade_button.disabled=level>=2
 	cost_info.text="通信 ¥%.0f/h · 安全 ¥%.0f/h\n成本已计入经营账本的运维项。" % [sim.totals.get("communication_cost",0),sim.totals.get("security_cost",0)]
 	_refresh_incidents()
+
+func _effective_policy() -> Dictionary:
+	return {"mode":maxi(0,["open","segmented","zero_trust"].find(game.sim.digital.state.get("policy","open")))}
+
+func _capture_policy() -> void:
+	if _inputs_ready: drafts.retain("security",_effective_policy(),{"mode":policy_picker.selected})
+
+func _capture_drafts() -> void:
+	_capture_policy()
+
+func reset_policy_draft() -> void:
+	drafts.reset("security",_effective_policy())
+	policy_picker.select(int(drafts.values.security.mode))
+	refresh(false)
+	message_label.text="已重置安全策略草案；其他选择保持不变。"
+
+func _apply_policy() -> void:
+	_capture_policy()
+	var result: Dictionary=game.sim.set_security_policy(["open","segmented","zero_trust"][policy_picker.selected])
+	if result.get("ok",false):
+		drafts.reset("security",_effective_policy())
+		policy_picker.select(int(drafts.values.security.mode))
+	_commit(result)
 func _refresh_pickers(force: bool) -> void:
 	var signature:=str(game.sim.buildings.map(func(b: Dictionary): return b.id))
 	if force or signature!=_asset_signature:
@@ -414,7 +476,11 @@ func _refresh_incidents() -> void:
 	var jobs: Array=[]
 	jobs.append_array(game.sim.digital.pending_commands)
 	jobs.append_array(game.sim.digital.field_jobs)
-	var job_signature:=str(jobs.map(func(job: Dictionary): return job.id))
+	var receipts: Array=[]
+	if game.sim.has_method("operation_receipts"):
+		for receipt in game.sim.operation_receipts():
+			if receipt.get("phase","") in ["executed","rejected"]: receipts.append(receipt)
+	var job_signature:=str(jobs.map(func(job: Dictionary): return job.id))+str(receipts)
 	if job_signature != _jobs_signature or jobs_box.get_child_count()==0:
 		game._clear_children(jobs_box)
 		job_labels.clear()
@@ -422,9 +488,18 @@ func _refresh_incidents() -> void:
 			job_labels[job.id]=_text(jobs_box,"",BLUE)
 		if jobs.is_empty():
 			_text(jobs_box,"没有等待中的指令或现场作业。",TEAL)
+		if not receipts.is_empty():
+			_text(jobs_box,"最近执行回执（排队成功不代表已生效）",CREAM)
+			for index in range(receipts.size()-1,maxi(-1,receipts.size()-9),-1):
+				var receipt: Dictionary=receipts[index]
+				var executed: bool=receipt.get("phase","")=="executed"
+				var target_kind: String="building" if receipt.get("action","")=="facility" else "line"
+				var target_id: int=int(receipt.get("target_id",-1))
+				_text(jobs_box,"%s · #%d · %s\n%s" % ["✓ 已执行" if executed else "! 已拒绝，未生效",int(receipt.get("command_id",-1)),("设施 " if target_kind=="building" else "线路 ")+str(target_id),str(receipt.get("message","查看所选对象与调度日志，核实最新状态。"))],TEAL if executed else ORANGE)
+				game._button(jobs_box,"定位回执对象",func(): close(); game.focus_target(target_kind,target_id),Vector2(0,30))
 		_jobs_signature=job_signature
 	for job in jobs:
 		var kinds: Dictionary={"switch":"现场开关","patrol":"巡检定位"}
 		var facility: bool=job.get("kind","")=="facility"
 		var field: bool=game.sim.digital.field_jobs.has(job)
-		job_labels[job.id].text="执行中 · %s\n%s%02d · 剩余 %.2f 小时\n%s" % [("现场设施设置" if field else "远程设施设置") if facility else kinds.get(job.get("kind",""),"远程指令"),"设施 " if facility else "E",job.get("building_id",0) if facility else job.get("line_id",0),job.get("remaining",0),"现场作业不依赖通信路径。" if field else "指令到达时再次验证通信与控制权限。"]
+		job_labels[job.id].text="在途 · 尚未生效 · %s\n%s%02d · 剩余 %.2f 小时\n%s" % [("现场设施设置" if field else "远程设施设置") if facility else kinds.get(job.get("kind",""),"远程指令"),"设施 " if facility else "E",job.get("building_id",0) if facility else job.get("line_id",0),job.get("remaining",0),"现场作业不依赖通信路径。" if field else "指令到达时再次验证通信与控制权限。"]

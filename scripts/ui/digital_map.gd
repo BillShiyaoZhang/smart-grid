@@ -41,16 +41,21 @@ func _draw() -> void:
 		if state.get("isolated",false):
 			color = RED
 		if int(building.id) == selected_id:
-			draw_arc(p,11,0,TAU,24,Color("f2eddb"),1.6,true)
+			draw_arc(p,13,0,TAU,24,Color("f2eddb"),2.0,true)
 		if state.get("root",false):
 			draw_rect(Rect2(p-Vector2(5,5),Vector2(10,10)),color)
 		else:
-			draw_circle(p,5,color)
+			draw_circle(p,7,color,state.get("trusted",false))
+		if state.get("isolated",false):
+			draw_line(p-Vector2(5,5),p+Vector2(5,5),RED,2,true)
+			draw_line(p+Vector2(-5,5),p+Vector2(5,-5),RED,2,true)
+		elif not state.get("trusted",false):
+			draw_string(font,p+Vector2(-4,5),"?",HORIZONTAL_ALIGNMENT_LEFT,-1,14,Color("f2eddb"))
 		var caption := "%02d" % int(building.id)
 		var offset:=Vector2(8,22) if int(building.id)%3==1 else Vector2(8,-12)
 		draw_string(font,p+offset,caption,HORIZONTAL_ALIGNMENT_LEFT,-1,14,color)
 	draw_string(font,Vector2(16,size.y-29),"实线 光纤 · 虚线 无线 · ■ 调度根",HORIZONTAL_ALIGNMENT_LEFT,-1,14,MUTED)
-	draw_string(font,Vector2(16,size.y-9),"● 可信 · ● 失联 / 隔离 · 悬停查看设备",HORIZONTAL_ALIGNMENT_LEFT,-1,14,MUTED)
+	draw_string(font,Vector2(16,size.y-9),"● 可信 · ? 未核实 / 失联 · × 隔离 · 点击设备",HORIZONTAL_ALIGNMENT_LEFT,-1,14,MUTED)
 
 func _get_tooltip(at: Vector2) -> String:
 	if sim==null:

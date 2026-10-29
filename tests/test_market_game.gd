@@ -242,7 +242,7 @@ func _run() -> void:
 	desk.open()
 	check(same_values(game.sim.market.snapshot(),saved_market) and is_equal_approx(float(desk.flat_rate.value),180),"reopened desk reflects loaded state and ledger rather than stale model")
 	DirAccess.remove_absolute(path)
-	game._new_game()
+	game._new_game(false,true)
 	check(not desk.visible and game.sim.market.ledger.is_empty() and float(game.sim.market.state.contract_remaining) == 0.0,"new game closes desk and clears contracts and ledger")
 	desk.open()
 	check(is_equal_approx(float(desk.flat_rate.value),145),"new game desk refreshes default tariff")

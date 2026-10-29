@@ -228,7 +228,7 @@ func _run() -> void:
 	check(game.cable_visuals[4].get_meta("fault_marker",false),"map fault marker appears only after actual observation")
 
 	# Drills affect availability or trust, and undiscovered incidents remain hidden.
-	game._new_game()
+	game._new_game(false,true)
 	research_path()
 	desk.open()
 	choose(desk.device_picker,2)
@@ -279,7 +279,7 @@ func _run() -> void:
 	check(not game.sim.communication_status(2).isolated,"device can be reintroduced for trust validation")
 
 	# Gateway availability is a power dependency with finite UPS, not free coverage.
-	game._new_game()
+	game._new_game(false,true)
 	game.sim.field_switch(8)
 	game.sim.step(0.4)
 	check(not game.sim.get_building(10).powered and game.sim.communication_status(10).reachable,"initial gateway survives an electrical disconnect on UPS")
@@ -287,7 +287,7 @@ func _run() -> void:
 	check(not game.sim.communication_status(10).reachable and float(game.sim.communication_status(10).ups_remaining) <= 0.000001,"UPS exhaustion removes the dispatch root and its coverage")
 
 	# Save queued work before its completion, then continue from the restored model.
-	game._new_game()
+	game._new_game(false,true)
 	research_path()
 	desk.open()
 	choose(desk.circuit_picker,1)
@@ -315,7 +315,7 @@ func _run() -> void:
 	desk.refresh(true)
 	check(game.sim.digital.pending_commands.is_empty() and game.sim.digital.field_jobs.is_empty() and not game.sim.digital.links.is_empty(),"legacy migration supplies communication graph without invented queued commands")
 	DirAccess.remove_absolute(path)
-	game._new_game()
+	game._new_game(false,true)
 	check(not desk.visible and game.sim.digital.state.security_level == 0 and game.sim.digital.incidents.is_empty(),"new game resets digital UI security and incidents")
 	key(KEY_N)
 	key(KEY_N)

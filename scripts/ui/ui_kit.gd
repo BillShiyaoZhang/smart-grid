@@ -21,7 +21,7 @@ static func style(color: Color=SURFACE, radius: int=8, border: Color=Color("3651
 		box.shadow_offset = Vector2(0,2)
 	return box
 
-static func create_theme() -> Theme:
+static func create_theme(high_contrast: bool=false) -> Theme:
 	var theme := Theme.new()
 	theme.default_font = load("res://assets/fonts/NotoSansCJKsc-Regular.otf")
 	theme.default_font_size = 14
@@ -52,9 +52,23 @@ static func create_theme() -> Theme:
 	theme.set_color("font_selected_color","TabContainer",TEAL)
 	theme.set_color("font_unselected_color","TabContainer",MUTED)
 	theme.set_font_size("font_size","TabContainer",14)
+	for state in ["tab_selected","tab_unselected","tab_hovered"]:
+		theme.set_stylebox(state,"TabBar",style(Color("28514e") if state=="tab_selected" else SURFACE,4,TEAL if state=="tab_selected" else Color("36515b"),6))
+	theme.set_color("font_selected_color","TabBar",TEAL)
+	theme.set_color("font_unselected_color","TabBar",MUTED)
+	theme.set_font_size("font_size","TabBar",14)
 	theme.set_stylebox("panel","TooltipPanel",style(Color("102833"),6,Color("527078"),10))
 	theme.set_color("font_color","TooltipLabel",TEXT)
 	theme.set_font_size("font_size","TooltipLabel",14)
+	if high_contrast:
+		for type in ["Label","Button","OptionButton","CheckButton","CheckBox","LineEdit","TabContainer","PopupMenu","TooltipLabel"]:
+			theme.set_color("font_color",type,Color.WHITE)
+		for type in ["Button","OptionButton"]:
+			for state in ["normal","hover","pressed","disabled","focus"]:
+				var background := Color("07151d") if state in ["normal","disabled"] else Color("234d52")
+				theme.set_stylebox(state,type,style(background,6,Color("c4e8ec"),8))
+			theme.set_color("font_disabled_color",type,Color("b3c1c7"))
+		theme.set_stylebox("panel","PanelContainer",style(Color("07151d"),8,Color("9dc4ce")))
 	return theme
 
 static func label(parent: Node, text: String, font_size: int=14, color: Color=TEXT) -> Label:
@@ -76,6 +90,15 @@ static func button(parent: Node, text: String, callback: Callable, minimum: Vect
 	result.pressed.connect(callback)
 	parent.add_child(result)
 	return result
+
+static func action(button_: Button, intent: String="primary") -> Button:
+	var accent: Color=RED if intent=="destructive" else TEAL
+	var background:=Color("452e32") if intent=="destructive" else Color("245348")
+	button_.add_theme_stylebox_override("normal",style(background,6,accent,8))
+	button_.add_theme_stylebox_override("hover",style(background.lightened(.13),6,accent,8))
+	button_.add_theme_stylebox_override("pressed",style(background.darkened(.12),6,accent,8))
+	button_.add_theme_color_override("font_color",TEXT)
+	return button_
 
 static func column(parent: Node, gap: int=10) -> VBoxContainer:
 	var result := VBoxContainer.new()

@@ -2,6 +2,7 @@ extends Control
 ## The trading desk submits simulation commands; forecasts and refreshes never settle money.
 const PriceChart = preload("res://scripts/ui/market_chart.gd")
 const Shell = preload("res://scripts/ui/management_shell.gd")
+const Drafts = preload("res://scripts/ui/config_drafts.gd")
 const TEAL := Color("77dbc0")
 const CREAM := Color("f2eddb")
 const MUTED := Color("95b0b6")
@@ -40,6 +41,19 @@ var graph_section: PanelContainer
 var graph_hosts: Array[VBoxContainer] = []
 var split_grids: Array[GridContainer] = []
 var _ledger_signature := ""
+var drafts: RefCounted = Drafts.new()
+var draft_labels: Dictionary = {}
+var _inputs_ready := false
+
+func reset_session() -> void:
+	drafts.clear()
+	_inputs_ready=false
+	_ledger_signature=""
+	if tabs!=null: tabs.current_tab=0
+	if contract_mw!=null: contract_mw.value=1
+
+func inherit_selection(_building_id: int=-1,_line_id: int=-1,_comm_line_id: int=-1) -> void:
+	pass
 
 func setup(owner_game: Node) -> void:
 	game = owner_game
@@ -53,7 +67,9 @@ func open() -> void:
 	show()
 
 func close() -> void:
+	_capture_drafts()
 	hide()
+	if _has_drafts(): game._notify("市场草案已保留；再次打开可继续编辑，尚未应用的参数不会生效。")
 	game._update_hud()
 	game._update_inspector()
 
@@ -69,6 +85,7 @@ func _build() -> void:
 	game._label(summary,"本日净收益",14,MUTED)
 	headline.profit = game._label(summary,"",17,TEAL)
 	tabs = TabContainer.new()
+	tabs.use_hidden_tabs_for_min_size=false
 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	layout.add_child(tabs)
 	_build_trade_tab()
@@ -77,6 +94,7 @@ func _build() -> void:
 	_build_ledger_tab()
 	_build_graph()
 	tabs.tab_changed.connect(_place_graph)
+	tabs.tab_changed.connect(_scroll_page_top)
 	_place_graph(0)
 	message_label = _text(layout,"调整参数后点击应用。查看报价、切换页面不会结算。",MUTED,14)
 	resized.connect(_relayout)
@@ -124,10 +142,15 @@ func _relayout() -> void:
 	if graph_section != null:
 		_place_graph(tabs.current_tab)
 
+func _scroll_page_top(_index: int) -> void:
+	var outer: Node=tabs.get_parent().get_parent()
+	if outer is ScrollContainer: outer.scroll_vertical=0
+
 func _tab(title: String) -> VBoxContainer:
 	var scroll := ScrollContainer.new()
 	scroll.name = title
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	tabs.add_child(scroll)
 	var body: VBoxContainer = game._column(scroll,16)
 	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -183,6 +206,7 @@ func _build_trade_tab() -> void:
 	buy_limit = _spin(config,"最高现货买价",0,500,5)
 	sell_floor = _spin(config,"最低外售电价",0,500,5)
 	game._button(config,"应用交易策略",_apply_policy,Vector2(0,37))
+	_draft_controls(config,"trade")
 	var notes := _box(row)
 	game._label(notes,"实际交易与线路约束",18,CREAM)
 	headline.exchange = _text(notes,"",TEAL,18)
@@ -204,6 +228,7 @@ func _build_tariff_tab() -> void:
 	flat_rate.tooltip_text = "07:00–17:00、21:00–23:00"
 	peak_rate = _spin(config,"峰价 · 17:00–21:00",20,500,5)
 	game._button(config,"应用零售电价",_apply_tariff,Vector2(0,37))
+	_draft_controls(config,"tariff")
 	var notes := _box(row)
 	game._label(notes,"用户与经营反馈",18,CREAM)
 	var readouts: HBoxContainer = game._row(notes,16)
@@ -224,6 +249,7 @@ func _build_storage_tab() -> void:
 	discharge_price = _spin(storage,"现货高于此价释放储能",0,500,5)
 	reserve_soc = _spin(storage,"最低备用电量",0,95,5,"% SOC")
 	game._button(storage,"应用储能策略",_apply_storage,Vector2(0,37))
+	_draft_controls(storage,"storage")
 	storage_status = _text(storage,"",MUTED,11)
 	var contract := _box(row)
 	game._label(contract,"12 小时锁价合约",20,CREAM)
@@ -251,6 +277,7 @@ func _build_ledger_tab() -> void:
 	table_scroll.add_child(ledger_grid)
 	_text(body,"净收益 = 零售收入 + 外售收入 − 现货购电 − 锁价合约 − 燃气燃料 − 运维 − 失供补偿。",CREAM)
 	_text(body,"账本记录运营现金流；建设、研究、维护派单和委托奖励保留在调度日志中。刷新报价和切换页面不会重复结算。")
+	_text(body,"窄窗口可在账本表格底部横向滚动，查看全部科目。",MUTED)
 
 func _tariff_selected(index: int) -> void:
 	if syncing:
@@ -265,13 +292,13 @@ func _tariff_selected(index: int) -> void:
 	message_label.add_theme_color_override("font_color",ORANGE)
 
 func _apply_policy() -> void:
-	_commit(game.sim.set_market_policy(["off","balanced","trade"][policy_mode.selected],buy_limit.value,sell_floor.value))
+	_commit(game.sim.set_market_policy(["off","balanced","trade"][policy_mode.selected],buy_limit.value,sell_floor.value),"trade")
 
 func _apply_tariff() -> void:
-	_commit(game.sim.set_tariff(["flat","tou","custom"][tariff_mode.selected],valley_rate.value,flat_rate.value,peak_rate.value))
+	_commit(game.sim.set_tariff(["flat","tou","custom"][tariff_mode.selected],valley_rate.value,flat_rate.value,peak_rate.value),"tariff")
 
 func _apply_storage() -> void:
-	_commit(game.sim.set_storage_policy(["reserve","arbitrage"][storage_mode.selected],charge_price.value,discharge_price.value,reserve_soc.value/100.0))
+	_commit(game.sim.set_storage_policy(["reserve","arbitrage"][storage_mode.selected],charge_price.value,discharge_price.value,reserve_soc.value/100.0),"storage")
 
 func _sign_contract() -> void:
 	_commit(game.sim.sign_supply_contract(contract_mw.value,12.0))
@@ -291,7 +318,11 @@ func _build_intertie() -> void:
 	game._set_tool("build")
 	game._notify("选择空地建造市场联络站，再用连线工具接入电网。")
 
-func _commit(result: Dictionary) -> void:
+func _commit(result: Dictionary, section: String="") -> void:
+	_capture_drafts()
+	if result.get("ok",false) and not section.is_empty():
+		drafts.reset(section,_effective_section(section))
+		_write_section(section,drafts.values[section])
 	game._apply(result)
 	game._sync_world(true)
 	game._update_hud()
@@ -305,6 +336,7 @@ func refresh(sync_inputs: bool=false) -> void:
 		return
 	var sim: RefCounted = game.sim
 	var state: Dictionary = sim.market.state
+	_capture_drafts()
 	var t: Dictionary = sim.totals
 	funds_label.text = "资金  ¥%s" % game._number(float(sim.cash))
 	headline.spot.text = "¥%.2f / MWh" % state.get("spot_price",0)
@@ -337,27 +369,75 @@ func refresh(sync_inputs: bool=false) -> void:
 	var remaining: float = state.get("contract_remaining",0)
 	contract_label.text = "已锁定 %.1f MW × ¥%.2f/MWh\n剩余 %.1f 小时；当前合约费用 ¥%.2f/h" % [state.get("contract_mw",0),state.get("contract_price",0),remaining,t.get("contract_cost",0)] if remaining>0 else "当前 12 小时锁价报价：¥%.2f/MWh" % state.get("contract_quote",0)
 	contract_button.disabled = remaining>0 or capacity<=0
-	contract_mw.max_value = maxf(1,capacity)
-	if sync_inputs:
-		syncing = true
-		policy_mode.select(maxi(0,["off","balanced","trade"].find(state.get("market_mode","balanced"))))
-		buy_limit.value = state.get("buy_limit",120)
-		sell_floor.value = state.get("sell_floor",90)
-		tariff_mode.select(maxi(0,["flat","tou","custom"].find(state.get("tariff_mode","flat"))))
-		valley_rate.value = state.get("valley_rate",85)
-		flat_rate.value = state.get("flat_rate",145)
-		peak_rate.value = state.get("peak_rate",220)
-		valley_rate.editable = tariff_mode.selected != 0
-		peak_rate.editable = tariff_mode.selected != 0
-		storage_mode.select(1 if state.get("storage_mode","reserve") == "arbitrage" else 0)
-		charge_price.value = state.get("charge_price",60)
-		discharge_price.value = state.get("discharge_price",150)
-		reserve_soc.value = float(state.get("reserve_soc",.2))*100
-		if contract_mw.value<=1:
-			contract_mw.value = minf(5,contract_mw.max_value)
-		syncing = false
+	contract_mw.max_value = maxf(contract_mw.value,maxf(1,capacity))
+	for section in ["trade","tariff","storage"]:
+		var draft: Dictionary=drafts.retain(section,_effective_section(section))
+		_write_section(section,draft)
+		_update_draft_label(section)
+	if not _inputs_ready and contract_mw.value<=1: contract_mw.value=minf(5,contract_mw.max_value)
+	_inputs_ready=true
 	_update_commitment()
 	_refresh_ledger()
+
+func _draft_controls(parent: Node, section: String) -> void:
+	draft_labels[section]=_text(parent,"",ORANGE,14)
+	game._button(parent,"重置本区草案",func(): reset_draft(section),Vector2(0,34))
+
+func _effective_section(section: String) -> Dictionary:
+	var state: Dictionary=game.sim.market.state
+	match section:
+		"trade": return {"mode":maxi(0,["off","balanced","trade"].find(state.get("market_mode","balanced"))),"buy":float(state.get("buy_limit",120)),"sell":float(state.get("sell_floor",90))}
+		"tariff": return {"mode":maxi(0,["flat","tou","custom"].find(state.get("tariff_mode","flat"))),"valley":float(state.get("valley_rate",85)),"flat":float(state.get("flat_rate",145)),"peak":float(state.get("peak_rate",220))}
+		_: return {"mode":1 if state.get("storage_mode","reserve")=="arbitrage" else 0,"charge":float(state.get("charge_price",60)),"discharge":float(state.get("discharge_price",150)),"reserve":float(state.get("reserve_soc",.2))*100}
+
+func _read_section(section: String) -> Dictionary:
+	match section:
+		"trade": return {"mode":policy_mode.selected,"buy":buy_limit.value,"sell":sell_floor.value}
+		"tariff": return {"mode":tariff_mode.selected,"valley":valley_rate.value,"flat":flat_rate.value,"peak":peak_rate.value}
+		_: return {"mode":storage_mode.selected,"charge":charge_price.value,"discharge":discharge_price.value,"reserve":reserve_soc.value}
+
+func _write_section(section: String, value: Dictionary) -> void:
+	syncing=true
+	match section:
+		"trade":
+			policy_mode.select(int(value.mode)); buy_limit.value=float(value.buy); sell_floor.value=float(value.sell)
+		"tariff":
+			tariff_mode.select(int(value.mode)); valley_rate.value=float(value.valley); flat_rate.value=float(value.flat); peak_rate.value=float(value.peak)
+			valley_rate.editable=tariff_mode.selected!=0; peak_rate.editable=tariff_mode.selected!=0
+		"storage":
+			storage_mode.select(int(value.mode)); charge_price.value=float(value.charge); discharge_price.value=float(value.discharge); reserve_soc.value=float(value.reserve)
+	syncing=false
+
+func _capture_drafts() -> void:
+	if not _inputs_ready: return
+	for section in ["trade","tariff","storage"]:
+		drafts.retain(section,_effective_section(section),_read_section(section))
+		_update_draft_label(section)
+
+func _update_draft_label(section: String) -> void:
+	var changes: Array[String]=[]
+	var names: Dictionary={"mode":"策略","buy":"最高买价","sell":"最低卖价","valley":"谷价","flat":"平价","peak":"峰价","charge":"充能阈值","discharge":"释放阈值","reserve":"备用比例"}
+	for key in drafts.values[section]:
+		var value: Variant=drafts.values[section][key]
+		var baseline: Variant=drafts.baselines[section][key]
+		if value!=baseline:
+			if key=="mode":
+				var modes: Array=["离网运行","缺电保供","经济交易"] if section=="trade" else (["统一电价","峰谷电价","自定峰平谷"] if section=="tariff" else ["保供备用","峰谷套利"])
+				changes.append("策略 %s → %s" % [modes[int(baseline)],modes[int(value)]])
+			else: changes.append("%s %s → %s" % [names.get(key,key),str(baseline),str(value)])
+	draft_labels[section].text="未应用草案 · "+"；".join(changes) if not changes.is_empty() else "✓ 本区参数已生效"
+	draft_labels[section].add_theme_color_override("font_color",ORANGE if not changes.is_empty() else MUTED)
+
+func _has_drafts() -> bool:
+	for section in ["trade","tariff","storage"]:
+		if drafts.dirty(section): return true
+	return false
+
+func reset_draft(section: String) -> void:
+	drafts.reset(section,_effective_section(section))
+	_write_section(section,drafts.values[section])
+	_update_draft_label(section)
+	message_label.text="已重置本区草案；其他区的修改仍保留。"
 
 func _update_commitment() -> void:
 	if commitment_label == null or game == null or game.sim.get("market") == null:

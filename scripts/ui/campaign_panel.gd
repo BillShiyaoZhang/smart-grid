@@ -14,6 +14,39 @@ var hold_label: Label
 var mode := "directory"
 var chapter_buttons: Dictionary = {}
 
+func reset_session() -> void:
+	hint_level=0
+	step_signature=""
+	hold_label=null
+
+func chapter_focus_ids() -> Array[int]:
+	var ids: Array[int]=[]
+	if not game._campaign_active(): return ids
+	var roles: Dictionary=game.sim.campaign.roles
+	for role in ["source","node","customer","backup","hospital"]:
+		if roles.has(role) and not game.sim.get_building(int(roles[role])).is_empty(): ids.append(int(roles[role]))
+	return ids
+
+func current_focus_target() -> Dictionary:
+	if not game._campaign_active(): return {}
+	var roles: Dictionary=game.sim.campaign.roles
+	var predicate: String=str(game.sim.campaign.current_step().get("predicate",""))
+	var line_role: String="tie" if predicate in ["remote_executed","auto_restored"] else "main_feeder"
+	if predicate in ["inspection","line_upgrade","field_transfer","remote_executed","telemetry","telemetry_reliable","auto_restored","physical_repaired"] and roles.has(line_role):
+		var id: int=int(roles[line_role])
+		var observation: Dictionary=game.sim.line_observation(id)
+		if predicate!="physical_repaired" or observation.get("visibility","") in ["verified","patrol"]: return {"kind":"line","id":id}
+	var role := "source"
+	if predicate in ["commissioned","communication_built"]: role="root"
+	elif predicate in ["trust_restored","isolated_inspected","secure_reliable"]:
+		var target: int=int(roles.get("attack_target",-1))
+		var status: Dictionary=game.sim.communication_status(target)
+		role="attack_target" if status.get("compromised",false) else "customer"
+	elif predicate in ["new_customer","pumped_connected","hvdc_connected","coordinated_storage","assessment_started"]: role="node"
+	elif predicate in ["reliable","market_reliable","wind_reliable","final_assessment","physical_repaired"]: role="customer"
+	if roles.has(role): return {"kind":"building","id":int(roles[role])}
+	return {}
+
 func setup(owner_game: Node) -> void:
 	game = owner_game
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -227,6 +260,8 @@ func refresh_task_progress() -> void:
 	hold_label.text="持续达标 %.1f / %.1f 游戏小时" % [step.get("elapsed_hours",0),step.get("hold_hours",0)]
 
 func guide_to(target: String) -> void:
+	var focus: Dictionary=current_focus_target()
+	if not focus.is_empty() and game.has_method("focus_target"): game.focus_target(str(focus.kind),int(focus.id))
 	match target:
 		"cable": game._set_tool("line"); game.hud.close_popups()
 		"build":
@@ -237,11 +272,24 @@ func guide_to(target: String) -> void:
 				game.zoom=52
 				game._update_camera()
 			game.hud.toggle_category(category)
-		"planning", "research": game._open_center("planning")
+		"planning", "research":
+			game._open_center("planning")
+			var predicate: String=str(game.sim.campaign.current_step().get("predicate",""))
+			if predicate in ["remote_facility","coordinated_storage"]:
+				var facility_id: int=int(game.sim.campaign.roles.get("source",-1))
+				if predicate=="coordinated_storage":
+					for building in game.sim.buildings:
+						if building.kind=="community_battery": facility_id=int(building.id); break
+				if facility_id>=0: game.planning_panel.select_facility(facility_id)
 		"market": game._open_center("market")
-		"digital": game._open_center("network")
+		"digital":
+			game._open_center("network")
+			if not focus.is_empty():
+				game.digital_panel.inherit_selection(int(focus.id) if focus.kind=="building" else -1,int(focus.id) if focus.kind=="line" else -1)
+				game.digital_panel.refresh(true)
+				game.digital_panel.tabs.current_tab=1 if focus.kind=="line" else 0
 		"statistics": game.hud.toggle_popup("stats")
-		_: game._notify("点击地图上的设施或线路，查看右侧详情；任务只使用已知信息。")
+		_: game.hud.close_popups(); game._notify("已定位当前任务对象；右侧详情只显示已知信息，执行结果请核对回执。")
 
 func close() -> void:
 	hide()

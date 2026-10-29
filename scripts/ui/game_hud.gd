@@ -2,6 +2,8 @@ extends Control
 ## Map-first HUD. Lightweight popovers never pause or mutate the simulation.
 const UI = preload("res://scripts/ui/ui_kit.gd")
 const Chart = preload("res://scripts/ui/power_chart.gd")
+const OperatorDock = preload("res://scripts/ui/operator_dock.gd")
+const Presenter = preload("res://scripts/ui/grid_presenter.gd")
 signal tool_requested(value: String)
 signal build_requested(kind: String)
 signal overlay_requested(value: String)
@@ -20,6 +22,7 @@ var overlay_buttons: Dictionary = {}
 var popups: Dictionary = {}
 var popup_titles: Dictionary = {}
 var popup_order: Array[String] = []
+var popup_scrolls: Dictionary = {}
 var active_category := ""
 var tray: PanelContainer
 var tray_title: Label
@@ -49,6 +52,17 @@ var statistics: Label
 var speed_buttons: Dictionary = {}
 var pause_button: Button
 var advanced_open := false
+var operator_dock: Control
+var dock_panel: PanelContainer
+var status_panel: PanelContainer
+var time_status: Label
+var workspace_title: Label
+var pin_button: Button
+var dock_flow: HFlowContainer
+var dock_scroll: ScrollContainer
+var status_flow: HFlowContainer
+var onboarding_panel: PanelContainer
+var onboarding_label: Label
 
 func setup(owner_game: Node) -> void:
 	game = owner_game
@@ -109,7 +123,13 @@ func _popup(key: String, title: String, width: float=344, right: bool=false) -> 
 	else:
 		p.position = Vector2(16,116)
 	p.size = Vector2(width,0)
-	var v := UI.column(p,10)
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode=ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.follow_focus=true
+	p.add_child(scroll)
+	popup_scrolls[key]=scroll
+	var v := UI.column(scroll,10)
+	v.size_flags_horizontal=Control.SIZE_EXPAND_FILL
 	var heading := UI.row(v)
 	popup_titles[key] = UI.label(heading,title,18)
 	UI.spacer(heading)
@@ -143,6 +163,8 @@ func _build() -> void:
 	var lv := UI.column(layers,6)
 	UI.button(lv,"图层",func(): toggle_popup("layers"))
 	UI.button(lv,"统计",func(): toggle_popup("stats"))
+	UI.button(lv,"诊断",func(): operator_dock.show_page("diagnosis"))
+	UI.button(lv,"检索",func(): operator_dock.open_search())
 	# A single context drawer, above the always-visible bottom controls.
 	inspector = _panel(self)
 	inspector.set_anchors_and_offsets_preset(Control.PRESET_RIGHT_WIDE)
@@ -152,26 +174,42 @@ func _build() -> void:
 	inspector.offset_bottom = -154
 	var iv := UI.column(inspector,6)
 	var ih := UI.row(iv)
-	UI.label(ih,"对象详情",14,UI.MUTED)
+	workspace_title=UI.label(ih,"对象详情",14,UI.MUTED)
 	UI.spacer(ih)
-	UI.button(ih,"×",func(): action_requested.emit("clear_selection"),Vector2(34,34))
+	pin_button = UI.button(ih,"固定",func(): operator_dock.pinned=not operator_dock.pinned; operator_dock.opened=true; refresh_context(),Vector2(48,34),true)
+	UI.button(ih,"×",func(): operator_dock.close(); action_requested.emit("clear_selection"),Vector2(34,34))
 	inspector_scroll = ScrollContainer.new()
 	inspector_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	inspector_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	iv.add_child(inspector_scroll)
 	inspector_box = UI.column(inspector_scroll,8)
 	inspector_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	operator_dock = OperatorDock.new()
+	iv.add_child(operator_dock)
+	iv.move_child(operator_dock,1)
+	operator_dock.setup(game,self)
 	inspector.hide()
 	# Bottom tool dock.
 	var dock := _panel(self)
+	dock_panel = dock
 	dock.add_theme_stylebox_override("panel",UI.style(Color("112b35f5"),8,Color("3c5961"),8))
 	dock.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
 	dock.offset_left = -540
 	dock.offset_right = 540
 	dock.offset_top = -124
 	dock.offset_bottom = -64
-	var dr := UI.row(dock,5)
-	dr.alignment = BoxContainer.ALIGNMENT_CENTER
+	dock_scroll=ScrollContainer.new()
+	dock_scroll.vertical_scroll_mode=ScrollContainer.SCROLL_MODE_DISABLED
+	dock_scroll.horizontal_scroll_mode=ScrollContainer.SCROLL_MODE_AUTO
+	dock_scroll.follow_focus=true
+	dock.add_child(dock_scroll)
+	var dr := HFlowContainer.new()
+	dr.custom_minimum_size.x=1060
+	dock_scroll.add_child(dr)
+	dock_flow = dr
+	dr.add_theme_constant_override("h_separation",5)
+	dr.add_theme_constant_override("v_separation",5)
+	dr.alignment = FlowContainer.ALIGNMENT_CENTER
 	for spec in [["select","选择"],["line","接线"],["repair","抢修"],["datalink","通信"]]:
 		var key: String = spec[0]
 		tool_buttons[key] = _dock_button(dr,key,spec[1],func(): tool_requested.emit(key))
@@ -210,7 +248,10 @@ func _build() -> void:
 	for item in game.sim.catalog:
 		var kind: String = item
 		var spec: Dictionary = game.sim.catalog[kind]
-		var b := UI.button(tray_flow,"%s\n¥%s" % [spec.name,game._compact(spec.price)],func(): build_requested.emit(kind),Vector2(170,64),true)
+		var ability: String = "%.0f MW" % float(spec.get("capacity",0))
+		if spec.has("energy"): ability += " / %.0f MWh" % float(spec.energy)
+		elif float(spec.get("demand",0))>0: ability="负荷 %.1f MW" % float(spec.demand)
+		var b := UI.button(tray_flow,"%s\n¥%s · %s" % [spec.name,game._compact(spec.price),ability],func(): build_requested.emit(kind),Vector2(185,68),true)
 		var icon_path := "res://assets/icons/%s.png" % kind
 		if ResourceLoader.exists(icon_path): b.icon = load(icon_path); b.expand_icon = true; b.add_theme_constant_override("icon_max_width",36)
 		b.set_meta("category",category_for(kind))
@@ -235,24 +276,30 @@ func _build() -> void:
 	hint.hide()
 	# One slim status rail.
 	var status := _panel(self)
+	status_panel = status
 	status.add_theme_stylebox_override("panel",UI.style(Color("112b35f5"),6,Color("3c5961"),8))
 	status.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
 	status.offset_left = 0
 	status.offset_right = 0
 	status.offset_top = -54
 	status.offset_bottom = 0
-	var sr := UI.row(status,10)
+	var sr := HFlowContainer.new()
+	status_flow=sr
+	sr.add_theme_constant_override("h_separation",10)
+	sr.add_theme_constant_override("v_separation",3)
+	status.add_child(sr)
 	time_label = UI.label(sr,"第 1 天 08:00",14)
 	weather_label = UI.label(sr,"晴朗",14,UI.MUTED)
 	pause_button = UI.button(sr,"Ⅱ",func(): action_requested.emit("pause"),Vector2(34,34),true)
 	for speed in [1,3,8]:
 		var value: int = speed
 		speed_buttons[value] = UI.button(sr,"%d×" % value,func(): action_requested.emit("speed_%d" % value),Vector2(35,34),true)
+	time_status = UI.label(sr,"运行 1×",14,UI.MUTED)
 	UI.spacer(sr)
 	values.cash = UI.label(sr,"¥180,000",18)
 	values.balance = UI.label(sr,"+ ¥0/h",14,UI.TEAL)
 	UI.spacer(sr)
-	values.supply = UI.label(sr,"0 / 0 MW",14)
+	values.supply = UI.button(sr,"已供 0 / 需求 0 MW",func(): operator_dock.show_page("diagnosis"),Vector2(0,34))
 	values.reliability = UI.label(sr,"100%",14,UI.TEAL)
 	values.supply.tooltip_text = "当前已供电 / 当前需求（MW）"
 	values.reliability.tooltip_text = "当前供电可靠率"
@@ -278,9 +325,9 @@ func _build() -> void:
 	events_label.add_theme_font_size_override("normal_font_size",14)
 	log.add_child(events_label)
 	var menu := _popup("menu","游戏菜单",250,true)
-	for spec in [["save","保存游戏  F5"],["load","读取游戏  F9"],["campaign","历史战役与章节"],["help","调度员手册  H"]]:
+	for spec in [["save","保存游戏  F5"],["load","读取游戏  F9"],["settings","操作与显示设置"],["workspace","设施检索  Ctrl+F"],["jobs","操作队列与回执"],["working_area","镜头：工作区"],["full_map","镜头：全图"],["campaign","历史战役与章节"],["help","调度员手册  H"]]:
 		var key: String = spec[0]
-		UI.button(menu,spec[1],func(): close_popups(); action_requested.emit(key))
+		UI.button(menu,spec[1],func(): close_popups(); action_requested.emit(key)).set_meta("menu_action",key)
 	var layer_list := _popup("layers","地图图层",260)
 	for spec in [["normal","景观"],["power","功率"],["health","健康"],["comm","通信"]]:
 		var key: String = spec[0]
@@ -294,13 +341,13 @@ func _build() -> void:
 	statistics = UI.label(stat,"",14,UI.MUTED)
 	UI.label(stat,"供需趋势  ·  青绿供给 / 琥珀需求",14)
 	chart = Chart.new()
-	chart.custom_minimum_size = Vector2(0,95)
+	chart.custom_minimum_size = Vector2(0,155)
 	stat.add_child(chart)
 	UI.label(stat,"电力拓扑",14)
 	topology = Chart.new()
 	topology.mode = "topology"
 	topology.sim = game.sim
-	topology.custom_minimum_size = Vector2(0,90)
+	topology.custom_minimum_size = Vector2(0,125)
 	stat.add_child(topology)
 	market_ticker = UI.label(stat,"",14,UI.MUTED)
 	digital_ticker = UI.label(stat,"",14,UI.MUTED)
@@ -323,8 +370,28 @@ func _build() -> void:
 	tooltip_label = UI.label(self,"",14)
 	tooltip_label.add_theme_stylebox_override("normal",UI.style(Color("102833f5"),6))
 	tooltip_label.hide()
+	onboarding_panel = _panel(self)
+	onboarding_panel.position = Vector2(102,156)
+	onboarding_panel.custom_minimum_size = Vector2(310,0)
+	var lesson := UI.column(onboarding_panel,8)
+	UI.label(lesson,"首次接网 · 可跳过",18,UI.TEAL)
+	onboarding_label = UI.label(lesson,"",14)
+	onboarding_label.custom_minimum_size.x=290
+	onboarding_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	var lesson_actions := UI.row(lesson)
+	UI.button(lesson_actions,"定位变电站",func(): game.focus_target("building",2))
+	UI.button(lesson_actions,"接线工具",func(): tool_requested.emit("line"))
+	UI.button(lesson_actions,"跳过",func(): game.onboarding_skipped=true; onboarding_panel.hide())
+	onboarding_panel.hide()
+	resized.connect(layout_workspace)
+	status_flow.minimum_size_changed.connect(func(): layout_workspace.call_deferred())
+	layout_workspace.call_deferred()
 
 func toggle_popup(key: String) -> void:
+	if key=="alerts":
+		close_popups()
+		operator_dock.show_page("diagnosis")
+		return
 	var opening: bool = not popups[key].visible
 	close_popups()
 	if opening:
@@ -344,6 +411,10 @@ func close_tray() -> void:
 func close_top() -> bool:
 	if not popup_order.is_empty(): close_popups(); return true
 	if tray.visible: close_tray(); return true
+	if inspector.visible and not operator_dock.pinned and game.tool=="select":
+		operator_dock.close()
+		action_requested.emit("clear_selection")
+		return true
 	return false
 
 func toggle_category(category: String) -> void:
@@ -380,6 +451,11 @@ func refresh_context() -> void:
 	response_button.visible = not campaign_active or game.sim.feature_enabled("demand_response")
 	storm_button.visible = not campaign_active or game.sim.feature_enabled("storm")
 	for key in tool_buttons: tool_buttons[key].button_pressed = game.tool == key
+	for key in tool_buttons: tool_buttons[key].tooltip_text=str({"select":"选择","line":"电缆接线","repair":"现场抢修","datalink":"通信布线"}[key])+"  ["+game.preferences.binding_label(key)+"]"
+	for key in center_buttons: center_buttons[key].text=str({"market":"市场","network":"电网","planning":"科技"}[key])+" "+game.preferences.binding_label(key)
+	for button in popups.menu.find_children("*","Button",true,false):
+		var action: String=str(button.get_meta("menu_action",""))
+		if action in ["save","load","help"]: button.text=str({"save":"保存游戏","load":"读取游戏","help":"调度员手册"}[action])+"  "+game.preferences.binding_label(action)
 	for key in overlay_buttons: overlay_buttons[key].button_pressed = game.overlay == key
 	for key in build_buttons:
 		var available: Dictionary = game.sim.can_build(key)
@@ -388,10 +464,13 @@ func refresh_context() -> void:
 		build_buttons[key].tooltip_text = str(game.sim.catalog[key].description)+("\n"+str(available.get("message","")) if not available.ok else "")
 	for key in speed_buttons: speed_buttons[key].button_pressed = game.speed == key
 	pause_button.button_pressed = game.speed == 0
+	pin_button.button_pressed = operator_dock.pinned
+	workspace_title.text=str({"object":"对象详情","diagnosis":"供电诊断","watch":"检索与关注","jobs":"队列与执行回执"}.get(operator_dock.page,"调度工作区"))
 	get_node("ToolHint").visible = game.tool != "select"
 	get_node("ToolHint").offset_top = -396 if tray.visible else -190
 	get_node("ToolHint").offset_bottom = -348 if tray.visible else -144
-	inspector.visible = not tray.visible and game.tool == "select" and (game.selected_id >= 0 or game.selected_line >= 0 or game.selected_comm_line >= 0)
+	inspector.visible = not tray.visible and ((game.tool == "select" and (game.selected_id >= 0 or game.selected_line >= 0 or game.selected_comm_line >= 0)) or operator_dock.opened)
+	operator_dock._sync_visibility()
 	# The objective is compact; its full explanation is available in the drawer.
 	var completed := 0
 	var current := "全部委托完成 · 自由运营"
@@ -406,25 +485,52 @@ func refresh_context() -> void:
 	var totals: Dictionary = game.sim.totals
 	statistics.text = "设施 %d  ·  线路 %d  ·  作业队 %d/2\n累计可靠率 %.1f%%  ·  碳排 %.1f t/h" % [game.sim.buildings.size(),game.sim.lines.size(),totals.get("crews_busy",0),float(totals.get("reliability_lifetime",1))*100,totals.get("carbon",0)]
 	_refresh_alerts()
+	layout_workspace()
 
 func _refresh_alerts() -> void:
-	var alerts: Array[String] = []
-	if float(game.sim.totals.get("reliability",1)) < .98: alerts.append("供电不足 · 检查供需与联网状态")
-	if game.sim.storm_active: alerts.append("风暴持续中 · 关注已确认故障与备用线路")
-	elif float(game.sim.totals.get("storm_in",99)) <= 1: alerts.append("风暴即将到来 · 检查备用容量")
-	for line in game.sim.lines:
-		var observation: Dictionary = game.sim.line_observation(int(line.id))
-		if observation.get("visibility","") in ["verified","patrol"] and observation.get("fault_known",false) and observation.get("fault",false): alerts.append("线路 %02d · 故障已确认" % line.id)
-	for incident in game.sim.digital.incidents:
-		if incident.get("detected",false) and incident.get("status","") == "active": alerts.append("设备 %02d · 已检测网络事件" % incident.get("target_id",0))
+	var alerts: Array = Presenter.alerts(game.sim)
 	alert_button.text = "告警 %d" % alerts.size()
 	alert_button.add_theme_color_override("font_color",UI.AMBER if not alerts.is_empty() else UI.MUTED)
-	var signature := "\n".join(alerts)
+	var signature := str(alerts)
 	if alerts_box.get_meta("signature","__") == signature: return
 	alerts_box.set_meta("signature",signature)
 	for child in alerts_box.get_children(): child.queue_free()
 	if alerts.is_empty(): UI.label(alerts_box,"当前没有已知异常",14,UI.TEAL)
 	for alert in alerts:
-		var l := UI.label(alerts_box,alert,14,UI.AMBER)
+		var l := UI.label(alerts_box,str(alert.title),14,UI.AMBER)
 		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	UI.button(alerts_box,"查看数字电网与处置",func(): center_requested.emit("network"))
+	operator_dock.refresh()
+
+func layout_workspace() -> void:
+	if dock_panel == null: return
+	var narrow: bool = size.x < 1120
+	var rail_height: float = maxf(50,status_flow.get_combined_minimum_size().y+16)
+	status_panel.offset_top=-rail_height
+	var dock_height: float = 66 if narrow else 62
+	dock_panel.offset_left=-minf(1080,size.x-32)/2
+	dock_panel.offset_right=minf(1080,size.x-32)/2
+	dock_panel.offset_bottom=-rail_height-10
+	dock_panel.offset_top=-rail_height-10-dock_height
+	var bottom: float = rail_height+dock_height+24
+	inspector.offset_bottom=-bottom
+	inspector.offset_left=-minf(364,size.x*.45)
+	tray.offset_left=100 if not narrow else 16
+	tray.offset_right=-100 if not narrow else -16
+	tray.offset_bottom=-bottom
+	tray.offset_top=-minf(bottom+198,size.y-20)
+	var hint: Control = get_node("ToolHint")
+	hint.offset_left=-minf(960,size.x-32)/2
+	hint.offset_right=minf(960,size.x-32)/2
+	hint.offset_top=-bottom-56 if not tray.visible else tray.offset_top-54
+	hint.offset_bottom=hint.offset_top+46
+	if tray.visible and size.y<650: hint.hide()
+	for key in popups:
+		var popup: Control=popups[key]
+		popup.custom_minimum_size.x=0
+		popup.size.x=minf(popup.size.x,size.x-32)
+		if key=="stats":
+			popup.position.y=112
+			chart.custom_minimum_size.y=110 if size.y<650 else 155
+			topology.custom_minimum_size.y=100 if size.y<650 else 125
+		var content: Control=popup_scrolls[key].get_child(0)
+		popup.size.y=minf(content.get_combined_minimum_size().y+24,maxf(100,size.y-popup.position.y-18))

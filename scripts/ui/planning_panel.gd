@@ -3,6 +3,7 @@ extends Control
 const Evolution = preload("res://scripts/sim/grid_evolution.gd")
 const RegionMap = preload("res://scripts/ui/region_map.gd")
 const Shell = preload("res://scripts/ui/management_shell.gd")
+const Drafts = preload("res://scripts/ui/config_drafts.gd")
 const TEAL := Color("77dbc0")
 const BLUE := Color("81c9ee")
 const CREAM := Color("f2eddb")
@@ -68,6 +69,35 @@ var city_cards: Dictionary = {}
 var current_goal: Label
 var city_heading: HBoxContainer
 var region_work: BoxContainer
+var drafts: RefCounted = Drafts.new()
+var _displayed_facility := -1
+var _inherited_building := -1
+var facility_draft: Label
+var comparison_kinds: Array[String] = []
+var comparison_label: Label
+var comparison_buttons: Dictionary = {}
+var comparison_grid: GridContainer
+var comparison_cards: Dictionary = {}
+
+func reset_session() -> void:
+	drafts.clear()
+	_displayed_facility=-1
+	_inherited_building=-1
+	_asset_signature=""
+	_city_signature=""
+	_pending_facility=""
+	selected_facility=1
+	selected_city=-1
+	comparison_kinds.clear()
+	if comparison_label!=null: _refresh_comparison()
+	if tabs!=null: tabs.current_tab=0
+	if facility_modes!=null: facility_modes.current_tab=0
+
+func inherit_selection(building_id: int=-1,_line_id: int=-1,_comm_line_id: int=-1) -> void:
+	if building_id>=0 and building_id!=_inherited_building and not game.sim.get_building(building_id).is_empty():
+		_capture_facility()
+		selected_facility=building_id
+	_inherited_building=building_id
 
 func setup(owner_game: Node) -> void:
 	game = owner_game
@@ -77,16 +107,20 @@ func setup(owner_game: Node) -> void:
 
 func open() -> void:
 	if not game.sim.feature_enabled("research"): return
+	inherit_selection(int(game.selected_id))
 	game._prepare_center(self)
 	refresh(true)
 	show()
 
 func close() -> void:
+	_capture_facility()
 	hide()
+	if _facility_has_drafts(): game._notify("设施草案已保留；未提交的设置尚未生效。")
 	game._update_hud()
 	game._update_inspector()
 
 func select_facility(id: int) -> void:
+	_capture_facility()
 	selected_facility = id
 	tabs.current_tab = 1
 	facility_modes.current_tab = 0
@@ -100,6 +134,7 @@ func _build() -> void:
 	project_label = _text(metrics,"",TEAL,15)
 	project_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	tabs = TabContainer.new()
+	tabs.use_hidden_tabs_for_min_size=false
 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	tabs.add_theme_font_size_override("font_size",16)
 	tabs.add_theme_color_override("font_selected_color",BLUE)
@@ -108,6 +143,7 @@ func _build() -> void:
 	tabs.add_theme_stylebox_override("tab_selected",game._style(Color("234954"),8))
 	tabs.add_theme_stylebox_override("tab_unselected",game._style(Color("102b37"),8))
 	body.add_child(tabs)
+	tabs.tab_changed.connect(_scroll_page_top)
 	_build_technologies()
 	_build_facilities()
 	_build_region()
@@ -121,10 +157,15 @@ func _text(parent: Node, caption: String, color: Color=MUTED, font_size: int=13)
 	result.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	return result
 
+func _scroll_page_top(_index: int) -> void:
+	var outer: Node=tabs.get_parent().get_parent()
+	if outer is ScrollContainer: outer.scroll_vertical=0
+
 func _tab(caption: String) -> VBoxContainer:
 	var scroll := ScrollContainer.new()
 	scroll.name = caption
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	tabs.add_child(scroll)
 	var body: VBoxContainer = game._column(scroll,14)
 	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -242,6 +283,7 @@ func _build_facilities() -> void:
 	facility_modes.use_hidden_tabs_for_min_size = false
 	facility_modes.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	body.add_child(facility_modes)
+	facility_modes.tab_changed.connect(_scroll_page_top)
 	var operating_body: VBoxContainer = game._column(facility_modes,12)
 	operating_body.name = "设施运行"
 	_text(operating_body,"选择设施，检查额定配套与已知运行状态。参数调整后，选择远程或现场提交。",MUTED,14)
@@ -286,6 +328,8 @@ func _build_facilities() -> void:
 	operating.add_child(facility_method)
 	facility_execution = _text(operating,"",ORANGE,14)
 	game._button(operating,"应用设施设置",_apply_facility,Vector2(0,38))
+	facility_draft=_text(operating,"",ORANGE,14)
+	game._button(operating,"重置此设施草案",reset_facility_draft,Vector2(0,34))
 	facility_guidance = _text(operating,"",ORANGE,14)
 	var catalog_body: VBoxContainer = game._column(facility_modes,12)
 	catalog_body.name = "建造目录"
@@ -297,6 +341,14 @@ func _build_facilities() -> void:
 		catalog_category.add_item(category)
 	catalog_category.item_selected.connect(func(_index: int): _filter_catalog())
 	catalog_header.add_child(catalog_category)
+	comparison_label=_text(catalog_body,"对比最多三种设施：加入对比后查看额定容量、成本与约束。",MUTED,14)
+	comparison_grid=GridContainer.new()
+	comparison_grid.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	comparison_grid.add_theme_constant_override("h_separation",12)
+	comparison_grid.add_theme_constant_override("v_separation",12)
+	catalog_body.add_child(comparison_grid)
+	comparison_grid.hide()
+	game._button(catalog_body,"清空设施对比",func(): comparison_kinds.clear(); _refresh_comparison(),Vector2(0,34))
 	catalog_grid = GridContainer.new()
 	catalog_grid.columns = 2
 	catalog_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -319,6 +371,7 @@ func _build_facilities() -> void:
 			design += " / %.0f MWh" % float(spec.energy)
 		_text(card,design,ORANGE,12)
 		construction_buttons[kind] = game._button(card,"选择建造",func(): _choose_build(kind),Vector2(0,34))
+		comparison_buttons[kind]=game._button(card,"加入对比",func(): _toggle_comparison(kind),Vector2(0,32))
 
 func _filter_catalog() -> void:
 	for kind in catalog_cards:
@@ -339,6 +392,8 @@ func _adapt_columns() -> void:
 		catalog_grid.columns = 1 if narrow else 2
 	if operating_grid!=null:
 		operating_grid.columns = 1 if narrow else 2
+	if comparison_grid!=null:
+		comparison_grid.columns=1 if narrow else 3
 	if region_work!=null:
 		region_work.vertical = narrow
 
@@ -469,6 +524,11 @@ func _refresh_picker(force: bool) -> void:
 	var signature := str(game.sim.buildings.map(func(b: Dictionary): return b.id))
 	if not force and signature==_asset_signature:
 		return
+	for key in drafts.values.keys():
+		if game.sim.get_building(int(key)).is_empty():
+			drafts.values.erase(key)
+			drafts.baselines.erase(key)
+	if _displayed_facility>=0 and game.sim.get_building(_displayed_facility).is_empty(): _displayed_facility=-1
 	facility_picker.clear()
 	for building in game.sim.buildings:
 		facility_picker.add_item("#%02d · %s" % [building.id,building.name],int(building.id))
@@ -480,6 +540,7 @@ func _refresh_picker(force: bool) -> void:
 	_asset_signature = signature
 
 func _refresh_facility(sync_inputs: bool) -> void:
+	_capture_facility()
 	var building: Dictionary = game.sim.get_building(selected_facility)
 	if building.is_empty():
 		facility_info.text = "选择设施以查看运行边界。"
@@ -494,7 +555,13 @@ func _refresh_facility(sync_inputs: bool) -> void:
 				pending_signature="%d:%d" % [selected_facility,command.id]
 				execution="%s设置执行中 · 剩余 %.2f 游戏小时（设备尚未应用）" % [pair[1],command.remaining]
 	facility_execution.text=execution
-	if not sync_inputs and _pending_facility.begins_with(str(selected_facility)+":") and pending_signature.is_empty(): sync_inputs=true
+	if pending_signature.is_empty() and game.sim.has_method("operation_receipts"):
+		var receipts: Array=game.sim.operation_receipts()
+		for index in range(receipts.size()-1,-1,-1):
+			var receipt: Dictionary=receipts[index]
+			if receipt.get("action","")=="facility" and int(receipt.get("target_id",-1))==selected_facility and receipt.get("phase","") in ["executed","rejected"]:
+				facility_execution.text=("✓ 已生效 · " if receipt.phase=="executed" else "! 未生效 · ")+str(receipt.get("message","请检查执行回执"))
+				break
 	_pending_facility=pending_signature
 	var storage: bool = game.sim.evolution.is_storage(str(building.kind))
 	var generator: bool = game.sim.evolution.is_generator(str(building.kind)) or building.kind=="gas"
@@ -528,20 +595,102 @@ func _refresh_facility(sync_inputs: bool) -> void:
 	storage_input.set_item_disabled(2,not game.sim.evolution.has_technology("smart_storage"))
 	storage_input.tooltip_text = "定时削峰需要研究「储能协同与削峰」，并为设施建立可信通信。"
 	peak_input.editable = game.sim.evolution.has_technology("smart_storage")
-	if not sync_inputs:
-		return
 	facility_method.set_item_disabled(0,not game.sim.feature_enabled("remote"))
-	facility_method.select(0 if game.sim.feature_enabled("remote") and game.sim.digital.can_configure(game.sim,selected_facility) else 1)
-	enabled_input.button_pressed = bool(building.get("enabled",true))
-	dispatch_input.value = float(building.get("dispatch",1.0))*100
-	cooling_input.select(1 if building.get("cooling_mode","wet")=="dry" else 0)
-	storage_input.select(maxi(0,["auto","hold","peak"].find(str(building.get("storage_mode","auto")))))
-	reserve_input.value = float(building.get("reserve_soc",0))*100
-	peak_input.value = float(building.get("peak_hour",17))
-	release_input.value = float(building.get("environmental_release",.25))*100
-	protection_input.value = float(building.get("protection_margin",1.0))*100
-	flexible_input.button_pressed = bool(building.get("flexible_mode",false))
-	boost_input.button_pressed = bool(building.get("boost_cooling",false))
+	var key := str(selected_facility)
+	var draft: Dictionary=drafts.retain(key,_effective_facility(building))
+	_write_facility(draft)
+	_displayed_facility=selected_facility
+	var changes: Array[String]=[]
+	var names: Dictionary={"enabled":"运行许可","dispatch":"出力上限 %","cooling":"冷却方式","storage":"储能策略","reserve":"保留荷电 %","peak":"削峰小时","release":"生态下泄 %","protection":"保护裕度 %","flexible":"柔性档","boost":"强化冷却","method":"提交方式"}
+	for field in draft:
+		if draft[field]!=drafts.baselines[key][field]: changes.append("%s %s → %s" % [names[field],_facility_value(field,drafts.baselines[key][field]),_facility_value(field,draft[field])])
+	facility_draft.text="草案与生效值差异 · "+"；".join(changes) if not changes.is_empty() else "当前字段与生效设置一致。提交后需等待执行回执。"
+	if not pending_signature.is_empty(): facility_draft.text+="\n已有设置在途；新编辑仍需另行提交。"
+
+func _facility_value(field: String, value: Variant) -> String:
+	match field:
+		"enabled","flexible","boost": return "开启" if bool(value) else "关闭"
+		"cooling": return "干式" if int(value)==1 else "湿式"
+		"storage": return ["自动平衡","保留电量","定时削峰"][int(value)]
+		"method": return "远程" if int(value)==0 else "现场"
+	return "%.0f" % float(value)
+
+func _effective_facility(building: Dictionary) -> Dictionary:
+	return {"enabled":bool(building.get("enabled",true)),"dispatch":float(building.get("dispatch",1.0))*100,"cooling":1 if building.get("cooling_mode","wet")=="dry" else 0,"storage":maxi(0,["auto","hold","peak"].find(str(building.get("storage_mode","auto")))),"reserve":float(building.get("reserve_soc",0))*100,"peak":float(building.get("peak_hour",17)),"release":float(building.get("environmental_release",.25))*100,"protection":float(building.get("protection_margin",1.0))*100,"flexible":bool(building.get("flexible_mode",false)),"boost":bool(building.get("boost_cooling",false)),"method":0 if game.sim.feature_enabled("remote") and game.sim.digital.can_configure(game.sim,int(building.id)) else 1}
+
+func _read_facility() -> Dictionary:
+	return {"enabled":enabled_input.button_pressed,"dispatch":dispatch_input.value,"cooling":cooling_input.selected,"storage":storage_input.selected,"reserve":reserve_input.value,"peak":peak_input.value,"release":release_input.value,"protection":protection_input.value,"flexible":flexible_input.button_pressed,"boost":boost_input.button_pressed,"method":facility_method.selected}
+
+func _write_facility(value: Dictionary) -> void:
+	enabled_input.set_pressed_no_signal(bool(value.enabled)); dispatch_input.value=float(value.dispatch)
+	cooling_input.select(int(value.cooling)); storage_input.select(int(value.storage)); reserve_input.value=float(value.reserve)
+	peak_input.value=float(value.peak); release_input.value=float(value.release); protection_input.value=float(value.protection)
+	flexible_input.set_pressed_no_signal(bool(value.flexible)); boost_input.set_pressed_no_signal(bool(value.boost)); facility_method.select(int(value.method))
+
+func _capture_facility() -> void:
+	if _displayed_facility<0: return
+	var building: Dictionary=game.sim.get_building(_displayed_facility)
+	if not building.is_empty(): drafts.retain(str(_displayed_facility),_effective_facility(building),_read_facility())
+
+func _capture_drafts() -> void:
+	_capture_facility()
+
+func _facility_has_drafts() -> bool:
+	for key in drafts.values:
+		if drafts.dirty(key): return true
+	return false
+
+func reset_facility_draft() -> void:
+	var building: Dictionary=game.sim.get_building(selected_facility)
+	if building.is_empty(): return
+	drafts.reset(str(selected_facility),_effective_facility(building))
+	_write_facility(drafts.values[str(selected_facility)])
+	_refresh_facility(false)
+	message_label.text="已恢复此设施当前生效值；其他设施草案仍保留。"
+
+func _toggle_comparison(kind: String) -> void:
+	if kind in comparison_kinds: comparison_kinds.erase(kind)
+	elif comparison_kinds.size()<3: comparison_kinds.append(kind)
+	else:
+		message_label.text="最多对比三种设施，请先移除一项。"
+		return
+	_refresh_comparison()
+
+func _refresh_comparison() -> void:
+	game._clear_children(comparison_grid)
+	comparison_cards.clear()
+	comparison_grid.visible=not comparison_kinds.is_empty()
+	for kind in comparison_kinds:
+		var spec: Dictionary=game.sim.catalog[kind]
+		var card: VBoxContainer=_card(comparison_grid)
+		comparison_cards[kind]=card.get_parent()
+		_text(card,str(spec.name),CREAM,18)
+		var energy: float=float(spec.get("energy",0))
+		var capacity: float=float(spec.get("capacity",0))
+		var efficiency: float=float(Evolution.EFFICIENCY.get(kind,1.0))
+		var fields: Array=[
+			["建设费用","¥%s" % game._number(float(spec.price))],
+			["额定功率","%.0f MW" % capacity],
+			["储能容量","%.0f MWh" % energy if energy>0 else "不适用"],
+			["额定时长","%.1f 小时" % (energy/maxf(.001,capacity)) if energy>0 else "不适用"],
+			["基础维护","¥%.0f / 小时" % (9.0+float(Evolution.UPKEEP.get(kind,0)))],
+			["往返效率","%.0f%%" % (efficiency*efficiency*100) if energy>0 else "不适用"],
+			["启动预热","%.1f 小时" % float(Evolution.STARTUP[kind]) if Evolution.STARTUP.has(kind) else "不适用"],
+			["最低稳定负荷","%.0f%%" % (float(Evolution.MINIMUM.get(kind,0))*100) if Evolution.STARTUP.has(kind) else "不适用"]
+		]
+		for field in fields:
+			var row: HBoxContainer=game._row(card,8)
+			var caption: Label=_text(row,str(field[0]),MUTED,14)
+			caption.custom_minimum_size.x=100
+			caption.size_flags_horizontal=Control.SIZE_SHRINK_BEGIN
+			var value: Label=_text(row,str(field[1]),TEAL,14)
+			value.horizontal_alignment=HORIZONTAL_ALIGNMENT_RIGHT
+			if field[0]=="基础维护": value.tooltip_text="一级设施基础维护，不含燃料、辅机购电、线路及通信等费用。"
+		_text(card,"选址与运行约束",CREAM,14)
+		_text(card,str(spec.description),MUTED,14)
+	comparison_label.text="已选 %d / 3 项 · 同序比较功率、容量、基础维护、往返效率与热机边界；额定参数不预测实际交付。" % comparison_kinds.size() if not comparison_kinds.is_empty() else "对比最多三种设施：加入对比后查看额定容量、成本与约束。"
+	_adapt_columns()
+	for kind in comparison_buttons: comparison_buttons[kind].text="移出对比" if kind in comparison_kinds else "加入对比"
 
 func _refresh_region() -> void:
 	var region: RefCounted = game.sim.region

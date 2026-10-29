@@ -2,6 +2,10 @@ extends Node3D
 
 const UI = preload("res://scripts/ui/ui_kit.gd")
 const GameHud = preload("res://scripts/ui/game_hud.gd")
+const OperatorMap = preload("res://scripts/ui/operator_map.gd")
+const Preferences = preload("res://scripts/ui/operator_preferences.gd")
+const SettingsDesk = preload("res://scripts/ui/settings_panel.gd")
+const Presenter = preload("res://scripts/ui/grid_presenter.gd")
 const Sim = preload("res://scripts/sim/grid_sim.gd")
 const Models = preload("res://scripts/art/model_factory.gd")
 const Island = preload("res://scripts/art/island_factory.gd")
@@ -99,16 +103,31 @@ var campaign_panel: Control
 var campaign_save_path := "user://campaign_save.json"
 var campaign_autosave_path := "user://campaign_autosave.json"
 var campaign_backup_path := "user://before_campaign.json"
+var preferences: RefCounted
+var settings_panel: Control
+var operator_map: Control
+var confirmation: Control
+var confirm_body: VBoxContainer
+var pending_demolition := -1
+var hover_line := -1
+var previous_overlay := "normal"
+var onboarding := false
+var onboarding_skipped := false
+var _last_map_size := Vector2.ZERO
 
 func _ready() -> void:
+	preferences = Preferences.new()
+	preferences.load_preferences()
 	sim = Sim.new()
 	sim.reset(42)
 	_setup_world()
 	_setup_ui()
+	_apply_preferences()
 	_sync_world(true)
 	_update_hud()
 	_update_inspector()
 	_update_camera()
+	get_viewport().size_changed.connect(_layout_interface)
 	is_ready = true
 	capture_mode = "--capture" in OS.get_cmdline_user_args()
 	if capture_mode:
@@ -192,6 +211,68 @@ func _update_camera() -> void:
 	var angle := deg_to_rad(45.0) + orbit
 	camera.position = cam_target + Vector3(sin(angle)*36,32,cos(angle)*36)
 	camera.look_at(cam_target)	
+	if operator_map: operator_map.queue_redraw()
+
+func focus_cell(cell: Vector2i) -> void:
+	cam_target = _cell_position(cell)
+	zoom = 32.0
+	_update_camera()
+
+func focus_target(kind: String, id: int) -> void:
+	for panel in [market_panel,digital_panel,planning_panel,campaign_panel]:
+		if panel: panel.hide()
+	hud.close_popups()
+	_set_tool("select")
+	selected_id = -1
+	selected_line = -1
+	selected_comm_line = -1
+	if kind in ["line","power"]:
+		var line: Dictionary = sim.get_line(id)
+		if line.is_empty(): _missing_target(); return
+		selected_line = id
+		var a: Dictionary = sim.get_building(int(line.a))
+		var b: Dictionary = sim.get_building(int(line.b))
+		cam_target = _cell_position(a.cell).lerp(_cell_position(b.cell),.5)
+		zoom = clampf(_cell_position(a.cell).distance_to(_cell_position(b.cell))*1.6,28,72)
+	elif kind in ["communication","comm","link"]:
+		for link in sim.digital.links:
+			if int(link.id)==id:
+				selected_comm_line=id
+				cam_target = _cell_position(sim.get_building(int(link.a)).cell).lerp(_cell_position(sim.get_building(int(link.b)).cell),.5)
+				zoom=32
+				overlay="comm"
+	else:
+		var building: Dictionary = sim.get_building(id)
+		if building.is_empty(): _missing_target(); return
+		selected_id = id
+		cam_target = _cell_position(building.cell)
+		zoom = 28.0
+	# Place the target in the usable map area to the left of the workspace.
+	cam_target += camera.global_basis.x*zoom*.12
+	_update_camera()
+	if not hud.operator_dock.pinned: hud.operator_dock.show_page("object")
+	_sync_world(true)
+	_update_inspector()
+	_update_hud()
+
+func _missing_target() -> void:
+	inspector_selection=""
+	_clear_children(inspector_box)
+	_label(inspector_box,"目标已移除，请重新选择对象。",14,MUTED)
+	hud.refresh_context()
+	_notify("该目标已不存在；历史回执仍可查阅。",false)
+
+func _focus_working_area() -> void:
+	if sim.buildings.is_empty(): return
+	var minimum := Vector2(10000,10000)
+	var maximum := Vector2(-10000,-10000)
+	for building in sim.buildings:
+		var cell := Vector2(building.cell)
+		minimum = minimum.min(cell)
+		maximum = maximum.max(cell)
+	cam_target = _cell_position(Vector2i((minimum+maximum)/2))
+	zoom = clampf((maximum-minimum).length()*SPACING*1.1,30,80)
+	_update_camera()
 
 func _cell_position(cell: Vector2i) -> Vector3:
 	return Vector3((cell.x-7.5)*SPACING,0,(cell.y-7.5)*SPACING)
@@ -331,10 +412,10 @@ func _sync_world(force: bool=false) -> void:
 			lamp.light_energy = 0
 			model.add_child(lamp)
 		var label: Label3D = visuals[b.id].get_node("Status")
-		var faulted: bool = b.get("health",100.0) <= 0.0
+		var marker: Dictionary = Presenter.facility_marker(sim,int(b.id))
 		var consumer: bool = b.kind in ["home","factory","hospital"]
-		label.text = "!" if faulted or (consumer and not b.get("powered",false)) else ""
-		label.modulate = RED
+		label.text = "" if marker.get("color_key","")=="muted" else str(marker.get("text",""))
+		label.modulate = MUTED if marker.get("color_key","")=="muted" else RED
 		if overlay == "power":
 			var status: Dictionary=sim.communication_status(int(b.id))
 			var measurement: Dictionary = sim.facility_observation(int(b.id))
@@ -410,7 +491,7 @@ func _update_lighting() -> void:
 	sun_light.light_energy = (0.06+daylight*0.39)*(0.65 if storm else 1.0)
 	environment_state.ambient_light_energy = 0.11+daylight*0.14
 	environment_state.ambient_light_color = Color("638aaf").lerp(Color("c5e1df"),daylight)
-	rain_root.visible = storm
+	rain_root.visible = storm and not preferences.reduced_motion
 	for id in visuals:
 		var lamp: OmniLight3D = visuals[id].get_node("EveningLight")
 		var b: Dictionary = sim.get_building(int(id))
@@ -449,12 +530,12 @@ func _draw_cable(line: Dictionary) -> void:
 	for i in range(1,13):
 		var t := i/12.0
 		var point := from.lerp(to,t) + Vector3.UP*(0.38+sin(t*PI)*0.13)
-		_cylinder_between(container,previous,point,0.027,color)
+		_cylinder_between(container,previous,point,0.04,color)
 		previous = point
 	# Low terminal posts leave the island architecture clearly visible.
 	for p in [from,to]:
 		_cylinder_between(container,p+Vector3.UP*0.02,p+Vector3.UP*0.47,0.035,Color("465e65"))
-	if not fault and current and observation.get("closed",true) and flow > 0.02:
+	if not preferences.reduced_motion and not fault and current and observation.get("closed",true) and flow > 0.02:
 		var dot := MeshInstance3D.new()
 		dot.name = "EnergyDot"
 		var sphere := SphereMesh.new()
@@ -512,7 +593,8 @@ func _process(delta: float) -> void:
 					drop.position.x = -18
 	var move := Vector2.ZERO
 	if not _modal_open():
-		move = Vector2(float(Input.is_physical_key_pressed(KEY_D))-float(Input.is_physical_key_pressed(KEY_A)),float(Input.is_physical_key_pressed(KEY_S))-float(Input.is_physical_key_pressed(KEY_W)))
+		var text_focused: bool = get_viewport().gui_get_focus_owner() is LineEdit or get_viewport().gui_get_focus_owner() is TextEdit
+		if not text_focused: move = Vector2(float(preferences.is_action_pressed("move_right"))-float(preferences.is_action_pressed("move_left")),float(preferences.is_action_pressed("move_down"))-float(preferences.is_action_pressed("move_up")))
 		if move.length() > 0:
 			var right := camera.global_basis.x
 			var forward := Vector3(camera.global_basis.z.x,0,camera.global_basis.z.z).normalized()
@@ -529,16 +611,18 @@ func _process(delta: float) -> void:
 		_sync_world()
 		_update_hud()
 		refresh_inspector = true
-		chart.sample(float(sim.totals.get("demand",0)),float(sim.totals.get("generation",0))+float(sim.totals.get("import_mw",0)))
+		chart.sample(float(sim.totals.get("demand",0)),float(sim.totals.get("generation",0))+float(sim.totals.get("import_mw",0)),float(sim.elapsed_hours),float(sim.totals.get("served",0)))
 	ui_accum += delta
 	if ui_accum > 0.65:
 		ui_accum = 0
+		_update_time_status()
+		_update_onboarding()
 		if refresh_inspector and not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 			_update_inspector()
 			refresh_inspector = false
 	for id in visuals:
 		var rotor: Node3D = visuals[id].find_child("Rotor",true,false)
-		if rotor:
+		if rotor and not preferences.reduced_motion:
 			rotor.rotate_z(delta*1.3*maxi(1,effective_speed))
 	for id in cable_visuals:
 		var cable: Node3D = cable_visuals[id]
@@ -558,8 +642,14 @@ func _process(delta: float) -> void:
 		sim.save_game(campaign_autosave_path if _campaign_active() else "user://autosave.json")
 
 func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and _guard_modal_focus(event): return
+	if settings_panel != null and settings_panel.visible: return
+	if event is InputEventKey and event.pressed and event.ctrl_pressed and event.keycode==KEY_F and not _modal_open():
+		hud.operator_dock.open_search()
+		get_viewport().set_input_as_handled()
+		return
 	# Reserve pause before focused HUD buttons receive the default Space accept.
-	if is_ready and not _modal_open() and event is InputEventKey and event.keycode == KEY_SPACE:
+	if is_ready and not _modal_open() and event is InputEventKey and preferences.matches("pause",event) and not (get_viewport().gui_get_focus_owner() is LineEdit or get_viewport().gui_get_focus_owner() is TextEdit):
 		if event.pressed and not event.echo: _toggle_pause()
 		get_viewport().set_input_as_handled()
 
@@ -568,7 +658,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_ESCAPE:
-			if campaign_panel.visible:
+			if settings_panel.visible:
+				settings_panel.close()
+			elif confirmation.visible:
+				confirmation.hide()
+			elif campaign_panel.visible:
 				campaign_panel.close()
 			elif planning_panel.visible:
 				planning_panel.close()
@@ -586,25 +680,26 @@ func _unhandled_input(event: InputEvent) -> void:
 				pass
 			else:
 				_set_tool("select")
+			_update_time_status()
 			return
-		if event.keycode == KEY_T and planning_panel.visible:
+		if preferences.matches("planning",event) and planning_panel.visible:
 			planning_panel.close()
 			return
-		if event.keycode == KEY_M and market_panel.visible:
+		if preferences.matches("market",event) and market_panel.visible:
 			market_panel.close()
 			return
-		if event.keycode == KEY_N and digital_panel.visible:
+		if preferences.matches("network",event) and digital_panel.visible:
 			digital_panel.close()
 			return
 		if _modal_open():
 			return
-		match event.keycode:
+		var keycode: int = _canonical_key(event)
+		match keycode:
 			KEY_SPACE: _toggle_pause()
 			KEY_1: _set_tool("select")
 			KEY_2: _set_tool("line")
 			KEY_3: _set_tool("repair")
 			KEY_4:
-				overlay="comm"
 				_set_tool("datalink")
 				_sync_world(true)
 			KEY_Q:
@@ -645,13 +740,19 @@ func _unhandled_input(event: InputEvent) -> void:
 		_update_camera()
 
 func _modal_open() -> bool:
-	return (campaign_panel != null and campaign_panel.visible) or (welcome != null and welcome.visible) or (help_modal != null and help_modal.visible) or (end_modal != null and end_modal.visible) or (market_panel != null and market_panel.visible) or (digital_panel != null and digital_panel.visible) or (planning_panel != null and planning_panel.visible)
+	return (settings_panel != null and settings_panel.visible) or (confirmation != null and confirmation.visible) or (campaign_panel != null and campaign_panel.visible) or (welcome != null and welcome.visible) or (help_modal != null and help_modal.visible) or (end_modal != null and end_modal.visible) or (market_panel != null and market_panel.visible) or (digital_panel != null and digital_panel.visible) or (planning_panel != null and planning_panel.visible)
 
 func _handle_map_click(cell: Vector2i) -> void:
 	var id := _building_at(cell)
 	if tool == "build":
 		if _is_map_cell(cell):
-			_apply(sim.build(build_kind,cell))
+			var result: Dictionary = sim.build(build_kind,cell)
+			_apply(result)
+			if result.get("ok",false):
+				selected_id=int(result.get("id",-1))
+				selected_line=-1
+				selected_comm_line=-1
+				_notify("建成尚需接网 · 选择接线工具连接电源或变电站")
 			_sync_world(true)
 		else:
 			_notify("请在岛屿内的空地上建造",false)
@@ -665,8 +766,9 @@ func _handle_map_click(cell: Vector2i) -> void:
 			selected_id = id
 			_notify("已选起点 · 再点击另一座设施")
 		elif connection_start != id:
-			_apply(sim.connect_communication(connection_start,id,communication_kind) if tool=="datalink" else sim.connect_buildings(connection_start,id))
-			connection_start = -1
+			var result: Dictionary=sim.connect_communication(connection_start,id,communication_kind) if tool=="datalink" else sim.connect_buildings(connection_start,id)
+			_apply(result)
+			if result.get("ok",false): connection_start = -1
 			_sync_world(true)
 	elif tool == "repair":
 		if id >= 0:
@@ -679,6 +781,7 @@ func _handle_map_click(cell: Vector2i) -> void:
 		selected_id = id
 		selected_line = -1 if id >= 0 or overlay=="comm" else _nearest_line(_mouse_ground())
 		selected_comm_line = _nearest_communication(_mouse_ground()) if id<0 and overlay=="comm" else -1
+		if not hud.operator_dock.pinned: hud.operator_dock.page="object"; hud.operator_dock._sync_visibility()
 		_sync_world()
 	_update_inspector()
 	_update_hud()
@@ -687,13 +790,16 @@ func _handle_map_click(cell: Vector2i) -> void:
 
 func _nearest_communication(point: Vector3) -> int:
 	var nearest: int=-1
-	var distance:=.65
+	var distance: float = 10.0*preferences.ui_scale
 	for link in sim.digital.links:
 		var a: Dictionary=sim.get_building(int(link.a))
 		var b: Dictionary=sim.get_building(int(link.b))
 		if a.is_empty() or b.is_empty():
 			continue
-		var d:=Geometry3D.get_closest_point_to_segment(point,_cell_position(a.cell),_cell_position(b.cell)).distance_to(point)
+		var start: Vector2 = camera.unproject_position(_cell_position(a.cell))
+		var finish: Vector2 = camera.unproject_position(_cell_position(b.cell))
+		var screen: Vector2 = camera.unproject_position(point)
+		var d: float = Geometry2D.get_closest_point_to_segment(screen,start,finish).distance_to(screen)
 		if d<distance:
 			distance=d
 			nearest=int(link.id)
@@ -701,16 +807,16 @@ func _nearest_communication(point: Vector3) -> int:
 
 func _nearest_line(point: Vector3) -> int:
 	var nearest := -1
-	var distance := 0.65
+	var distance: float = 10.0*preferences.ui_scale
 	for line in sim.lines:
 		var a: Dictionary = sim.get_building(line.a)
 		var b: Dictionary = sim.get_building(line.b)
 		if a.is_empty() or b.is_empty():
 			continue
-		var start := _cell_position(a.cell)
-		var finish := _cell_position(b.cell)
-		var candidate := Geometry3D.get_closest_point_to_segment(point,start,finish)
-		var d := point.distance_to(candidate)
+		var start: Vector2 = camera.unproject_position(_cell_position(a.cell))
+		var finish: Vector2 = camera.unproject_position(_cell_position(b.cell))
+		var screen: Vector2 = camera.unproject_position(point)
+		var d: float = Geometry2D.get_closest_point_to_segment(screen,start,finish).distance_to(screen)
 		if d < distance:
 			distance = d
 			nearest = line.id
@@ -721,8 +827,11 @@ func _update_hover() -> void:
 		if ghost:
 			ghost.hide()
 		tooltip_label.hide()
+		hover_line = -1
 		return
 	var cell := _mouse_cell()
+	hover_cell = cell
+	hover_line = _nearest_line(_mouse_ground()) if overlay != "comm" else -1
 	if tool == "build" and _is_map_cell(cell):
 		if ghost == null or ghost.get_meta("kind","") != build_kind:
 			if ghost:
@@ -736,24 +845,42 @@ func _update_hover() -> void:
 			marker_root.add_child(ghost)
 		ghost.position = _cell_position(cell)+Vector3.UP*0.055
 		ghost.show()
-		tooltip_label.text = "%s · 点击建造" % sim.catalog[build_kind].name
+		var preview: Dictionary = sim.preview_build(build_kind,cell)
+		var highlight: MeshInstance3D = ghost.get_child(0)
+		highlight.material_override.albedo_color = Color(.45,.95,.78,.4) if preview.ok else Color(.95,.35,.28,.5)
+		tooltip_label.text = "%s %s · ¥%s\n%s" % ["✓ 可建" if preview.ok else "× 不可建",sim.catalog[build_kind].name,_number(float(preview.get("cost",0))),"点击建造；完成后需接网" if preview.ok else str(preview.message)]
+		if preview.ok:
+			tooltip_label.text+="\n基础维护约 ¥%.0f/h；燃料等费用另计" % float(preview.get("maintenance",0))
+			var requirement: String=str({"nuclear":"运行需同岛冷却、人才和厂用电","fusion":"运行需两份冷却、人才和厂用电","hydro":"河流选址；运行受生态下泄约束","pumped_storage":"丘陵选址；储能仍需先充电"}.get(build_kind,""))
+			if not requirement.is_empty(): tooltip_label.text+="\n"+requirement
+		tooltip_label.add_theme_color_override("font_color",TEAL if preview.ok else ORANGE)
 	else:
 		if ghost:
 			ghost.hide()
+		if tool == "build":
+			tooltip_label.text = "× 不可建 · 请在岛屿内部空地上放置"
+			tooltip_label.add_theme_color_override("font_color",ORANGE)
+			_position_tooltip()
+			return
 		var id := _building_at(cell)
 		if id >= 0:
 			var b: Dictionary = sim.get_building(id)
 			tooltip_label.text = str(b.name)+"  ·  点击查看"
 			if tool == "line" and connection_start >= 0 and id != connection_start:
-				tooltip_label.text = "连接至 "+str(b.name)+" · ¥"+_number(sim.connection_cost(connection_start,id))
+				var preview: Dictionary = sim.preview_connection(connection_start,id)
+				tooltip_label.text = ("✓ " if preview.ok else "× ")+"连接至 "+str(b.name)+" · ¥"+_number(float(preview.get("cost",0)))+"\n"+str(preview.message)
 			elif tool=="datalink" and connection_start>=0 and id!=connection_start:
-				tooltip_label.text="通信至 "+str(b.name)+" · ¥"+_number(sim.digital.link_cost(sim,connection_start,id,communication_kind))
+				var preview: Dictionary = sim.preview_connection(connection_start,id,communication_kind)
+				tooltip_label.text=("✓ " if preview.ok else "× ")+"通信至 "+str(b.name)+" · ¥"+_number(float(preview.get("cost",0)))+"\n"+str(preview.message)
 		else:
 			tooltip_label.hide()
 			return
-	tooltip_label.position = get_viewport().get_mouse_position()+Vector2(18,18)
-	tooltip_label.position.x = minf(tooltip_label.position.x,get_viewport().get_visible_rect().size.x-tooltip_label.size.x-12)
-	tooltip_label.position.y = minf(tooltip_label.position.y,get_viewport().get_visible_rect().size.y-tooltip_label.size.y-12)
+	_position_tooltip()
+
+func _position_tooltip() -> void:
+	tooltip_label.position = get_viewport().get_mouse_position()/root_ui.scale+Vector2(18,18)
+	tooltip_label.position.x = clampf(tooltip_label.position.x,8,root_ui.size.x-tooltip_label.size.x-12)
+	tooltip_label.position.y = clampf(tooltip_label.position.y,8,root_ui.size.y-tooltip_label.size.y-12)
 	tooltip_label.show()
 
 func _apply(result: Variant) -> void:
@@ -770,8 +897,14 @@ func _set_tool(value: String) -> void:
 	if value=="build" and not sim.can_build(build_kind).ok:
 		_apply(sim.can_build(build_kind))
 		return
+	var previous_tool: String=tool
+	if tool=="select" and value!="select": previous_overlay=overlay
 	tool = value
 	if value == "datalink": overlay = "comm"
+	elif value == "line": overlay = "power"
+	elif value == "build" and build_kind in ["sensor","control","relay","soc"]: overlay = "comm"
+	elif value == "build": overlay = "power"
+	elif value == "select" and previous_tool!="select": overlay = previous_overlay
 	if value == "select" and hud != null: hud.close_tray()
 	connection_start = -1
 	if ghost:
@@ -784,7 +917,7 @@ func _set_tool(value: String) -> void:
 	if tool == "line":
 		text = "连线模式 · 依次点击两座设施 · 右键取消"
 	elif tool=="datalink":
-		text = "通信布线 · 依次点击两座设备 · 介质 %s · N 管理网络" % ("光纤" if communication_kind=="fiber" else "无线")
+		text = "通信布线 · 依次点击两座设备 · 介质 %s · %s 管理网络" % ["光纤" if communication_kind=="fiber" else "无线",preferences.binding_label("network")]
 	elif tool == "repair":
 		text = "抢修模式 · 点击设施或故障线路派遣队伍"
 	elif tool == "build":
@@ -795,6 +928,7 @@ func _set_tool(value: String) -> void:
 		communication_root.visible=overlay=="comm" or tool=="datalink"
 		cable_root.visible=not communication_root.visible
 	hud.refresh_context()
+	if operator_map: operator_map.queue_redraw()
 
 func _set_build_category(category: String) -> void:
 	build_category = category
@@ -816,19 +950,35 @@ func _save() -> void:
 
 func _load(path: String="") -> void:
 	if path.is_empty(): path = campaign_save_path if _campaign_active() else "user://tidal_grid_save.json"
+	if _has_unsent_drafts():
+		_clear_children(confirm_body)
+		_label(confirm_body,"读取存档并清空草案？",22,ORANGE)
+		_paragraph(confirm_body,"当前未提交的市场、设施或安全设置将被清空。个人显示和快捷键设置会保留。",CREAM,14)
+		_button(confirm_body,"取消，继续编辑",func(): confirmation.hide()).grab_focus()
+		_button(confirm_body,"读取并清空草案",func(): confirmation.hide(); _load_confirmed(path))
+		confirmation.show()
+		_update_time_status(true)
+		return
+	_load_confirmed(path)
+
+func _load_confirmed(path: String) -> void:
 	var result: Dictionary = sim.load_game(path)
 	_apply(result)
 	if not result.get("ok",false): return
 	_rebuild_session()
+	_notify("存档已读取；上个会话的草案与关注列表已清空。")
 
 func _rebuild_session(reset_view: bool=false) -> void:
 	for item in visuals.values(): item.queue_free()
 	visuals.clear()
-	chart.history.clear()
+	chart.reset_history()
+	hud.operator_dock.reset_session()
+	for center in [market_panel,digital_panel,planning_panel,campaign_panel]:
+		if center.has_method("reset_session"): center.reset_session()
 	hud.close_popups()
 	hud.close_tray()
 	inspector_selection = ""
-	for panel in [market_panel,digital_panel,planning_panel,campaign_panel,welcome,help_modal,end_modal]:
+	for panel in [market_panel,digital_panel,planning_panel,campaign_panel,welcome,help_modal,end_modal,confirmation,settings_panel]:
 		if panel!=null: panel.hide()
 	last_finished = false
 	mission_snapshot = ""
@@ -858,8 +1008,10 @@ func _rebuild_session(reset_view: bool=false) -> void:
 	_update_camera()
 	_update_hud()
 	_update_inspector()
+	if reset_view and _campaign_active(): _focus_working_area()
 
-func start_campaign_chapter(id: int) -> void:
+func start_campaign_chapter(id: int, discard_drafts: bool=false) -> void:
+	if not discard_drafts and _offer_discard_drafts(func(): start_campaign_chapter(id,true)): return
 	if id<1 or id>int(campaign_panel.profile.unlocked):
 		_notify("请先完成上一章。",false)
 		return
@@ -874,14 +1026,16 @@ func start_campaign_chapter(id: int) -> void:
 	sim.save_game(campaign_save_path)
 	campaign_panel.open_briefing()
 
-func restart_campaign_chapter() -> void:
+func restart_campaign_chapter(discard_drafts: bool=false) -> void:
+	if not discard_drafts and _offer_discard_drafts(func(): restart_campaign_chapter(true)): return
 	var result: Dictionary = sim.restart_campaign_chapter()
 	if not result.ok: _apply(result); return
 	_rebuild_session(true)
 	sim.save_game(campaign_save_path)
 	campaign_panel.open_briefing()
 
-func continue_campaign() -> void:
+func continue_campaign(discard_drafts: bool=false) -> void:
+	if not discard_drafts and _offer_discard_drafts(func(): continue_campaign(true)): return
 	var path := campaign_save_path
 	if FileAccess.file_exists(campaign_autosave_path):
 		if not FileAccess.file_exists(path) or FileAccess.get_modified_time(campaign_autosave_path)>FileAccess.get_modified_time(path): path=campaign_autosave_path
@@ -890,7 +1044,8 @@ func continue_campaign() -> void:
 	_rebuild_session()
 	if not last_finished: hud.toggle_popup("missions")
 
-func return_to_sandbox() -> void:
+func return_to_sandbox(discard_drafts: bool=false) -> void:
+	if not discard_drafts and _offer_discard_drafts(func(): return_to_sandbox(true)): return
 	if _campaign_active():
 		sim.save_game(campaign_save_path)
 		if FileAccess.file_exists(campaign_backup_path):
@@ -922,7 +1077,10 @@ func _label(parent: Node, text: String, font_size: int=16, color: Color=CREAM) -
 	return UI.label(parent,text,font_size,color)
 
 func _button(parent: Node, text: String, callback: Callable, min_size: Vector2=Vector2(0,36), toggle: bool=false) -> Button:
-	return UI.button(parent,text,callback,min_size,toggle)
+	var button: Button=UI.button(parent,text,callback,min_size,toggle)
+	if text.begins_with("应用") or text.begins_with("签订"): UI.action(button)
+	elif text.begins_with("拆除设施") or text.begins_with("确认拆除"): UI.action(button,"destructive")
+	return button
 
 func _column(parent: Node, separation: int=10) -> VBoxContainer:
 	return UI.column(parent,separation)
@@ -938,11 +1096,18 @@ func _setup_ui() -> void:
 	root_ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(root_ui)
 	root_ui.theme = UI.create_theme()
+	operator_map = OperatorMap.new()
+	root_ui.add_child(operator_map)
+	operator_map.setup(self)
 	hud = GameHud.new()
 	root_ui.add_child(hud)
 	hud.setup(self)
 	hud.tool_requested.connect(_set_tool)
-	hud.build_requested.connect(func(kind: String): build_kind=kind; _set_tool("build"))
+	hud.build_requested.connect(func(kind: String):
+		build_kind=kind
+		_set_tool("build")
+		if root_ui.size.x<1120 or root_ui.size.y<650: hud.close_tray()
+	)
 	hud.overlay_requested.connect(func(value: String): overlay=value; _sync_world(true); hud.refresh_context())
 	hud.center_requested.connect(_open_center)
 	hud.action_requested.connect(_hud_action)
@@ -964,7 +1129,15 @@ func _setup_ui() -> void:
 	digital_ticker = hud.digital_ticker
 	chart = hud.chart
 	topology = hud.topology
+	chart.sim = sim
+	topology.node_selected.connect(func(id: int): focus_target("building",id))
+	topology.line_selected.connect(func(id: int): focus_target("line",id))
 	_setup_modals()
+	settings_panel = SettingsDesk.new()
+	root_ui.add_child(settings_panel)
+	settings_panel.setup(preferences)
+	settings_panel.preferences_changed.connect(_apply_preferences)
+	settings_panel.closed.connect(_update_hud)
 
 func _prepare_center(center: Control) -> void:
 	if center==market_panel:
@@ -982,6 +1155,8 @@ func _prepare_center(center: Control) -> void:
 	hud.close_tray()
 	tooltip_label.hide()
 	if ghost: ghost.hide()
+	if center.has_method("inherit_selection"): center.inherit_selection(selected_id,selected_line,selected_comm_line)
+	_update_time_status(true)
 
 func _set_security_buttons(node: Node) -> void:
 	if node is Button and ("隔离所选" in node.text or "解除设备隔离" in node.text or "恢复 / 修补" in node.text):
@@ -1005,6 +1180,12 @@ func _hud_action(value: String) -> void:
 		"save": _save()
 		"load": _load()
 		"help": help_modal.show()
+		"settings": settings_panel.open(); _update_time_status(true)
+		"diagnosis": hud.operator_dock.show_page("diagnosis")
+		"workspace": hud.operator_dock.open_search()
+		"jobs": hud.operator_dock.show_page("jobs")
+		"working_area": _focus_working_area()
+		"full_map": cam_target=_cell_position(Vector2i(sim.map_size()/2,sim.map_size()/2)); zoom=135 if sim.map_size()>16 else 58; _update_camera()
 		"campaign": campaign_panel.open_directory()
 		"research": _research()
 		"response": _apply(sim.demand_response()); _update_hud()
@@ -1039,7 +1220,7 @@ func _update_hud() -> void:
 		if market_panel.visible:
 			market_panel.refresh(false)
 	hud_values.cash.text = "¥ %s" % _number(sim.cash)
-	hud_values.supply.text = "%.1f / %.1f MW" % [t.get("served",0),t.get("demand",0)]
+	hud_values.supply.text = "已供 %.1f / 需求 %.1f MW" % [t.get("served",0),t.get("demand",0)]
 	var reliability: float = float(t.get("reliability",1))
 	if reliability <= 1.001:
 		reliability *= 100
@@ -1112,6 +1293,10 @@ func _update_hud() -> void:
 			logs += "• "+str(entry)+"\n\n"
 	events_label.text = logs
 	hud.refresh_context()
+	_update_time_status()
+	chart.sample(float(t.get("demand",0)),float(t.get("generation",0))+float(t.get("import_mw",0)),float(sim.elapsed_hours),float(t.get("served",0)))
+	hud.operator_dock.refresh()
+	_update_onboarding()
 
 func _number(value: float) -> String:
 	var whole := roundi(value)
@@ -1136,6 +1321,8 @@ func _paragraph(parent: Node, text: String, color: Color=MUTED, font_size: int=1
 	return l
 
 func _update_inspector() -> void:
+	if selected_id>=0 and sim.get_building(selected_id).is_empty(): selected_id=-1
+	if selected_line>=0 and sim.get_line(selected_line).is_empty(): selected_line=-1
 	hud.refresh_context()
 	if selected_id < 0 and selected_line < 0 and selected_comm_line < 0: return
 	var selection := str([selected_id,selected_line,selected_comm_line])
@@ -1239,14 +1426,14 @@ func _populate_inspector() -> void:
 		_stat(inspector_box,"实时出力","%.2f MW" % observation.output if observation.trusted else "遥测未确认",TEAL)
 	if b.kind in ["sensor","control","relay","soc"] and sim.feature_enabled("digital"):
 		_button(inspector_box,"⌁ 打开数字电网运行中心",func(): _open_center("network"); digital_panel._select_device(int(b.id)),Vector2(0,34))
-		_button(inspector_box,"⌁ 从这里铺设通信链路",func(): overlay="comm"; _set_tool("datalink"); connection_start=int(b.id); _sync_world(true),Vector2(0,34))
+		_button(inspector_box,"⌁ 从这里铺设通信链路",func(): _set_tool("datalink"); connection_start=int(b.id); _sync_world(true),Vector2(0,34))
 	if sim.evolution.is_storage(str(b.kind)):
 		_stat(inspector_box,"储存能量","%.2f MWh" % observation.energy if observation.trusted else "遥测未确认",TEAL)
 		if sim.feature_enabled("market"): _button(inspector_box,"⇄ 储能策略与电价",func(): _open_center("market"); market_panel.tabs.current_tab=2,Vector2(0,32))
 	if sim.evolution.is_terminal(str(b.kind)):
 		_stat(inspector_box,"净交换功率","%+.2f MW" % observation.output if observation.trusted else "遥测未确认",TEAL)
 		if sim.feature_enabled("market"): _button(inspector_box,"⇄ 打开电力交易中心",func(): _open_center("market"),Vector2(0,32))
-	if sim.feature_enabled("research"): _button(inspector_box,"运行边界与精细控制  T",func(): _open_center("planning"); planning_panel.select_facility(int(b.id)),Vector2(0,32))
+	if sim.feature_enabled("research"): _button(inspector_box,"运行边界与精细控制  "+preferences.binding_label("planning"),func(): _open_center("planning"); planning_panel.select_facility(int(b.id)),Vector2(0,32))
 	var data: Dictionary = sim.catalog.get(b.kind,{})
 	_paragraph(inspector_box,str(data.get("description","")),MUTED,11)
 	var id: int = b.id
@@ -1270,7 +1457,9 @@ func _populate_inspector() -> void:
 	upgrade_button.tooltip_text = sim.evolution.upgrade_effect(str(b.kind)) if sim.evolution.upgrade_supported(str(b.kind)) else "此设施暂无能力升级；可维护设备或增容相连线路"
 	_button(actions,"＋ 维护 ¥1.2k",func(): _apply(sim.repair(id)); _update_inspector(),Vector2(113,34))
 	_button(inspector_box,"⌁  从这里连接线路",func(): _set_tool("line"); connection_start=id; _notify("再点击目标设施，完成接线"),Vector2(0,34))
-	_button(inspector_box,"拆除设施 · 回收 ¥%s" % _number(float(b.get("refund_basis",data.get("price",0)))*0.35),func(): _apply(sim.demolish(id)); selected_id=-1; _sync_world(true); _update_hud(); _update_inspector(),Vector2(0,30))
+	_button(inspector_box,"☆ 固定关注此设施",func(): hud.operator_dock.watch(id); _notify("已更新关注列表；Ctrl+F 查看"),Vector2(0,34))
+	_append_object_jobs(inspector_box,"facility",id)
+	_button(inspector_box,"拆除设施 · 回收 ¥%s" % _number(float(b.get("refund_basis",data.get("price",0)))*0.35),func(): _request_demolition(id),Vector2(0,30))
 
 func _inspect_line() -> void:
 	var line: Dictionary=sim.get_line(selected_line)
@@ -1301,6 +1490,7 @@ func _inspect_line() -> void:
 	_button(inspector_box,"巡检定位 · ¥500",func(): _apply(sim.patrol_line(id)); _update_inspector(),Vector2(0,34))
 	_button(inspector_box,"＋ 派遣线路抢修队",func(): _apply(sim.repair_line(id)); _update_inspector(),Vector2(0,34))
 	_button(inspector_box,"↑ 线路增容 · ¥%s" % _compact(4500.0*float(line.get("level",1))),func(): _apply(sim.upgrade_line(id)); _sync_world(true); _update_hud(); _update_inspector(),Vector2(0,34))
+	_append_object_jobs(inspector_box,"line",id)
 
 func _inspect_communication() -> void:
 	var link: Dictionary={}
@@ -1349,6 +1539,7 @@ func _modal(parent: Node, width: float=780, height: float=600) -> Control:
 	parent.add_child(shade)
 	var panel := PanelContainer.new()
 	panel.name = "Dialog"
+	panel.set_meta("preferred_size",Vector2(width,height))
 	panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
 	panel.offset_left = -width/2
 	panel.offset_right = width/2
@@ -1356,6 +1547,15 @@ func _modal(parent: Node, width: float=780, height: float=600) -> Control:
 	panel.offset_bottom = height/2
 	panel.add_theme_stylebox_override("panel",UI.style(UI.SURFACE,10,Color("46616a"),20,true))
 	shade.add_child(panel)
+	var scroll := ScrollContainer.new()
+	scroll.name="ContentScroll"
+	scroll.horizontal_scroll_mode=ScrollContainer.SCROLL_MODE_DISABLED
+	panel.add_child(scroll)
+	var content := VBoxContainer.new()
+	content.name="Content"
+	content.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	content.size_flags_vertical=Control.SIZE_EXPAND_FILL
+	scroll.add_child(content)
 	return shade
 
 func _setup_modals() -> void:
@@ -1364,10 +1564,10 @@ func _setup_modals() -> void:
 	dialog_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root_ui.add_child(dialog_layer)
 	welcome = _modal(dialog_layer,740,650)
-	var v := _column(welcome.get_node("Dialog"),10)
-	if ResourceLoader.exists("res://assets/art/bay_cover.png"):
+	var v := _column(welcome.get_node("Dialog/ContentScroll/Content"),10)
+	if ResourceLoader.exists("res://assets/art/operator_cover.png"):
 		var art := TextureRect.new()
-		art.texture = load("res://assets/art/bay_cover.png")
+		art.texture = load("res://assets/art/operator_cover.png")
 		art.custom_minimum_size = Vector2(0,140)
 		art.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		art.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
@@ -1378,13 +1578,13 @@ func _setup_modals() -> void:
 	UI.spacer(v).size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_label(v,"建造与接线  →  调度与储能  →  抢修与扩建",15,ORANGE)
 	_label(v,"左键交互 · 右键取消 · 空格暂停 · H 调度员手册",14,MUTED)
-	var begin := _button(v,"开始运营   →",func(): welcome.hide(); _notify("用接线工具连接中央变电站与东部工业园区。"),Vector2(0,48))
+	var begin := _button(v,"开始运营   →",func(): welcome.hide(); onboarding=true; onboarding_skipped=false; _update_onboarding(); _notify("用接线工具连接中央变电站与东部工业园区。"),Vector2(0,48))
 	var campaign_actions := _row(v,10)
 	_button(campaign_actions,"历史战役  ·  电力时代",func(): campaign_panel.open_directory(),Vector2(0,40))
 	_button(campaign_actions,"继续战役",func(): continue_campaign(),Vector2(0,40))
 	begin.add_theme_stylebox_override("normal",UI.style(Color("28584f"),6,TEAL,10))
 	help_modal = _modal(dialog_layer,1040,620)
-	var h := _column(help_modal.get_node("Dialog"),14)
+	var h := _column(help_modal.get_node("Dialog/ContentScroll/Content"),14)
 	var head := _row(h)
 	_label(head,"调度员手册",26)
 	UI.spacer(head)
@@ -1417,7 +1617,7 @@ func _setup_modals() -> void:
 		var index: int = i
 		var button := _button(topics,manual[i][0],func():
 			title.text=manual[index][0]
-			prose.text=manual[index][1]
+			prose.text=_keyboard_guide() if index==manual.size()-1 else manual[index][1]
 			scroll.scroll_vertical=0
 			for j in topic_buttons.size(): topic_buttons[j].button_pressed=j==index
 		,Vector2(0,38),true)
@@ -1438,10 +1638,13 @@ func _setup_modals() -> void:
 	campaign_panel = CampaignDesk.new()
 	dialog_layer.add_child(campaign_panel)
 	campaign_panel.setup(self)
+	confirmation=_modal(dialog_layer,560,360)
+	confirm_body=_column(confirmation.get_node("Dialog/ContentScroll/Content"),12)
+	confirmation.hide()
 
 func _show_result(victory: bool) -> void:
 	if _campaign_active(): campaign_panel.open_report(victory); return
-	var panel := end_modal.get_node("Dialog")
+	var panel := end_modal.get_node("Dialog/ContentScroll/Content")
 	_clear_children(panel)
 	var v := _column(panel,18)
 	_label(v,"青屿湾示范区  /  运营报告",14,MUTED)
@@ -1466,7 +1669,8 @@ func start_heritage_game(backup_path: String="user://before_heritage.json") -> v
 	_new_game(true)
 	_notify("已备份旧进度。历史开局从短距离直流供电开始，按 T 查看研究路线。")
 
-func _new_game(heritage: bool=false) -> void:
+func _new_game(heritage: bool=false,discard_drafts: bool=false) -> void:
+	if not discard_drafts and _offer_discard_drafts(func(): _new_game(heritage,true)): return
 	if heritage:
 		sim.start_heritage()
 	else:
@@ -1483,3 +1687,157 @@ func _capture_preview() -> void:
 	print("CAPTURE_SAVED: res://docs/screenshots/gameplay.png")
 	if "--capture-quit" in OS.get_cmdline_user_args():
 		get_tree().quit()
+
+func _canonical_key(event: InputEventKey) -> int:
+	for action in preferences.DEFAULT_BINDINGS:
+		if preferences.matches(action,event): return int(preferences.DEFAULT_BINDINGS[action])
+	return 0
+
+func _keyboard_guide() -> String:
+	var lines: Array[String]=["鼠标中键：平移　滚轮：缩放","Ctrl+F：设施与城市检索　Esc：取消 / 返回"]
+	for action in preferences.DEFAULT_BINDINGS:
+		lines.append(preferences.binding_label(action)+"："+str(preferences.ACTION_NAMES[action]))
+	lines.append("\n右上菜单也提供存读档与设置。每90秒写入独立自动存档；经营中心暂停自动时间，返回后继续原有倍率。")
+	return "\n".join(lines)
+
+func _update_time_status(planning: bool=false) -> void:
+	if hud == null or hud.time_status == null: return
+	if planning or _modal_open():
+		hud.time_status.text = "规划暂停 · 返回 %d×" % speed if speed>0 else "规划暂停 · 返回仍暂停"
+	elif speed==0: hud.time_status.text="手动暂停"
+	else: hud.time_status.text="运行 %d×" % speed
+
+func _apply_preferences() -> void:
+	if root_ui==null: return
+	root_ui.theme=UI.create_theme(preferences.high_contrast)
+	_layout_interface()
+	if is_ready:
+		_sync_world(true)
+		_update_hud()
+
+func _layout_interface() -> void:
+	if root_ui==null: return
+	var ratio: float=preferences.ui_scale
+	root_ui.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	root_ui.scale=Vector2(ratio,ratio)
+	root_ui.size=get_viewport().get_visible_rect().size/ratio
+	_last_map_size=root_ui.size
+	if hud: hud.layout_workspace()
+	for modal in [welcome,help_modal,end_modal,confirmation]:
+		if modal==null: continue
+		var dialog: Control=modal.get_node("Dialog")
+		var preferred: Vector2=dialog.get_meta("preferred_size",Vector2(650,500))
+		var extent: Vector2=preferred.min(root_ui.size-Vector2(32,32))
+		dialog.offset_left=-extent.x/2
+		dialog.offset_right=extent.x/2
+		dialog.offset_top=-extent.y/2
+		dialog.offset_bottom=extent.y/2
+	if operator_map: operator_map.queue_redraw()
+
+func _request_demolition(id: int) -> void:
+	var preview: Dictionary=sim.preview_demolition(id)
+	if not preview.get("ok",false): _apply(preview); return
+	pending_demolition=id
+	_clear_children(confirm_body)
+	_label(confirm_body,"确认拆除设施",23,RED)
+	var building: Dictionary=sim.get_building(id)
+	_paragraph(confirm_body,"%s · 回收 ¥%s\n将移除 %d 条电力线路、%d 条通信链路。" % [building.name,_number(float(preview.get("refund",0))),preview.get("line_ids",[]).size(),preview.get("communication_ids",[]).size()],CREAM,14)
+	_paragraph(confirm_body,"关联负荷可能失供，设备在途操作会终止。实际影响依赖当前网络；未知状态需先核实。",ORANGE,14)
+	var cancel := _button(confirm_body,"取消，保留设施",func(): confirmation.hide(); pending_demolition=-1)
+	var button:=_button(confirm_body,"确认拆除并移除连接",_confirm_demolition)
+	button.add_theme_color_override("font_color",RED)
+	confirmation.show()
+	cancel.grab_focus()
+	_update_time_status(true)
+
+func _confirm_demolition() -> void:
+	confirmation.hide()
+	if pending_demolition<0: return
+	var result: Dictionary=sim.demolish(pending_demolition)
+	_apply(result)
+	if result.get("ok",false):
+		selected_id=-1
+		selected_line=-1
+		selected_comm_line=-1
+		inspector_selection=""
+	pending_demolition=-1
+	_sync_world(true)
+	_update_hud()
+	_update_inspector()
+
+func _append_object_jobs(parent: Node, kind: String, id: int) -> void:
+	var rows: Array=Presenter.jobs(sim)
+	var displayed:=0
+	for job in rows:
+		if str(job.target_type)!=kind or int(job.target_id)!=id: continue
+		var phase: String=str(job.phase)
+		_paragraph(parent,("… 已排队 · " if phase=="pending" else ("✓ 已执行 · " if phase=="executed" else "× 执行失败 · "))+str(job.message),ORANGE if phase in ["pending","rejected"] else TEAL,14)
+		displayed+=1
+		if displayed>=3: break
+	if displayed>0: _button(parent,"查看完整队列与回执",func(): hud.operator_dock.show_page("jobs"),Vector2(0,34))
+
+func _has_unsent_drafts() -> bool:
+	for center in [market_panel,digital_panel,planning_panel]:
+		if center==null or center.get("drafts")==null: continue
+		if center.has_method("_capture_drafts"): center._capture_drafts()
+		var drafts: RefCounted=center.drafts
+		for key in drafts.values:
+			if drafts.dirty(key): return true
+	return false
+
+func _update_onboarding() -> void:
+	if hud==null or hud.onboarding_panel==null: return
+	hud.onboarding_panel.visible=onboarding and not onboarding_skipped and not _campaign_active() and not _modal_open()
+	if not hud.onboarding_panel.visible: return
+	var connected:=false
+	for line in sim.lines:
+		if (int(line.a)==2 and int(line.b)==6) or (int(line.a)==6 and int(line.b)==2): connected=true
+	if connected:
+		hud.onboarding_label.text="✓ 已连接工业区\n观察底部已供/需求与净收益。点击供电数字可查看诊断；供电改善后可继续自由运营。"
+	else:
+		hud.onboarding_label.text="1 选择接线工具\n2 点击中央变电站，再点击东部工业园区\n3 观察已供功率与收益变化；检查线路负载。"
+
+func _offer_discard_drafts(next: Callable) -> bool:
+	if not _has_unsent_drafts(): return false
+	_clear_children(confirm_body)
+	_label(confirm_body,"切换进度并清空草案？",22,ORANGE)
+	_paragraph(confirm_body,"未提交的市场、设施和安全配置不会带入其他进度。取消可继续编辑，确认后清空当前草案。",CREAM,14)
+	var cancel := _button(confirm_body,"取消，继续编辑",func(): confirmation.hide())
+	_button(confirm_body,"确认切换并清空草案",func(): confirmation.hide(); next.call())
+	confirmation.show()
+	cancel.grab_focus()
+	_update_time_status(true)
+	return true
+
+func _front_modal() -> Control:
+	for modal in [settings_panel,confirmation,campaign_panel,planning_panel,digital_panel,market_panel,end_modal,help_modal,welcome]:
+		if modal!=null and modal.visible: return modal
+	return null
+
+func _modal_focusables(node: Node, result: Array[Control]) -> void:
+	if node is Control and node.is_visible_in_tree() and node.focus_mode==Control.FOCUS_ALL:
+		if not (node is BaseButton and node.disabled): result.append(node)
+	for child in node.get_children(): _modal_focusables(child,result)
+
+func _guard_modal_focus(event: InputEventKey) -> bool:
+	var modal: Control=_front_modal()
+	if modal==null: return false
+	if modal==settings_panel and not settings_panel.pending_action.is_empty(): return false
+	var focus: Control=get_viewport().gui_get_focus_owner()
+	var outside: bool=focus==null or not modal.is_ancestor_of(focus)
+	if not outside and event.keycode!=KEY_TAB: return false
+	var controls: Array[Control]=[]
+	_modal_focusables(modal,controls)
+	if controls.is_empty(): return false
+	var index: int=controls.find(focus)
+	if event.keycode==KEY_TAB:
+		index=posmod(index+(-1 if event.shift_pressed else 1),controls.size())
+		controls[index].grab_focus()
+		get_viewport().set_input_as_handled()
+		return true
+	if outside:
+		controls[0].grab_focus()
+		if event.keycode in [KEY_ENTER,KEY_KP_ENTER,KEY_SPACE]:
+			get_viewport().set_input_as_handled()
+			return true
+	return false

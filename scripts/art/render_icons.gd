@@ -3,7 +3,7 @@ extends SceneTree
 ## Render the source models with Godot into transparent toolbar illustrations.
 ## godot --path . --script scripts/art/render_icons.gd
 const Models = preload("res://scripts/art/model_factory.gd")
-const KINDS = ["gas", "solar", "wind", "battery", "substation", "home", "factory", "hospital", "sensor", "intertie", "control", "relay", "soc"]
+const KINDS = ["gas", "solar", "wind", "battery", "substation", "home", "factory", "hospital", "sensor", "intertie", "control", "relay", "soc", "dc_dynamo", "steam", "coal", "hydro", "cooling", "academy", "nuclear", "pumped_storage", "condenser", "hvdc", "ccgt", "flow_battery", "community_battery", "hydrogen", "thermal_storage", "fusion"]
 var kinds: Array = KINDS.duplicate()
 var viewport: SubViewport
 var stage: Node3D

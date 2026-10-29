@@ -37,6 +37,7 @@ func _run() -> void:
 		game.selected_line = -1
 		game.selected_comm_line = -1
 		game._set_tool("select")
+		game.hud.operator_dock.close()
 		game.hud.close_popups()
 		game._update_inspector()
 		await capture("hud")
@@ -53,6 +54,7 @@ func _run() -> void:
 		game.hud.toggle_popup("alerts")
 		await capture("alerts")
 		game.hud.close_popups()
+		game.hud.operator_dock.close()
 		for entry in [["market",game.market_panel,4],["digital",game.digital_panel,4],["planning",game.planning_panel,3]]:
 			var panel: Control = entry[1]
 			panel.open()

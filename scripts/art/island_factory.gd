@@ -72,7 +72,32 @@ static func create(size: int = 16, spacing: float = 2.0) -> Node3D:
 	var van = Models.vehicle()
 	root.add_child(van)
 	van.position = Vector3(road_x + 0.25, 0.04, 3.6)
+	_coastal_landmarks(root,half)
 	return root
+
+## Decoration stays beyond the playable grid, so it cannot obscure a siting cell.
+static func _coastal_landmarks(root: Node3D, half: float) -> void:
+	var landmarks := Node3D.new()
+	landmarks.name = "CoastalLandmarks"
+	root.add_child(landmarks)
+	var beacon_at := Vector3(-half-0.65,-0.2,half-1.4)
+	Models.cylinder(landmarks,0.65,0.16,beacon_at,Models.CONCRETE,12)
+	Models.cylinder(landmarks,0.24,1.5,beacon_at+Vector3(0,0.8,0),Models.CREAM,10,0.18)
+	Models.cylinder(landmarks,0.25,0.3,beacon_at+Vector3(0,1.25,0),Models.CORAL,10)
+	Models.cylinder(landmarks,0.29,0.3,beacon_at+Vector3(0,1.7,0),Models.BLUE,8)
+	Models.cylinder(landmarks,0.38,0.16,beacon_at+Vector3(0,1.93,0),Models.CORAL,8,0.04)
+	# A working quay and three navigation buoys distinguish the harbour edge.
+	Models.box(landmarks,Vector3(4.3,0.12,0.6),Vector3(8.5,-0.12,half+0.65),Models.CONCRETE,"HarbourQuay")
+	for x in [7.0,8.5,10.0]:
+		Models.cylinder(landmarks,0.07,0.27,Vector3(x,0.08,half+0.72),Models.DARK,8)
+	for i in range(3):
+		var at := Vector3(half+3.0+float(i)*1.5,-1.2,half-4.0+float(i)*2.0)
+		Models.cylinder(landmarks,0.22,0.12,at,Models.CORAL,10)
+		Models.cylinder(landmarks,0.045,0.8,at+Vector3(0,0.4,0),Models.CREAM,6)
+	# Narrow salt-marsh bands add shoreline texture without distracting from assets.
+	for i in range(8):
+		var at := Vector3(-half-0.7,-0.16,-half+2.0+float(i)*2.7)
+		Models.box(landmarks,Vector3(0.2,0.12,0.65),at,Color("658e79"))
 
 static func create_for_map(spec: Dictionary, spacing: float = 2.0) -> Node3D:
 	if spec.is_empty():

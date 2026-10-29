@@ -14,7 +14,16 @@ static func build(host: Control, title: String, advance_text: String, on_advance
 	var panel := PanelContainer.new()
 	panel.add_theme_stylebox_override("panel",UI.style(UI.SURFACE,10,Color("46616a"),18,true))
 	margin.add_child(panel)
-	var body := UI.column(panel,12)
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode=ScrollContainer.SCROLL_MODE_DISABLED
+	panel.add_child(scroll)
+	var body := UI.column(scroll,12)
+	body.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	body.size_flags_vertical=Control.SIZE_EXPAND_FILL
+	var relayout := func():
+		body.custom_minimum_size.y=maxf(610,host.size.y-90)
+	host.resized.connect(relayout)
+	relayout.call_deferred()
 	var header := UI.row(body,14)
 	UI.label(header,title,24)
 	UI.spacer(header)

@@ -18,6 +18,7 @@ const Dispatch = preload("res://scripts/sim/grid_dispatch.gd")
 const NetworkSolver = preload("res://scripts/sim/dc_network_solver.gd")
 const GRID_SIZE := 48
 const LINE_COST := 1600.0
+const LINE_CAPACITY := 24.0
 const RESEARCH_COSTS := [16000.0, 32000.0]
 const CATALOG := {
 	"gas": {"name": "燃气电站", "price": 38000.0, "capacity": 24.0, "demand": 0.0, "description": "可调度的稳定电源。燃料有成本，也产生碳排放。", "color": "d48b67"},
@@ -60,6 +61,8 @@ var weather := "晴朗"
 var research_level := 0
 var totals: Dictionary = {}
 var log_entries: Array[Dictionary] = []
+# Session-only operator acknowledgements; save schema and campaign flags stay independent.
+var operator_receipts: Array[Dictionary] = []
 var objectives: Array[Dictionary] = []
 var rng := RandomNumberGenerator.new()
 var initial_seed := 42
@@ -103,6 +106,7 @@ func reset(seed_value: int = 42) -> void:
 	buildings.clear()
 	lines.clear()
 	log_entries.clear()
+	operator_receipts.clear()
 	cash = 180000.0
 	time_hours = 8.0
 	day = 1
@@ -172,7 +176,7 @@ func _add_building(kind: String, cell: Vector2i, metadata: Dictionary = {}) -> D
 	return building
 
 func _add_line(a: int, b: int) -> Dictionary:
-	var item := {"id": next_line_id, "a": a, "b": b, "capacity": 24.0,
+	var item := {"id": next_line_id, "a": a, "b": b, "capacity": LINE_CAPACITY,
 		"flow": 0.0, "closed": true, "fault": false, "heat": 0.0,
 		"health": 100.0, "level": 1, "repair_remaining": 0.0, "trip_reason": ""}
 	next_line_id += 1
@@ -197,24 +201,46 @@ func building_at(cell: Vector2i) -> Dictionary:
 			return building
 	return {}
 
-func build(kind: String, cell: Vector2i) -> Dictionary:
+func preview_build(kind: String, cell: Vector2i) -> Dictionary:
+	var spec: Dictionary = catalog.get(kind,{})
+	var result: Dictionary = {"ok":false,"message":"未知设施。","id":-1,"cost":float(spec.get("price",0)),
+		"kind":kind,"cell":cell,"capacity":float(spec.get("capacity",0)),"demand":float(spec.get("demand",0)),
+		"energy":float(spec.get("energy",0)),"maintenance":9.0+float(EvolutionModel.UPKEEP.get(kind,0)),"requires_connection":true}
 	if buildings.size() >= 512:
-		return _fail("区域设施已达 512 座，请优先改造现有设施。")
+		result.message="区域设施已达 512 座，请优先改造现有设施。"
+		return result
 	if not catalog.has(kind):
-		return _fail("未知设施。")
+		return result
 	var unlocked: Dictionary = can_build(kind)
 	if not unlocked.ok:
-		return unlocked
-	var placement: Dictionary = evolution.can_place(kind, cell, map_spec() if campaign.active else {})
+		result.message=str(unlocked.message)
+		return result
+	# Preview must not populate scenario caches, sample telemetry or refresh the simulation.
+	var scenario: Dictionary = {}
+	if campaign.active:
+		scenario=_scenario_map if _scenario_map_id==int(campaign.chapter_id) else ScenarioMap.for_chapter(int(campaign.chapter_id))
+	var placement: Dictionary = evolution.can_place(kind,cell,scenario)
 	if not placement.ok:
-		return placement
-	if cell.x < 1 or cell.y < 1 or cell.x >= map_size() - 1 or cell.y >= map_size() - 1:
-		return _fail("请在岛屿内部建造。")
+		result.message=str(placement.message)
+		return result
+	var size_limit: int = int(scenario.size) if campaign.active else (GRID_SIZE if region.active else 16)
+	if cell.x < 1 or cell.y < 1 or cell.x >= size_limit-1 or cell.y >= size_limit-1:
+		result.message="请在岛屿内部建造。"
+		return result
 	if not building_at(cell).is_empty():
-		return _fail("这里已有设施，请选择空地。")
-	var price: float = catalog[kind].price
-	if cash < price:
-		return _fail("资金不足。")
+		result.message="这里已有设施，请选择空地。"
+		return result
+	if cash<float(result.cost):
+		result.message="资金不足。"
+		return result
+	result.ok=true
+	result.message="可建造；建成后需要连接电网。"
+	return result
+
+func build(kind: String, cell: Vector2i) -> Dictionary:
+	var preview: Dictionary = preview_build(kind,cell)
+	if not preview.ok: return preview
+	var price: float = float(preview.cost)
 	cash -= price
 	var building := _add_building(kind, cell)
 	construction_count += 1
@@ -223,19 +249,49 @@ func build(kind: String, cell: Vector2i) -> Dictionary:
 	_refresh()
 	return _ok("建造完成，请连接线路。", int(building.id))
 
+func preview_connection(a: int, b: int, kind: String="power") -> Dictionary:
+	var first: Dictionary = get_building(a)
+	var second: Dictionary = get_building(b)
+	var result: Dictionary = {"ok":false,"message":"请选择两座不同的设施和有效连接类型。","id":-1,
+		"a":a,"b":b,"kind":kind,"cost":0.0,"distance":0.0,"capacity":LINE_CAPACITY if kind=="power" else 0.0}
+	if kind not in ["power","fiber","wireless"]: return result
+	if kind!="power" and not feature_enabled("digital"):
+		result.message="此时代尚未开放数字通信。"
+		return result
+	if kind!="power" and evolution.heritage and not evolution.has_technology("scada"):
+		result.message="历史开局需先研究 SCADA，再建设通信网络。"
+		return result
+	if kind=="power" and lines.size()>=2000:
+		result.message="区域线路已达 2000 条，请优化现有网络。"
+		return result
+	if a==b:
+		result.message="请选择另一座设施。"
+		return result
+	if first.is_empty() or second.is_empty():
+		result.message="线路两端都需要设施。"
+		return result
+	result.distance=Vector2(first.cell).distance_to(Vector2(second.cell))
+	result.cost=connection_cost(a,b) if kind=="power" else digital.link_cost(self,a,b,kind)
+	var existing: Array = lines if kind=="power" else digital.links
+	for link in existing:
+		if (int(link.a)==a and int(link.b)==b) or (int(link.a)==b and int(link.b)==a):
+			result.message="两座设施间已有线路。" if kind=="power" else "两座设施已有通信链路。"
+			return result
+	var max_range: float = 10.0 if first.kind=="relay" or second.kind=="relay" else 6.0
+	if kind=="wireless" and float(result.distance)>max_range:
+		result.message="无线距离过远；普通网关 6 格，中继站 10 格。"
+		return result
+	if cash<float(result.cost):
+		result.message="资金不足。"
+		return result
+	result.ok=true
+	result.message="可连接电力线路。" if kind=="power" else "可建设独立通信链路。"
+	return result
+
 func connect_buildings(a: int, b: int) -> Dictionary:
-	if lines.size() >= 2000:
-		return _fail("区域线路已达 2000 条，请优化现有网络。")
-	if a == b:
-		return _fail("请选择另一座设施。")
-	if get_building(a).is_empty() or get_building(b).is_empty():
-		return _fail("线路两端都需要设施。")
-	for line in lines:
-		if (int(line.a) == a and int(line.b) == b) or (int(line.a) == b and int(line.b) == a):
-			return _fail("两座设施间已有线路。")
-	var price := connection_cost(a, b)
-	if cash < price:
-		return _fail("资金不足。")
+	var preview: Dictionary = preview_connection(a,b)
+	if not preview.ok: return preview
+	var price: float = float(preview.cost)
 	cash -= price
 	var line := _add_line(a, b)
 	record_campaign_action("connect", int(line.id), {"a":a,"b":b})
@@ -358,19 +414,47 @@ func toggle_line(id: int) -> Dictionary:
 	_refresh()
 	return _ok("开关操作完成。", id)
 
-func demolish(id: int) -> Dictionary:
-	var building := get_building(id)
+func preview_demolition(id: int) -> Dictionary:
+	var building: Dictionary = get_building(id)
+	var result: Dictionary = {"ok":false,"message":"设施不存在。","id":id,"refund":0.0,
+		"line_ids":[],"communication_ids":[],"connected_count":0,"requires_confirmation":true}
 	if building.is_empty():
-		return _fail("设施不存在。")
+		return result
+	result.refund=float(building.get("refund_basis",catalog[building.kind].price))*0.35
+	for line in lines:
+		if int(line.a)==id or int(line.b)==id: result.line_ids.append(int(line.id))
+	for link in digital.links:
+		if int(link.a)==id or int(link.b)==id: result.communication_ids.append(int(link.id))
+	result.connected_count=result.line_ids.size()+result.communication_ids.size()
 	if campaign.active and id in campaign.roles.values() and str(building.kind) in ["home","factory","hospital"]:
-		return _fail("这是本关必须服务的客户，不能通过拆除消除供电责任。")
+		result.message="这是本关必须服务的客户，不能通过拆除消除供电责任。"
+		return result
 	if campaign.active:
 		for role in campaign.roles:
 			if not _campaign_line_role(str(role)) and int(campaign.roles[role]) == id:
-				return _fail("这是本关工程需要保留的预置设施；可拆除自己新建的设施。")
+				result.message="这是本关工程需要保留的预置设施；可拆除自己新建的设施。"
+				return result
 	if float(building.repair_remaining) > 0:
-		return _fail("检修期间无法拆除。")
-	var refund: float = float(building.get("refund_basis",catalog[building.kind].price)) * 0.35
+		result.message="检修期间无法拆除。"
+		return result
+	result.ok=true
+	result.message="将拆除设施与相连的 %d 条电力、%d 条通信线路；回收 ¥%.0f。" % [result.line_ids.size(),result.communication_ids.size(),result.refund]
+	return result
+
+func demolish(id: int) -> Dictionary:
+	var preview: Dictionary = preview_demolition(id)
+	if not preview.ok: return preview
+	var building: Dictionary = get_building(id)
+	var refund: float = float(preview.refund)
+	# Pruning a removed target also has a terminal acknowledgement for its operator.
+	for method in ["remote","field"]:
+		var queue: Array = digital.pending_commands if method=="remote" else digital.field_jobs
+		for command in queue:
+			var facility: bool = str(command.get("kind",""))=="facility"
+			var target_id: int = int(command.get("building_id",-1)) if facility else int(command.get("line_id",-1))
+			if (facility and target_id==id) or (not facility and target_id in preview.line_ids):
+				var action: String = "facility" if facility else ("remote_switch" if method=="remote" else ("inspect" if command.get("kind","")=="patrol" else "field_switch"))
+				record_campaign_action(action,target_id,{"phase":"rejected","command_id":int(command.id),"method":method,"message":"目标或相连线路已拆除，待执行操作已取消。"})
 	cash += refund
 	region.unregister_building(self,building,true)
 	for index in range(lines.size() - 1, -1, -1):
@@ -451,7 +535,18 @@ func record_campaign_action(action: String, target: int = -1, details: Dictionar
 	var receipt := details.duplicate(true)
 	if not receipt.has("phase"): receipt.phase = "executed"
 	receipt.elapsed_hours = elapsed_hours
+	if action in ["facility","remote_switch","field_switch","inspect"]:
+		receipt.action=action
+		receipt.target_id=target
+		if not receipt.has("method"): receipt.method="remote" if action=="remote_switch" else "field"
+		if not receipt.has("message"):
+			receipt.message="已受理；尚未生效。" if receipt.phase=="accepted" else ("执行时验证未通过，设置未生效；请核实目标和通信状态。" if receipt.phase=="rejected" else "操作已完成并收到执行回执。")
+		operator_receipts.append(receipt.duplicate(true))
+		if operator_receipts.size()>40: operator_receipts.pop_front()
 	campaign.record_action(action, target, receipt)
+
+func operation_receipts() -> Array[Dictionary]:
+	return operator_receipts.duplicate(true)
 
 func _campaign_line_role(role: String) -> bool:
 	return role.ends_with("_feeder") or role.ends_with("_feed") or role in ["tie","root_power"]
@@ -570,7 +665,8 @@ func line_observation(line_id: int) -> Dictionary:
 	return digital.line_observation(self, line_id)
 
 func connect_communication(a: int, b: int, kind: String = "fiber") -> Dictionary:
-	if not feature_enabled("digital"): return _fail("此时代尚未开放数字通信。")
+	var preview: Dictionary = preview_connection(a,b,kind)
+	if not preview.ok: return preview
 	return _campaign_result(digital.connect_link(self, a, b, kind), "communication", a, {"b":b})
 
 func toggle_communication(id: int) -> Dictionary:
@@ -1319,6 +1415,7 @@ func load_game(path: String = "user://bay_grid_save.json") -> Dictionary:
 	log_entries.clear()
 	for item in data.log_entries:
 		log_entries.append(item.duplicate(true))
+	operator_receipts.clear()
 	if int(data.schema_version) < 3:
 		digital.reset(self, true)
 	digital.migrate_roles(self)
