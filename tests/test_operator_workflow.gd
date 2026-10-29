@@ -26,7 +26,7 @@ func _run() -> void:
 	root.add_child(game)
 	await settle()
 	game.set_process(false)
-	game.welcome.hide()
+	game._activate_session()
 	game.speed=0
 	game.preferences.storage_path="user://test_operator_workflow.cfg"
 	var before: Dictionary=game.sim.snapshot().duplicate(true)

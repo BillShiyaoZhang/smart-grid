@@ -1497,7 +1497,10 @@ func save_game(path: String = "user://bay_grid_save.json") -> Dictionary:
 	if file == null:
 		return _fail("无法写入存档。")
 	file.store_string(JSON.stringify(snapshot(), "\t", true, true))
+	file.flush()
+	var write_error: Error = file.get_error()
 	file.close()
+	if write_error!=OK: return _fail("存档写入未完成，请检查存储空间与权限。")
 	return _ok("存档已保存。")
 
 func load_game(path: String = "user://bay_grid_save.json") -> Dictionary:

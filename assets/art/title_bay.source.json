@@ -1,0 +1,8 @@
+{
+  "file": "title_bay.png",
+  "created_date": "2026-10-30",
+  "generator": "built-in image_gen",
+  "reference": "docs/design/visual-refresh-2026-10-30/02-main-menu.png",
+  "usage": "Original text-free title artwork. All runtime text and controls are native Godot UI.",
+  "prompt": "Use case: stylized-concept. Asset type: actual text-free main-menu background artwork for the original game 潮汐电网. Use the supplied main-menu concept as style and composition reference. Produce a new clean background at landscape 16:9. Remove ALL titles, menus, buttons, icons, badges, cards, version numbers, captions, paper strips and UI. The left 36% should be calm deep navy teal ocean with subtle sea texture, darker and quiet enough for native game menu text to be drawn on top. The right 64% shows a beautiful inhabited physical miniature coastal island at sunset: cream matte buildings with deep teal roofs, warm lit windows, articulated substation, wind turbines, solar panels, battery cabinets, a lighthouse, modest harbour boats, sculpted rocky shores and connecting electrical lines. Sophisticated finely chamfered architecture, warm gold sunset with cool marine fill, soft model contact shadows, restrained copper details. Keep the main coast and the lighthouse well inside the frame. The seaside model aesthetic must match the reference. DO NOT render any letters, logos, text, typographic marks, borders or UI anywhere. It is an original game key art background."
+}

@@ -47,7 +47,7 @@ func _run() -> void:
 	root.add_child(game)
 	await process_frame
 	game.set_process(false)
-	game.welcome.hide()
+	game._activate_session()
 	game.sim.next_storm_at=100000.0
 	game.sim.digital.next_attack_at=100000.0
 	var market: Node=game.market_panel

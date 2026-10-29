@@ -55,7 +55,7 @@ func _run() -> void:
 	game.campaign_panel.load_profile()
 	await capture("welcome")
 	check(game.welcome.visible and game.sim.buildings.size()==10,"modern welcome and default sandbox are preserved")
-	button(game.welcome,"历史战役").pressed.emit()
+	button(game.welcome,"开启教学战役").pressed.emit()
 	var panel: Control=game.campaign_panel
 	check(panel.visible and panel.chapter_buttons.size()==15,"welcome opens the complete fifteen-chapter directory")
 	check(not panel.chapter_buttons[1].disabled and panel.chapter_buttons[2].disabled,"only first chapter is initially unlocked")
@@ -67,7 +67,7 @@ func _run() -> void:
 	button(panel,"跳过序章").pressed.emit()
 	await capture("briefing")
 	check(game._campaign_active() and game.sim.campaign.chapter_id==1 and panel.mode=="briefing","skipping prologue starts the real historical fixture and briefing")
-	check(FileAccess.file_exists(TEST_PATHS[3]) and FileAccess.file_exists(TEST_PATHS[1]),"entering campaign backs up sandbox and saves separately")
+	check(not FileAccess.file_exists(TEST_PATHS[3]) and FileAccess.file_exists(TEST_PATHS[1]),"entering campaign from title never backs up a non-player background session")
 	button(panel,"进入现场").pressed.emit()
 	check(not panel.visible and game.hud.popups.missions.visible,"briefing enters map with the current task")
 	var cash_before: float=game.sim.cash
@@ -102,6 +102,8 @@ func _run() -> void:
 	check(int(panel.profile.unlocked)==2,"loading a prior mission state never rolls discovery progress back")
 	panel.open_directory()
 	panel.chapter_buttons[2].pressed.emit()
+	check(game.confirmation.visible,"chapter replacement requires a concrete overwrite confirmation")
+	button(game.confirm_body,"确认从章节开头进入").pressed.emit()
 	check(game.sim.campaign.chapter_id==2 and game.terrain_identity!=first_map,"same-size historical chapter changes rebuild terrain identity")
 	check(game.visuals.size()==game.sim.buildings.size() and game.connection_start==-1,"chapter switch rebuilds matching visuals and clears transient tools")
 	panel.close()

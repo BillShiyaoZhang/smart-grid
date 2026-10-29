@@ -5,7 +5,7 @@ const Models = preload("res://scripts/art/model_factory.gd")
 const Island = preload("res://scripts/art/island_factory.gd")
 
 func _initialize() -> void:
-	var kinds = ["gas", "solar", "wind", "battery", "substation", "home", "factory", "hospital", "sensor", "intertie", "control", "relay", "soc"]
+	var kinds: Array = Models.KINDS
 	var args = OS.get_cmdline_user_args()
 	var filter_at = args.find("--kind")
 	if filter_at >= 0 and filter_at + 1 < args.size():
@@ -22,7 +22,7 @@ func _initialize() -> void:
 	_save(Models.pylon(), "res://assets/models/pylon.tscn")
 	_save(Models.vehicle(), "res://assets/models/utility_van.tscn")
 	_save(Island.create(), "res://assets/models/bay_island.tscn")
-	print("ART_ASSETS_OK: 13 buildings, 4 props, island saved")
+	print("ART_ASSETS_OK: %d buildings, 4 props, island saved" % kinds.size())
 	quit()
 
 func _save(node: Node3D, path: String) -> void:

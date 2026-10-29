@@ -46,6 +46,21 @@ static func create_theme(high_contrast: bool=false) -> Theme:
 		theme.set_stylebox("focus",type,style(Color("0e252f"),5,TEAL,8))
 		theme.set_color("font_color",type,TEXT)
 	theme.set_stylebox("panel","PanelContainer",style())
+	for state in ["scroll","scroll_focus"]:
+		theme.set_stylebox(state,"VScrollBar",style(Color("0a202a"),4,Color("0a202a"),2))
+		theme.set_stylebox(state,"HScrollBar",style(Color("0a202a"),4,Color("0a202a"),2))
+	for state in ["grabber","grabber_highlight","grabber_pressed"]:
+		for type in ["VScrollBar","HScrollBar"]: theme.set_stylebox(state,type,style(Color("45646c") if state=="grabber" else TEAL,4,Color.TRANSPARENT,4))
+	for type in ["HSlider","VSlider"]:
+		theme.set_stylebox("slider",type,style(Color("0b222c"),4,Color("36515b"),3))
+		theme.set_stylebox("grabber_area",type,style(TEAL,4,TEAL,3))
+		theme.set_stylebox("grabber_area_highlight",type,style(TEAL.lightened(.15),4,TEAL,3))
+	theme.set_stylebox("background","ProgressBar",style(Color("0b222c"),5,Color("36515b"),3))
+	theme.set_stylebox("fill","ProgressBar",style(TEAL,5,TEAL,3))
+	var separator := StyleBoxLine.new()
+	separator.color = Color("40616b")
+	separator.thickness = 1
+	theme.set_stylebox("separator","HSeparator",separator)
 	theme.set_stylebox("panel","PopupMenu",style())
 	theme.set_stylebox("panel","TabContainer",style(SURFACE,6,Color("36515b"),12))
 	theme.set_stylebox("tab_selected","TabContainer",style(Color("28514e"),5,TEAL,10))
@@ -94,11 +109,14 @@ static func button(parent: Node, text: String, callback: Callable, minimum: Vect
 
 static func action(button_: Button, intent: String="primary") -> Button:
 	var accent: Color=RED if intent=="destructive" else TEAL
-	var background:=Color("452e32") if intent=="destructive" else Color("245348")
+	var background:=Color("452e32") if intent=="destructive" else TEAL
 	button_.add_theme_stylebox_override("normal",style(background,6,accent,8))
 	button_.add_theme_stylebox_override("hover",style(background.lightened(.13),6,accent,8))
 	button_.add_theme_stylebox_override("pressed",style(background.darkened(.12),6,accent,8))
-	button_.add_theme_color_override("font_color",TEXT)
+	button_.add_theme_color_override("font_color",TEXT if intent=="destructive" else Color("092c35"))
+	button_.add_theme_color_override("font_hover_color",TEXT if intent=="destructive" else Color("092c35"))
+	button_.add_theme_color_override("font_pressed_color",TEXT if intent=="destructive" else Color("092c35"))
+	button_.add_theme_color_override("font_focus_color",TEXT if intent=="destructive" else Color("092c35"))
 	return button_
 
 static func column(parent: Node, gap: int=10) -> VBoxContainer:

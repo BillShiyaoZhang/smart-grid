@@ -174,7 +174,8 @@ func _build() -> void:
 	var nav := UI.row(top,6)
 	alert_button = UI.button(nav,"告警 0",func(): toggle_popup("alerts"))
 	UI.button(nav,"日志",func(): toggle_popup("log"))
-	UI.button(nav,"菜单",func(): toggle_popup("menu"))
+	UI.button(nav,"工具",func(): toggle_popup("menu"))
+	UI.button(nav,"菜单",func(): action_requested.emit("menu"))
 	var layers := _panel(self)
 	layer_panel=layers
 	layers.position = Vector2(16,156)
@@ -365,7 +366,7 @@ func _build() -> void:
 	events_label.custom_minimum_size = Vector2(0,280)
 	events_label.add_theme_font_size_override("normal_font_size",14)
 	log.add_child(events_label)
-	var menu := _popup("menu","游戏菜单",250,true)
+	var menu := _popup("menu","工具与视图",250,true)
 	for spec in [["save","保存游戏  F5"],["load","读取游戏  F9"],["settings","操作与显示设置"],["workspace","设施检索  Ctrl+F"],["jobs","操作队列与回执"],["working_area","镜头：工作区"],["full_map","镜头：全图"],["campaign","历史战役与章节"],["help","调度员手册  H"]]:
 		var key: String = spec[0]
 		UI.button(menu,spec[1],func(): close_popups(); action_requested.emit(key)).set_meta("menu_action",key)

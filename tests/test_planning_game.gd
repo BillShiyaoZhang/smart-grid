@@ -18,7 +18,7 @@ func _run() -> void:
 	root.add_child(game)
 	await process_frame
 	game.set_process(false)
-	game.welcome.hide()
+	game._activate_session()
 	var panel: Control = game.planning_panel
 	var key := InputEventKey.new()
 	key.pressed = true

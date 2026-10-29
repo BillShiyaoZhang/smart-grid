@@ -34,7 +34,7 @@ func _run() -> void:
 	game=load("res://scenes/main.tscn").instantiate()
 	root.add_child(game)
 	await process_frame
-	game.set_process(false); game.welcome.hide()
+	game.set_process(false); game._activate_session()
 	game.sim.next_storm_at=100000.0; game.sim.digital.next_attack_at=100000.0
 	game.sim.connect_buildings(2,6)
 	game.selected_id=2; game._update_inspector()

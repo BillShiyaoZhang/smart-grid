@@ -23,7 +23,7 @@ func _run() -> void:
 	root.add_child(game)
 	await process_frame
 	game.set_process(false)
-	game.welcome.hide()
+	game._activate_session()
 	game.speed = 0
 	game.sim.connect_buildings(2,6)
 	game._sync_world(true)
@@ -64,7 +64,7 @@ func _run() -> void:
 			panel.close()
 		game.welcome.show()
 		await capture("welcome")
-		game.welcome.hide()
+		game._activate_session()
 		game.help_modal.show()
 		await capture("help")
 		game.help_modal.hide()

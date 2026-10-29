@@ -27,7 +27,7 @@ func _run() -> void:
 	root.add_child(game)
 	await settle()
 	game.set_process(false)
-	game.welcome.hide()
+	game._activate_session()
 	var hud: Control = game.hud
 	check(not hud.inspector.visible and not hud.tray.visible,"default map has no inspector or building tray")
 	check(hud.build_buttons.size()==game.sim.catalog.size(),"every one of the 29 facilities has a catalog entry")

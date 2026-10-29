@@ -10,7 +10,7 @@ func _run() -> void:
 	game = load("res://scenes/main.tscn").instantiate()
 	root.add_child(game)
 	await process_frame
-	game.welcome.hide()
+	game._activate_session()
 	game.speed = 0
 	game.sim.connect_buildings(2,6)
 	game.sim.cash = 1000000

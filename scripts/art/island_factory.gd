@@ -9,14 +9,10 @@ static func create(size: int = 16, spacing: float = 2.0) -> Node3D:
 	root.name = "BayIsland"
 	var half = size * spacing * 0.5
 	_water(root, half, 180.0, "Sea")
-	_prism(root, _octagon(half + 1.7, 2.0), -0.75, -1.42, Color("a7bbae"), Color("8aa99d"), "Bedrock")
-	_prism(root, _octagon(half + 1.4, 1.8), -0.32, -0.88, Color("dcd9b7"), Color("c5c5a7"), "Beach")
-	_prism(root, _octagon(half + 1.05, 1.5), -0.04, -0.36, Color("a9c9a1"), Color("86ad86"), "Meadow")
-	# Subtle patchwork makes the terrain read as a hand built model.
-	for x in range(size):
-		for z in range(size):
-			if (x * 13 + z * 7) % 5 == 0:
-				Models.box(root, Vector3(spacing - 0.06, 0.012, spacing - 0.06), Vector3((x - (size - 1) * 0.5) * spacing, -0.035, (z - (size - 1) * 0.5) * spacing), Color("accda3"))
+	_prism(root, _octagon(half + 1.8, 2.0), -0.75, -1.42, Color("a7b3a3"), Color("798d83"), "Bedrock")
+	_prism(root, _octagon(half + 1.45, 1.8), -0.32, -0.88, Color("ded2b2"), Color("b6ad93"), "Beach")
+	_prism(root, _octagon(half + 1.05, 1.5), -0.04, -0.36, Color("a7bd91"), Color("7c9774"), "Meadow")
+	_ground_mosaic(root,size,spacing,Color("a7bd91"))
 	var road_x = (6 - (size - 1) * 0.5) * spacing
 	var road_z = (7 - (size - 1) * 0.5) * spacing
 	_road(root, Vector3(road_x, 0.003, 0), Vector3(1.06, 0.04, half * 2 + 0.2), false)
@@ -74,10 +70,13 @@ static func create(size: int = 16, spacing: float = 2.0) -> Node3D:
 	root.add_child(van)
 	van.position = Vector3(road_x + 0.25, 0.04, 3.6)
 	_coastal_landmarks(root,half)
+	_finish_coast(root,half,"mountain_coast",true)
+	root.set_meta("asset_revision",2)
+	root.set_meta("playable_size",size)
 	return root
 
 static func _water(root: Node3D, half: float, extent: float, title: String) -> void:
-	var water := Models.box(root, Vector3(extent, 0.2, extent), Vector3(0, -1.5, 0), Color("72b8ba"), title)
+	var water := Models.box(root, Vector3(extent, 0.2, extent), Vector3(0, -1.5, 0), Color("255765"), title)
 	var surface := ShaderMaterial.new()
 	surface.shader = preload("res://scripts/art/coastal_water.gdshader")
 	surface.set_shader_parameter("island_half", half)
@@ -120,17 +119,17 @@ static func create_for_map(spec: Dictionary, spacing: float = 2.0) -> Node3D:
 	root.set_meta("map_theme", theme)
 	root.set_meta("modern", modern)
 	root.set_meta("playable_size", map_size)
-	var meadow := Color("b6c3a5")
-	var shore := Color("d5ceb3")
-	var water := Color("72b0ba")
+	var meadow := Color("a9b995")
+	var shore := Color("d8c9a7")
+	var water := Color("6a9f9f")
 	if theme == "city_blocks":
-		meadow = Color("b9b9a7")
-		shore = Color("b8b6a0")
-		water = Color("81a8b3")
+		meadow = Color("b4b29b")
+		shore = Color("c9bda4")
+		water = Color("6b9099")
 	elif theme == "mountain_coast":
-		meadow = Color("a6b8a0")
-		shore = Color("d6ccb0")
-		water = Color("72b8ba")
+		meadow = Color("a3b597")
+		shore = Color("d8caab")
+		water = Color("67a2a6")
 		if int(spec.get("chapter", 0)) == 15:
 			meadow = Color("c9c19b")
 			shore = Color("ded0a6")
@@ -138,13 +137,14 @@ static func create_for_map(spec: Dictionary, spacing: float = 2.0) -> Node3D:
 	_prism(root, _octagon(half + 1.7, 2.0), -0.75, -1.42, Color("a7bbae"), Color("8aa99d"), "Bedrock")
 	_prism(root, _octagon(half + 1.4, 1.8), -0.32, -0.88, shore, shore.darkened(0.10), "Shore")
 	_prism(root, _octagon(half + 1.05, 1.5), -0.04, -0.36, meadow, meadow.darkened(0.15), "Ground")
+	_ground_mosaic(root,map_size,spacing,meadow)
 	# Flat colour meshes identify real siting cells without moving building bases.
 	_cell_surface(root, spec.get("hill_cells", []), map_size, spacing, Color("a5aa8d"), -0.033, "HillTerrain")
 	_cell_surface(root, spec.get("river_cells", []), map_size, spacing, water.lightened(0.10), -0.026, "RiverTerrain")
 	var roads := Node3D.new()
 	roads.name = "StreetNetwork"
 	root.add_child(roads)
-	var road_color := Color("8e9d94") if modern else Color("afa68e")
+	var road_color := Color("89968d") if modern else Color("b0a58b")
 	var road_width := 0.80 if modern else 0.65
 	var streets_x: Array = [6, 10]
 	var streets_y: Array = [7, 11]
@@ -192,7 +192,94 @@ static func create_for_map(spec: Dictionary, spacing: float = 2.0) -> Node3D:
 		for i in range(5):
 			var height := 4.5 + float(i % 3) * 1.5
 			Models.cylinder(landscape, 2.5, height, Vector3(half + 3.4, height * 0.5 - 0.2, half * 0.15 + float(i) * half * 0.17), Color("8d9f91"), 5, 0.03)
+	_finish_coast(root,half,theme,modern)
+	# Flow ribbons are decorative geometry over actual siting cells, never new terrain.
+	var river_detail:=Node3D.new()
+	river_detail.name="RiverRibbons"
+	root.add_child(river_detail)
+	var index:=0
+	for cell in spec.get("river_cells",[]):
+		index+=1
+		if index%7!=0: continue
+		var at:=_cell_position(cell,map_size,spacing)
+		Models.box(river_detail,Vector3(.75,.006,.035),at+Vector3(.1,-.018,.16),Color("a8ccc0"))
+	root.set_meta("asset_revision",2)
 	return root
+
+static func _ground_mosaic(root: Node3D, size: int, spacing: float, color: Color) -> void:
+	var vertices:=PackedVector3Array()
+	var normals:=PackedVector3Array()
+	var colors:=PackedColorArray()
+	var uv:=PackedVector2Array()
+	for x in range(size):
+		for z in range(size):
+			var at:=_cell_position(Vector2i(x,z),size,spacing)
+			var shade:=color.lightened(float((x*13+z*19)%7)*.005)
+			for corner in [Vector2(-1,-1),Vector2(1,-1),Vector2(1,1),Vector2(-1,-1),Vector2(1,1),Vector2(-1,1)]:
+				vertices.append(at+Vector3(corner.x*spacing*.5,-.038,corner.y*spacing*.5))
+				normals.append(Vector3.UP)
+				colors.append(shade)
+				uv.append(corner*.5+Vector2.ONE*.5)
+	var arrays:=[]
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX]=vertices
+	arrays[Mesh.ARRAY_NORMAL]=normals
+	arrays[Mesh.ARRAY_COLOR]=colors
+	arrays[Mesh.ARRAY_TEX_UV]=uv
+	var mesh:=ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,arrays)
+	var part:=MeshInstance3D.new()
+	part.name="GroundMosaic"
+	part.mesh=mesh
+	var mat:=StandardMaterial3D.new()
+	mat.vertex_color_use_as_albedo=true
+	mat.roughness=1.0
+	part.material_override=mat
+	root.add_child(part)
+
+## Handcrafted scenery remains outside the playable square at every map extent.
+static func _finish_coast(root: Node3D, half: float, theme: String, modern: bool) -> void:
+	var coast:=Node3D.new()
+	coast.name="CraftedCoast"
+	root.add_child(coast)
+	var count:=int(half*2.0)
+	for i in range(count):
+		var theta:=float(i)*TAU/float(count)
+		var dir:=Vector2(cos(theta),sin(theta))
+		dir/=maxf(absf(dir.x),absf(dir.y))
+		var stone:=Models.rock(i+19)
+		coast.add_child(stone)
+		stone.position=Vector3(dir.x*(half+1.5),-.64,dir.y*(half+1.5))
+		stone.scale=Vector3(1.3+float(i%3)*.2,1.0,1.3)
+		if i%3==0:
+			var shrub:=Models.tree(i+7)
+			coast.add_child(shrub)
+			shrub.scale=Vector3.ONE*.48
+			shrub.position=Vector3(dir.x*(half+.5),-.03,dir.y*(half+.5))
+	# Masonry courses add a believable model edge without changing the flat ground.
+	for side in [-1.0,1.0]:
+		for i in range(int(half)):
+			var along: float=-half+1.1+float(i)*1.85
+			if along>half-1: continue
+			Models.box(coast,Vector3(1.78,.25,.11),Vector3(along,-.26,side*(half+1.03)),Models.STONE)
+	if theme=="city_blocks":
+		var quay_x:=half+1.15
+		Models.box(coast,Vector3(.8,.16,half*1.2),Vector3(quay_x,-.15,0),Models.STONE,"HistoricQuay")
+		for i in range(8):
+			var at:=Vector3(quay_x+.34,.03,-half*.5+float(i)*half/7.0)
+			Models.cylinder(coast,.065,.23,at,Models.DARK,8)
+		if not modern:
+			# Period harbour crane, safely beyond the historical construction grid.
+			Models.box(coast,Vector3(.36,.16,.36),Vector3(quay_x,.01,2),Models.CONCRETE)
+			Models.beam(coast,Vector3(quay_x,.1,2),Vector3(quay_x,2.2,2),.07,Models.CORAL)
+			Models.beam(coast,Vector3(quay_x,2.2,2),Vector3(quay_x+1.3,2.5,2),.06,Models.DARK)
+			Models.beam(coast,Vector3(quay_x+1.3,2.5,2),Vector3(quay_x+1.3,1.3,2),.012,Models.METAL)
+	else:
+		for i in range(5):
+			var rock:=Models.rock(i+31)
+			coast.add_child(rock)
+			rock.position=Vector3(-half-1.1,-.2,-half*.6+float(i)*half*.24)
+			rock.scale=Vector3(1.4,2.1+float(i%2)*.7,1.8)
 
 static func _cell_position(cell: Vector2i, map_size: int, spacing: float) -> Vector3:
 	var center := float(map_size - 1) * 0.5

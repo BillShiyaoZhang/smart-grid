@@ -15,6 +15,8 @@ const MarketDesk = preload("res://scripts/ui/market_panel.gd")
 const DigitalDesk = preload("res://scripts/ui/digital_panel.gd")
 const PlanningDesk = preload("res://scripts/ui/planning_panel.gd")
 const CampaignDesk = preload("res://scripts/ui/campaign_panel.gd")
+const FrontendMenu = preload("res://scripts/ui/frontend_menu.gd")
+const SaveCatalog = preload("res://scripts/ui/save_catalog.gd")
 const INK := Color("102c38")
 const PANEL := Color("122e3bdd")
 const TEAL := Color("77dbc0")
@@ -117,10 +119,29 @@ var onboarding_skipped := false
 var _last_map_size := Vector2.ZERO
 var _charted_receipts: Dictionary = {}
 var _charted_storm := false
+enum AppState { TITLE, PLAYING, PAUSED }
+var app_state: AppState = AppState.TITLE
+var session_started := false
+var pause_menu: Control
+var audio: Node
+var title_catalog: Dictionary = {}
+var sandbox_save_path := "user://tidal_grid_save.json"
+var sandbox_autosave_path := "user://autosave.json"
+var _settings_origin := "playing"
+var _focus_suspended := false
+var _audio_accum := 0.0
+var _audio_progress_signature := ""
+var _restore_settings_on_cancel := false
+var _campaign_from_live_sandbox := false
+var _visual_preferences := ""
+var _binding_preferences := ""
 
 func _ready() -> void:
 	preferences = Preferences.new()
 	preferences.load_preferences()
+	if ResourceLoader.exists("res://scripts/audio/audio_director.gd"):
+		audio = load("res://scripts/audio/audio_director.gd").new()
+		add_child(audio)
 	sim = Sim.new()
 	sim.reset(42)
 	_setup_world()
@@ -132,9 +153,16 @@ func _ready() -> void:
 	_update_camera()
 	get_viewport().size_changed.connect(_layout_interface)
 	is_ready = true
+	get_tree().auto_accept_quit = false
+	get_tree().node_added.connect(_wire_ui_sound)
+	_wire_sound_tree(root_ui)
+	_refresh_title()
+	hud.hide()
+	operator_map.hide()
+	world.hide()
 	capture_mode = "--capture" in OS.get_cmdline_user_args()
 	if capture_mode:
-		welcome.hide()
+		_activate_session()
 		_capture_preview()
 
 func _setup_world() -> void:
@@ -281,7 +309,9 @@ func _cell_position(cell: Vector2i) -> Vector3:
 	return Vector3((cell.x-7.5)*SPACING,0,(cell.y-7.5)*SPACING)
 
 func _mouse_ground() -> Vector3:
-	var pos := get_viewport().get_mouse_position()
+	return _ground_at_screen(get_viewport().get_mouse_position())
+
+func _ground_at_screen(pos: Vector2) -> Vector3:
 	var hit: Variant = Plane(Vector3.UP,0).intersects_ray(camera.project_ray_origin(pos),camera.project_ray_normal(pos))
 	return hit if hit != null else Vector3(999,0,999)
 
@@ -392,7 +422,7 @@ func _sync_world(force: bool=false) -> void:
 			body.set_meta("building_id",int(b.id))
 			var collision := CollisionShape3D.new()
 			var shape := BoxShape3D.new()
-			var height: float = heights.get(b.kind,1.5)
+			var height: float = float(model.get_meta("pick_height",heights.get(b.kind,1.5)))
 			shape.size = Vector3(1.75,height,1.75)
 			collision.shape = shape
 			collision.position.y = height/2
@@ -407,7 +437,7 @@ func _sync_world(force: bool=false) -> void:
 			signpost.pixel_size = 0.012
 			signpost.outline_size = 8
 			signpost.modulate = CREAM
-			signpost.position.y = 3.35 if b.kind == "relay" else (3.1 if b.kind == "wind" else 1.9)
+			signpost.position = model.get_meta("label_anchor",Vector3(0,3.35 if b.kind == "relay" else (3.1 if b.kind == "wind" else 1.9),0))
 			model.add_child(signpost)
 			var lamp := OmniLight3D.new()
 			lamp.name = "EveningLight"
@@ -593,6 +623,12 @@ func _cylinder_between(parent: Node3D, from: Vector3, to: Vector3, radius: float
 func _process(delta: float) -> void:
 	if not is_ready:
 		return
+	_audio_accum += delta
+	if _audio_accum >= .65:
+		_audio_accum = 0.0
+		_update_audio()
+	if app_state == AppState.TITLE:
+		return
 	elapsed += delta
 	if rain_root.visible:
 		for drop in rain_root.get_children():
@@ -609,11 +645,11 @@ func _process(delta: float) -> void:
 		if move.length() > 0:
 			var right := camera.global_basis.x
 			var forward := Vector3(camera.global_basis.z.x,0,camera.global_basis.z.z).normalized()
-			cam_target += (right*move.x+forward*move.y)*delta*10
+			cam_target += (right*move.x+forward*move.y)*delta*10*preferences.pan_sensitivity
 			cam_target.x = clampf(cam_target.x,-14,78 if sim.map_size()>16 else 14)
 			cam_target.z = clampf(cam_target.z,-14,78 if sim.map_size()>16 else 14)
 			_update_camera()
-	var effective_speed := 0 if _modal_open() else speed
+	var effective_speed := 0 if _modal_open() or _focus_suspended else speed
 	sim_accum += delta * effective_speed
 	if sim_accum >= 0.5:
 		var hours := minf(sim_accum,3.0)/24.0
@@ -647,10 +683,11 @@ func _process(delta: float) -> void:
 		notice_timer -= delta
 		notice_label.visible = notice_timer > 0
 	_update_hover()
-	autosave_clock += delta
-	if autosave_clock > 90:
+	if session_started and effective_speed>0: autosave_clock += delta
+	if session_started and preferences.autosave_seconds>0 and autosave_clock >= preferences.autosave_seconds:
 		autosave_clock = 0
-		sim.save_game(campaign_autosave_path if _campaign_active() else "user://autosave.json")
+		var auto_result: Dictionary = _atomic_save(campaign_autosave_path if _campaign_active() else sandbox_autosave_path)
+		if not auto_result.get("ok",false): _notify("自动保存失败，请手动保存或检查存储空间。",false)
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and _guard_modal_focus(event): return
@@ -672,7 +709,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			if settings_panel.visible:
 				settings_panel.close()
 			elif confirmation.visible:
-				confirmation.hide()
+				_cancel_confirmation()
 			elif campaign_panel.visible:
 				campaign_panel.close()
 			elif planning_panel.visible:
@@ -684,13 +721,16 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif help_modal.visible:
 				help_modal.hide()
 			elif welcome.visible:
-				welcome.hide()
+				pass # Escape never starts the title-screen background session.
+			elif pause_menu.visible:
+				_close_pause()
 			elif end_modal.visible:
 				end_modal.hide()
 			elif hud.close_top():
 				pass
 			else:
-				_set_tool("select")
+				if tool!="select" or connection_start>=0: _set_tool("select")
+				else: _open_pause()
 			_update_time_status()
 			return
 		if preferences.matches("planning",event) and planning_panel.visible:
@@ -729,10 +769,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			zoom = maxf(22,zoom-2)
+			zoom = maxf(22,zoom-2*preferences.zoom_sensitivity)
 			_update_camera()
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			zoom = minf(135 if sim.map_size()>16 else 58,zoom+2)
+			zoom = minf(135 if sim.map_size()>16 else 58,zoom+2*preferences.zoom_sensitivity)
 			_update_camera()
 		elif event.button_index == MOUSE_BUTTON_MIDDLE:
 			dragging = event.pressed
@@ -740,26 +780,28 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 			_set_tool("select")
 		elif event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-			_handle_map_click(_mouse_cell())
+			_handle_map_click(_cell_at_screen(event.position),event.position)
 	if event is InputEventMouseMotion and dragging:
 		var d: Vector2 = event.relative
 		var right := camera.global_basis.x
 		var forward := Vector3(camera.global_basis.z.x,0,camera.global_basis.z.z).normalized()
-		cam_target -= (right*d.x+forward*d.y)*zoom/800
+		cam_target -= (right*d.x+forward*d.y)*zoom/800*preferences.pan_sensitivity
 		cam_target.x = clampf(cam_target.x,-14,78 if sim.map_size()>16 else 14)
 		cam_target.z = clampf(cam_target.z,-14,78 if sim.map_size()>16 else 14)
 		_update_camera()
 
 func _modal_open() -> bool:
-	return (settings_panel != null and settings_panel.visible) or (confirmation != null and confirmation.visible) or (campaign_panel != null and campaign_panel.visible) or (welcome != null and welcome.visible) or (help_modal != null and help_modal.visible) or (end_modal != null and end_modal.visible) or (market_panel != null and market_panel.visible) or (digital_panel != null and digital_panel.visible) or (planning_panel != null and planning_panel.visible)
+	return (pause_menu != null and pause_menu.visible) or (settings_panel != null and settings_panel.visible) or (confirmation != null and confirmation.visible) or (campaign_panel != null and campaign_panel.visible) or (welcome != null and welcome.visible) or (help_modal != null and help_modal.visible) or (end_modal != null and end_modal.visible) or (market_panel != null and market_panel.visible) or (digital_panel != null and digital_panel.visible) or (planning_panel != null and planning_panel.visible)
 
-func _handle_map_click(cell: Vector2i) -> void:
+func _handle_map_click(cell: Vector2i, screen_position: Vector2=Vector2.INF) -> void:
+	var click_ground: Vector3 = _mouse_ground() if not screen_position.is_finite() else _ground_at_screen(screen_position)
 	var id := _building_at(cell)
 	if tool == "build":
 		if _is_map_cell(cell):
 			var result: Dictionary = sim.build(build_kind,cell)
 			_apply(result)
 			if result.get("ok",false):
+				if audio: audio.play_action("build",true)
 				selected_id=int(result.get("id",-1))
 				selected_line=-1
 				selected_comm_line=-1
@@ -779,19 +821,22 @@ func _handle_map_click(cell: Vector2i) -> void:
 		elif connection_start != id:
 			var result: Dictionary=sim.connect_communication(connection_start,id,communication_kind) if tool=="datalink" else sim.connect_buildings(connection_start,id)
 			_apply(result)
-			if result.get("ok",false): connection_start = -1
+			if result.get("ok",false):
+				connection_start = -1
+				if audio: audio.play_action("connect",true)
 			_sync_world(true)
 	elif tool == "repair":
 		if id >= 0:
 			_apply(sim.repair(id))
 		else:
-			var line_id := _nearest_line(_mouse_ground())
+			var line_id := _nearest_line(click_ground)
 			if line_id >= 0:
 				_apply(sim.repair_line(line_id))
 	else:
 		selected_id = id
-		selected_line = -1 if id >= 0 or overlay=="comm" else _nearest_line(_mouse_ground())
-		selected_comm_line = _nearest_communication(_mouse_ground()) if id<0 and overlay=="comm" else -1
+		if audio and id>=0: audio.play_ui("select")
+		selected_line = -1 if id >= 0 or overlay=="comm" else _nearest_line(click_ground)
+		selected_comm_line = _nearest_communication(click_ground) if id<0 and overlay=="comm" else -1
 		if not hud.operator_dock.pinned: hud.operator_dock.page="object"; hud.operator_dock._sync_visibility()
 		_sync_world()
 	_update_inspector()
@@ -896,6 +941,7 @@ func _position_tooltip() -> void:
 
 func _apply(result: Variant) -> void:
 	if result is Dictionary:
+		if audio: audio.play_action("action",bool(result.get("ok",true)))
 		_notify(str(result.get("message","操作完成")),bool(result.get("ok",true)))
 	else:
 		_notify("操作完成")
@@ -957,10 +1003,11 @@ func _campaign_active() -> bool:
 	return sim != null and sim.get("campaign") != null and bool(sim.campaign.active)
 
 func _save() -> void:
-	_apply(sim.save_game(campaign_save_path if _campaign_active() else "user://tidal_grid_save.json"))
+	if not session_started: return
+	_apply(_atomic_save(campaign_save_path if _campaign_active() else sandbox_save_path))
 
 func _load(path: String="") -> void:
-	if path.is_empty(): path = campaign_save_path if _campaign_active() else "user://tidal_grid_save.json"
+	if path.is_empty(): path = campaign_save_path if _campaign_active() else sandbox_save_path
 	if _has_unsent_drafts():
 		_clear_children(confirm_body)
 		_label(confirm_body,"读取存档并清空草案？",22,ORANGE)
@@ -976,10 +1023,14 @@ func _load_confirmed(path: String) -> void:
 	var result: Dictionary = sim.load_game(path)
 	_apply(result)
 	if not result.get("ok",false): return
+	_campaign_from_live_sandbox = false
 	_rebuild_session()
+	if audio: audio.play_action("load",true)
 	_notify("存档已读取；上个会话的草案与关注列表已清空。")
 
 func _rebuild_session(reset_view: bool=false) -> void:
+	_activate_session()
+	autosave_clock = 0.0
 	for item in visuals.values(): item.queue_free()
 	visuals.clear()
 	chart.reset_history()
@@ -998,7 +1049,7 @@ func _rebuild_session(reset_view: bool=false) -> void:
 	hud.close_popups()
 	hud.close_tray()
 	inspector_selection = ""
-	for panel in [market_panel,digital_panel,planning_panel,campaign_panel,welcome,help_modal,end_modal,confirmation,settings_panel]:
+	for panel in [market_panel,digital_panel,planning_panel,campaign_panel,welcome,pause_menu,help_modal,end_modal,confirmation,settings_panel]:
 		if panel!=null: panel.hide()
 	last_finished = false
 	mission_snapshot = ""
@@ -1012,6 +1063,7 @@ func _rebuild_session(reset_view: bool=false) -> void:
 	digital_panel._incidents_signature=""
 	digital_panel._jobs_signature=""
 	sim_accum = 0.0
+	_audio_progress_signature = _progress_audio_signature()
 	selected_id = -1
 	selected_line = -1
 	selected_comm_line = -1
@@ -1029,36 +1081,50 @@ func _rebuild_session(reset_view: bool=false) -> void:
 	_update_hud()
 	_update_inspector()
 	if reset_view and _campaign_active(): _focus_working_area()
+	if audio: audio.reset_session(_audio_baseline())
 
 func start_campaign_chapter(id: int, discard_drafts: bool=false) -> void:
 	if not discard_drafts and _offer_discard_drafts(func(): start_campaign_chapter(id,true)): return
 	if id<1 or id>int(campaign_panel.profile.unlocked):
 		_notify("请先完成上一章。",false)
 		return
-	if not _campaign_active():
-		var backup: Dictionary = sim.save_game(campaign_backup_path)
+	if session_started and not _campaign_active():
+		var backup: Dictionary = _atomic_save(campaign_backup_path)
 		if not backup.ok: _apply(backup); return
+		_campaign_from_live_sandbox = true
+	elif not session_started: _campaign_from_live_sandbox = false
 	var result: Dictionary = sim.start_campaign(id)
 	if not result.ok: _apply(result); return
 	campaign_panel.profile.last_chapter=id
 	campaign_panel.save_profile()
 	_rebuild_session(true)
-	sim.save_game(campaign_save_path)
+	var saved: Dictionary = _atomic_save(campaign_save_path)
+	if saved.get("ok",false): _remove_stale_auto(campaign_autosave_path)
+	else: _apply(saved)
 	campaign_panel.open_briefing()
+	if audio: audio.play_action("chapter",true)
 
 func restart_campaign_chapter(discard_drafts: bool=false) -> void:
 	if not discard_drafts and _offer_discard_drafts(func(): restart_campaign_chapter(true)): return
 	var result: Dictionary = sim.restart_campaign_chapter()
 	if not result.ok: _apply(result); return
 	_rebuild_session(true)
-	sim.save_game(campaign_save_path)
+	var saved: Dictionary = _atomic_save(campaign_save_path)
+	if saved.get("ok",false): _remove_stale_auto(campaign_autosave_path)
+	else: _apply(saved)
 	campaign_panel.open_briefing()
+	if audio: audio.play_action("chapter",true)
 
 func continue_campaign(discard_drafts: bool=false) -> void:
 	if not discard_drafts and _offer_discard_drafts(func(): continue_campaign(true)): return
-	var path := campaign_save_path
-	if FileAccess.file_exists(campaign_autosave_path):
-		if not FileAccess.file_exists(path) or FileAccess.get_modified_time(campaign_autosave_path)>FileAccess.get_modified_time(path): path=campaign_autosave_path
+	var catalog: Dictionary = SaveCatalog.inspect([campaign_save_path,campaign_autosave_path],"campaign")
+	if catalog.latest.is_empty(): _notify("没有可读取的战役进度；原存档已保留。",false); return
+	var path: String = str(catalog.latest.path)
+	if session_started and not _campaign_active():
+		var backup: Dictionary = _atomic_save(campaign_backup_path)
+		if not backup.get("ok",false): _apply(backup); return
+		_campaign_from_live_sandbox = true
+	elif not session_started: _campaign_from_live_sandbox = false
 	var result: Dictionary = sim.load_game(path)
 	if not result.ok: _apply(result); return
 	_rebuild_session()
@@ -1067,14 +1133,19 @@ func continue_campaign(discard_drafts: bool=false) -> void:
 func return_to_sandbox(discard_drafts: bool=false) -> void:
 	if not discard_drafts and _offer_discard_drafts(func(): return_to_sandbox(true)): return
 	if _campaign_active():
-		sim.save_game(campaign_save_path)
-		if FileAccess.file_exists(campaign_backup_path):
-			var result: Dictionary=sim.load_game(campaign_backup_path)
+		var saved: Dictionary = _atomic_save(campaign_save_path)
+		if not saved.get("ok",false): _apply(saved); return
+		var paths: Array = [campaign_backup_path,sandbox_save_path,sandbox_autosave_path] if _campaign_from_live_sandbox else [sandbox_save_path,sandbox_autosave_path,campaign_backup_path]
+		var prior: Dictionary = SaveCatalog.inspect(paths)
+		if not prior.latest.is_empty():
+			var result: Dictionary=sim.load_game(str(prior.latest.path))
 			if not result.ok: _apply(result); return
 		else: sim.reset(42)
+		_campaign_from_live_sandbox = false
 		_rebuild_session()
 	else:
 		campaign_panel.hide()
+		if app_state==AppState.TITLE: _refresh_title()
 
 func _notify(message: String, positive: bool=true) -> void:
 	notice_label.text = ("✓  " if positive else "!  ")+message
@@ -1157,7 +1228,10 @@ func _setup_ui() -> void:
 	root_ui.add_child(settings_panel)
 	settings_panel.setup(preferences)
 	settings_panel.preferences_changed.connect(_apply_preferences)
-	settings_panel.closed.connect(_update_hud)
+	settings_panel.closed.connect(_settings_closed)
+	settings_panel.sound_preview_requested.connect(func(cue: String):
+		if audio: audio.play_ui(cue)
+	)
 
 func _prepare_center(center: Control) -> void:
 	if center==market_panel:
@@ -1259,7 +1333,8 @@ func _hud_action(value: String) -> void:
 		"save": _save()
 		"load": _load()
 		"help": help_modal.show()
-		"settings": settings_panel.open(); _update_time_status(true)
+		"settings": _open_settings()
+		"menu": _open_pause()
 		"diagnosis": hud.operator_dock.show_page("diagnosis")
 		"workspace": hud.operator_dock.open_search()
 		"jobs": hud.operator_dock.show_page("jobs")
@@ -1332,8 +1407,10 @@ func _update_hud() -> void:
 		if (sim.campaign.completed or sim.campaign.failed) and not last_finished:
 			last_finished=true
 			campaign_panel.record_completion()
-			sim.save_game(campaign_save_path)
+			var report_save: Dictionary = _atomic_save(campaign_save_path)
+			if not report_save.get("ok",false): _apply(report_save)
 			campaign_panel.open_report(bool(sim.campaign.completed))
+			if audio: audio.play_action("victory" if sim.campaign.completed else "failure",true)
 	else:
 		var management: Dictionary = sim.management_status() if sim.has_method("management_status") else {}
 		var mission_text := str([sim.objectives,management])
@@ -1383,6 +1460,11 @@ func _update_hud() -> void:
 	if hud.has_method("refresh_visuals"): hud.refresh_visuals()
 	_record_observed_events()
 	_update_onboarding()
+	if session_started:
+		var progress: String = _progress_audio_signature()
+		if progress!=_audio_progress_signature:
+			if not _audio_progress_signature.is_empty() and audio: audio.play_action("objective",true)
+			_audio_progress_signature = progress
 
 func _record_observed_events() -> void:
 	if not chart.has_method("record_event"): return
@@ -1672,7 +1754,9 @@ func _digital_research_available() -> bool:
 	return sim.feature_enabled("digital") and int(sim.research_level)<2 and (not sim.evolution.heritage or sim.evolution.has_technology("scada"))
 
 func _research() -> void:
-	_apply(sim.research())
+	var result: Dictionary = sim.research()
+	_apply(result)
+	if audio and result.get("ok",false): audio.play_action("research",true)
 	_update_hud()
 	_update_inspector()
 
@@ -1714,27 +1798,17 @@ func _setup_modals() -> void:
 	dialog_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	dialog_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root_ui.add_child(dialog_layer)
-	welcome = _modal(dialog_layer,740,650)
-	var v := _column(welcome.get_node("Dialog/ContentScroll/Content"),10)
-	if ResourceLoader.exists("res://assets/art/operator_cover.png"):
-		var art := TextureRect.new()
-		art.texture = load("res://assets/art/operator_cover.png")
-		art.custom_minimum_size = Vector2(0,140)
-		art.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		art.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		v.add_child(art)
-	_label(v,"潮汐电网",34)
-	_label(v,"让清洁能源，点亮一座海湾。",19,TEAL)
-	_paragraph(v,"你接手了青屿湾的供电网络。建设发电设施，连接城区，平衡昼夜供需，并在风暴来临时守住每一盏灯。",CREAM,15)
-	UI.spacer(v).size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_label(v,"建造与接线  →  调度与储能  →  抢修与扩建",15,ORANGE)
-	_label(v,"左键交互 · 右键取消 · 空格暂停 · H 调度员手册",14,MUTED)
-	var begin := _button(v,"开始运营   →",_begin_management,Vector2(0,48))
-	var campaign_actions := _row(v,10)
-	_button(campaign_actions,"自由沙盘",_begin_free_sandbox,Vector2(0,40))
-	_button(campaign_actions,"历史战役  ·  电力时代",func(): campaign_panel.open_directory(),Vector2(0,40))
-	_button(campaign_actions,"继续战役",func(): continue_campaign(),Vector2(0,40))
-	begin.add_theme_stylebox_override("normal",UI.style(Color("28584f"),6,TEAL,10))
+	welcome = FrontendMenu.new()
+	welcome.name = "TitleMenu"
+	dialog_layer.add_child(welcome)
+	welcome.setup()
+	welcome.action_requested.connect(_frontend_action)
+	pause_menu = FrontendMenu.new()
+	pause_menu.name = "PauseMenu"
+	dialog_layer.add_child(pause_menu)
+	pause_menu.setup()
+	pause_menu.action_requested.connect(_frontend_action)
+	pause_menu.hide()
 	help_modal = _modal(dialog_layer,1040,620)
 	var h := _column(help_modal.get_node("Dialog/ContentScroll/Content"),14)
 	var head := _row(h)
@@ -1795,6 +1869,7 @@ func _setup_modals() -> void:
 	confirmation.hide()
 
 func _show_result(victory: bool) -> void:
+	if audio: audio.play_action("victory" if victory else "failure",true)
 	if _campaign_active(): campaign_panel.open_report(victory); return
 	var panel := end_modal.get_node("Dialog/ContentScroll/Content")
 	_clear_children(panel)
@@ -1898,6 +1973,16 @@ func _update_time_status(planning: bool=false) -> void:
 
 func _apply_preferences() -> void:
 	if root_ui==null: return
+	preferences.apply_runtime(get_viewport())
+	if audio: audio.apply_preferences(preferences)
+	var visual: String = str([preferences.ui_scale,preferences.high_contrast,preferences.reduced_motion])
+	var bindings: String = str(preferences.bindings)
+	if visual==_visual_preferences:
+		if bindings!=_binding_preferences and is_ready: _update_hud()
+		_binding_preferences = bindings
+		return
+	_visual_preferences = visual
+	_binding_preferences = bindings
 	root_ui.theme=UI.create_theme(preferences.high_contrast)
 	_layout_interface()
 	if is_ready:
@@ -1913,7 +1998,7 @@ func _layout_interface() -> void:
 	_last_map_size=root_ui.size
 	if hud: hud.layout_workspace()
 	for modal in [welcome,help_modal,end_modal,confirmation]:
-		if modal==null: continue
+		if modal==null or not modal.has_node("Dialog"): continue
 		var dialog: Control=modal.get_node("Dialog")
 		var preferred: Vector2=dialog.get_meta("preferred_size",Vector2(650,500))
 		var extent: Vector2=preferred.min(root_ui.size-Vector2(32,32))
@@ -1944,6 +2029,7 @@ func _confirm_demolition() -> void:
 	if pending_demolition<0: return
 	var result: Dictionary=sim.demolish(pending_demolition)
 	_apply(result)
+	if audio and result.get("ok",false): audio.play_action("demolish",true)
 	if result.get("ok",false):
 		selected_id=-1
 		selected_line=-1
@@ -1996,7 +2082,7 @@ func _offer_discard_drafts(next: Callable) -> bool:
 	_clear_children(confirm_body)
 	_label(confirm_body,"切换进度并清空草案？",22,ORANGE)
 	_paragraph(confirm_body,"未提交的市场、设施和安全配置不会带入其他进度。取消可继续编辑，确认后清空当前草案。",CREAM,14)
-	var cancel := _button(confirm_body,"取消，继续编辑",func(): confirmation.hide())
+	var cancel := _button(confirm_body,"取消，继续编辑",_cancel_confirmation)
 	_button(confirm_body,"确认切换并清空草案",func(): confirmation.hide(); next.call())
 	confirmation.show()
 	cancel.grab_focus()
@@ -2004,7 +2090,7 @@ func _offer_discard_drafts(next: Callable) -> bool:
 	return true
 
 func _front_modal() -> Control:
-	for modal in [settings_panel,confirmation,campaign_panel,planning_panel,digital_panel,market_panel,end_modal,help_modal,welcome]:
+	for modal in [settings_panel,confirmation,campaign_panel,planning_panel,digital_panel,market_panel,end_modal,help_modal,pause_menu,welcome]:
 		if modal!=null and modal.visible: return modal
 	return null
 
@@ -2035,3 +2121,249 @@ func _guard_modal_focus(event: InputEventKey) -> bool:
 			get_viewport().set_input_as_handled()
 			return true
 	return false
+
+func _save_paths() -> Array:
+	return [campaign_save_path,campaign_autosave_path,sandbox_save_path,sandbox_autosave_path]
+
+func _refresh_title() -> void:
+	title_catalog = SaveCatalog.inspect(_save_paths())
+	welcome.open_title(title_catalog)
+	_update_audio()
+
+func _activate_session() -> void:
+	session_started = true
+	app_state = AppState.PLAYING
+	_focus_suspended = false
+	if welcome: welcome.hide()
+	if pause_menu: pause_menu.hide()
+	if world: world.show()
+	if hud: hud.show()
+	if operator_map: operator_map.show()
+
+func _open_pause() -> void:
+	if not session_started or app_state==AppState.TITLE: return
+	hud.close_popups()
+	if ghost: ghost.hide()
+	app_state = AppState.PAUSED
+	pause_menu.open_pause()
+	_update_time_status(true)
+	_update_audio()
+
+func _close_pause() -> void:
+	pause_menu.hide()
+	app_state = AppState.PLAYING
+	_update_time_status()
+	_update_audio()
+
+func _open_settings() -> void:
+	_settings_origin = "title" if app_state==AppState.TITLE else ("paused" if app_state==AppState.PAUSED else "playing")
+	settings_panel.open()
+	_update_time_status(true)
+	_update_audio()
+
+func _settings_closed() -> void:
+	if _settings_origin=="title":
+		welcome.show()
+		welcome.buttons.settings.grab_focus()
+	elif _settings_origin=="paused":
+		pause_menu.show()
+		pause_menu.buttons.settings.grab_focus()
+	_update_hud()
+	_update_audio()
+
+func _frontend_action(action: String) -> void:
+	match action:
+		"continue":
+			if app_state==AppState.PAUSED: _close_pause()
+			else: _continue_latest()
+		"campaign": _open_campaign_directory()
+		"management", "sandbox": _request_new_mode(action)
+		"save":
+			_save()
+			pause_menu.summary.text = notice_label.text
+		"load": _load()
+		"settings": _open_settings()
+		"title": _leave_session(false)
+		"quit": _leave_session(true)
+		"credits": _show_credits()
+
+func _continue_latest() -> void:
+	var catalog: Dictionary = SaveCatalog.inspect(_save_paths())
+	if catalog.latest.is_empty():
+		_refresh_title()
+		return
+	_load(str(catalog.latest.path))
+
+func _open_campaign_directory() -> void:
+	welcome.hide()
+	pause_menu.hide()
+	campaign_panel.open_directory()
+	_update_audio()
+
+func close_campaign_directory() -> void:
+	if app_state==AppState.TITLE:
+		_refresh_title()
+	elif app_state==AppState.PAUSED:
+		pause_menu.show()
+		pause_menu.buttons.campaign.grab_focus()
+	_update_audio()
+
+func _confirm_frontend(title_text: String, detail: String, action_text: String, callback: Callable) -> void:
+	_clear_children(confirm_body)
+	_label(confirm_body,title_text,23,ORANGE)
+	_paragraph(confirm_body,detail,CREAM,15)
+	var cancel := _button(confirm_body,"取消，保留当前进度",_cancel_confirmation)
+	UI.action(_button(confirm_body,action_text,func(): confirmation.hide(); callback.call()),"destructive")
+	confirmation.show()
+	cancel.grab_focus()
+
+func _request_new_mode(mode: String, confirmed: bool=false) -> void:
+	if not confirmed:
+		var prior: Dictionary = SaveCatalog.inspect([sandbox_save_path,sandbox_autosave_path])
+		if not prior.latest.is_empty():
+			_confirm_frontend("开启新进度？","经营路线与自由沙盘共用当前档位。\n%s · %s\n新进度保存后将替换该档位，教学战役不受影响。" % [prior.latest.title,prior.latest.detail],"确认开启新进度",func(): _request_new_mode(mode,true))
+			return
+	if mode=="management": _begin_management()
+	else: _begin_free_sandbox()
+	var saved: Dictionary = _atomic_save(sandbox_save_path)
+	_apply(saved)
+	if saved.get("ok",false): _remove_stale_auto(sandbox_autosave_path)
+
+func request_campaign_start(id: int, discard_drafts: bool=false) -> void:
+	if not discard_drafts and _offer_discard_drafts(func(): request_campaign_start(id,true)): return
+	var prior: Dictionary = SaveCatalog.inspect([campaign_save_path,campaign_autosave_path],"campaign")
+	if not prior.latest.is_empty() or (session_started and _campaign_active()):
+		var saved_title: String = str(prior.latest.get("title","当前教学战役"))
+		var saved_detail: String = str(prior.latest.get("detail",sim.campaign.chapter().get("title","")))
+		_confirm_frontend("从章节开头进入？","当前战役档位：%s · %s\n从章节开头进入会替换本关进行中的进度；已完成章节与解锁仍保留。" % [saved_title,saved_detail],"确认从章节开头进入",func(): _start_confirmed_chapter(id))
+	else: campaign_panel.request_start(id,true)
+
+func _start_confirmed_chapter(id: int) -> void:
+	campaign_panel.request_start(id,true)
+
+func _leave_session(exit_game: bool, discard_drafts: bool=false) -> void:
+	if session_started and not discard_drafts and _offer_discard_drafts(func(): _leave_session(exit_game,true)): return
+	if session_started:
+		var result: Dictionary = _atomic_save(campaign_save_path if _campaign_active() else sandbox_save_path)
+		if not result.get("ok",false):
+			_clear_children(confirm_body)
+			_label(confirm_body,"保存失败",24,RED)
+			_paragraph(confirm_body,"当前进度仍保留在游戏中。检查存储空间后可以重试。",CREAM,15)
+			_button(confirm_body,"取消，返回游戏",_cancel_confirmation).grab_focus()
+			_button(confirm_body,"重试保存",func(): confirmation.hide(); _leave_session(exit_game,true))
+			UI.action(_button(confirm_body,"不保存并退出" if exit_game else "不保存并返回主菜单",func(): confirmation.hide(); _finish_leave(exit_game)),"destructive")
+			confirmation.show()
+			confirmation.z_index = 80
+			return
+	_finish_leave(exit_game)
+
+func _finish_leave(exit_game: bool) -> void:
+	if exit_game:
+		get_tree().quit()
+		return
+	for center in [market_panel,digital_panel,planning_panel,campaign_panel,settings_panel,help_modal,end_modal,confirmation,pause_menu]:
+		center.hide()
+		if center.has_method("reset_session"): center.reset_session()
+	app_state = AppState.TITLE
+	_restore_settings_on_cancel = false
+	session_started = false
+	autosave_clock = 0.0
+	_focus_suspended = false
+	hud.hide()
+	operator_map.hide()
+	world.hide()
+	_refresh_title()
+	if audio: audio.reset_session({})
+
+func _show_credits() -> void:
+	_clear_children(confirm_body)
+	_label(confirm_body,"制作名单",26)
+	_paragraph(confirm_body,"潮汐电网 · TIDAL GRID\n原创电网建设、经营与历史教学游戏\n\n引擎：Godot\n中文字体：Noto Sans CJK SC · SIL OFL\n场景与设施：原创程序化微缩模型\n封面与概念：内置 imagegen 原创生成\n音乐与声音：原创离线作曲与合成",CREAM,15)
+	_button(confirm_body,"返回主菜单",func(): confirmation.hide()).grab_focus()
+	confirmation.show()
+
+func _audio_snapshot() -> Dictionary:
+	var snapshot: Dictionary = Presenter.operating_snapshot(sim)
+	snapshot.time_hours = float(sim.time_hours)
+	snapshot.weather = "storm" if sim.storm_active else "clear"
+	snapshot.mode = "campaign" if _campaign_active() else "playing"
+	# Only the selected, publicly observed facility contributes a world sound.
+	snapshot.facilities = Presenter.facilities(sim,str(selected_id)).filter(func(row: Dictionary): return int(row.id)==selected_id) if selected_id>=0 else []
+	return snapshot
+
+func _audio_baseline() -> Dictionary:
+	return {"snapshot":_audio_snapshot(),"alerts":Presenter.alerts(sim),"receipts":Presenter.jobs(sim)}
+
+func _progress_audio_signature() -> String:
+	if _campaign_active(): return str([sim.campaign.chapter_id,sim.campaign.step_index])
+	if sim.management.state.active: return str(sim.management.state.stage)
+	return str(sim.objectives.map(func(item: Dictionary): return bool(item.get("done",false))))
+
+func _update_audio() -> void:
+	if audio==null: return
+	if app_state==AppState.TITLE:
+		audio.set_context("title")
+		return
+	audio.set_context("paused" if _modal_open() or _focus_suspended else ("campaign" if _campaign_active() else "playing"))
+	if not _modal_open() and not _focus_suspended:
+		audio.observe_public_state(_audio_snapshot(),Presenter.alerts(sim),Presenter.jobs(sim))
+
+func _wire_sound_tree(node: Node) -> void:
+	_wire_ui_sound(node)
+	for child in node.get_children(): _wire_sound_tree(child)
+
+func _wire_ui_sound(node: Node) -> void:
+	if audio==null or node.has_meta("sound_wired"): return
+	if node is BaseButton:
+		node.set_meta("sound_wired",true)
+		node.pressed.connect(func():
+			if is_instance_valid(audio): audio.play_ui("confirm")
+		)
+		node.focus_entered.connect(func():
+			if is_instance_valid(audio): audio.play_ui("hover")
+		)
+	elif node is Slider:
+		node.set_meta("sound_wired",true)
+		node.drag_ended.connect(func(_changed: bool):
+			if is_instance_valid(audio): audio.play_ui("confirm")
+		)
+
+func _notification(what: int) -> void:
+	if not is_ready: return
+	if what==NOTIFICATION_WM_CLOSE_REQUEST:
+		_restore_settings_on_cancel = settings_panel.visible
+		if settings_panel.visible: settings_panel.close()
+		_leave_session(true)
+	elif what==NOTIFICATION_APPLICATION_FOCUS_OUT:
+		_focus_suspended = session_started and preferences.pause_unfocused
+	elif what==NOTIFICATION_APPLICATION_FOCUS_IN:
+		_focus_suspended = false
+
+func _cancel_confirmation() -> void:
+	confirmation.hide()
+	if _restore_settings_on_cancel:
+		_restore_settings_on_cancel = false
+		_open_settings()
+
+func _remove_stale_auto(path: String) -> void:
+	if not FileAccess.file_exists(path): return
+	if DirAccess.remove_absolute(ProjectSettings.globalize_path(path))!=OK:
+		_notify("新进度已保存，但旧自动存档无法清理。请检查存储权限。",false)
+
+func _atomic_save(path: String) -> Dictionary:
+	var pending: String = path + ".pending"
+	var written: Dictionary = sim.save_game(pending)
+	if not written.get("ok",false): return written
+	var target: String = ProjectSettings.globalize_path(path)
+	var temporary: String = ProjectSettings.globalize_path(pending)
+	var previous: String = target + ".previous-" + str(Time.get_ticks_usec())
+	var existed: bool = FileAccess.file_exists(path)
+	if existed and DirAccess.rename_absolute(target,previous)!=OK:
+		DirAccess.remove_absolute(temporary)
+		return {"ok":false,"message":"无法替换存档；原存档已保留。"}
+	if DirAccess.rename_absolute(temporary,target)!=OK:
+		if existed: DirAccess.rename_absolute(previous,target)
+		return {"ok":false,"message":"无法完成存档写入；请检查存储权限。"}
+	if existed: DirAccess.remove_absolute(previous)
+	if audio: audio.play_action("save",true)
+	return {"ok":true,"message":"存档已保存。"}

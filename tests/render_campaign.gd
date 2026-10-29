@@ -45,7 +45,7 @@ func _run() -> void:
 		game.campaign_panel.open_directory()
 		await capture("directory")
 		game.campaign_panel.profile.prologue_seen=false
-		game.campaign_panel.request_start(1)
+		game.campaign_panel.request_start(1,true)
 		await capture("prologue")
 		game.campaign_panel._finish_prologue()
 		await capture("briefing")

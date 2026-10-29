@@ -8,23 +8,27 @@ func _initialize() -> void:
 	_build.call_deferred()
 
 func _build() -> void:
-	root.size = Vector2i(1600,700)
+	if DisplayServer.get_name()=="headless":
+		push_error("Cover rendering requires GPU rendering.")
+		quit(1)
+		return
+	root.size = Vector2i(1920,1080)
 	var stage := Node3D.new()
 	root.add_child(stage)
-	stage.add_child(Island.create())
+	stage.add_child(Island.create(12))
 	var env := WorldEnvironment.new()
 	env.environment = Environment.new()
 	env.environment.background_mode = Environment.BG_COLOR
-	env.environment.background_color = Color("72b8ba")
+	env.environment.background_color = Color("204954")
 	env.environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.environment.ambient_light_color = Color("dceee5")
-	env.environment.ambient_light_energy = 0.25
+	env.environment.ambient_light_color = Color("d9e2cf")
+	env.environment.ambient_light_energy = 0.32
 	env.environment.tonemap_mode = Environment.TONE_MAPPER_LINEAR
 	stage.add_child(env)
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-48,-35,0)
-	sun.light_color = Color("fff1d1")
-	sun.light_energy = 0.45
+	sun.light_color = Color("fff0d3")
+	sun.light_energy = 0.62
 	sun.shadow_enabled = true
 	stage.add_child(sun)
 	var placements := [
@@ -46,7 +50,7 @@ func _build() -> void:
 			Models.beam(stage,start,Vector3(0,0.4,0),0.025,Color("327c7c"))
 	var camera := Camera3D.new()
 	camera.projection = Camera3D.PROJECTION_ORTHOGONAL
-	camera.size = 28
+	camera.size = 25
 	camera.current = true
 	stage.add_child(camera)
 	camera.position = Vector3(32,30,39)

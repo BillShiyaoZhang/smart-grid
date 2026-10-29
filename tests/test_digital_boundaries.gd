@@ -144,7 +144,7 @@ func _test_planning_observation() -> void:
 	root.add_child(game)
 	await process_frame
 	game.set_process(false)
-	game.welcome.hide()
+	game._activate_session()
 	game.sim.research()
 	game.sim.research()
 	game.sim.step(.05)

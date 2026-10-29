@@ -86,7 +86,7 @@ func _run() -> void:
 	root.add_child(game)
 	await settle()
 	game.set_process(false)
-	game.welcome.hide()
+	game._activate_session()
 	game.speed=0
 	game.onboarding=false
 	game.hud.onboarding_panel.hide()

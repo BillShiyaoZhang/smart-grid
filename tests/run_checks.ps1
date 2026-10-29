@@ -18,6 +18,8 @@ try {
         $Tests = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter 'test_*.gd' | Sort-Object Name | ForEach-Object { $_.BaseName })
     }
     foreach ($taskTest in $Tests) {
+		$env:APPDATA = Join-Path $taskLogRoot ('user\' + $taskTest)
+		New-Item -ItemType Directory -Force -Path $env:APPDATA | Out-Null
         $taskScript = 'res://tests/' + $taskTest + '.gd'
         $taskOutput = Join-Path $taskLogRoot ($taskTest + '.log')
         $taskErrors = Join-Path $taskLogRoot ($taskTest + '-errors.log')

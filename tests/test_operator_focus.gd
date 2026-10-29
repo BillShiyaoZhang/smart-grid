@@ -168,6 +168,7 @@ func _run() -> void:
 	game=load("res://scenes/main.tscn").instantiate()
 	root.add_child(game)
 	await settle()
+	game._activate_session()
 	game.set_process(false)
 	game.preferences.storage_path="res://.godot/operator_focus_preferences.cfg"
 	game.campaign_panel.profile_path="res://.godot/operator_focus_profile.json"

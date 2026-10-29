@@ -28,7 +28,7 @@ func _run() -> void:
 	root.add_child(game)
 	await settle()
 	game.set_process(false)
-	game.welcome.hide()
+	game._activate_session()
 	game.speed=0
 	game.sim.next_storm_at=100
 	game.sim.digital.next_attack_at=100

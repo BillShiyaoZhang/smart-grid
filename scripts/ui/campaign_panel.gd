@@ -4,6 +4,7 @@ const Catalog = preload("res://scripts/sim/campaign_catalog.gd")
 const UI = preload("res://scripts/ui/ui_kit.gd")
 const Shell = preload("res://scripts/ui/management_shell.gd")
 const VisualChart = preload("res://scripts/ui/center_charts.gd")
+const SaveCatalog = preload("res://scripts/ui/save_catalog.gd")
 var game: Node
 var body: VBoxContainer
 var content: VBoxContainer
@@ -18,6 +19,21 @@ var hold_gauge: Control
 var condition_gauges: Dictionary = {}
 var interruption_label: Label
 var _previous_hold := 0.0
+var selected_chapter := 1
+var chapter_cards: Dictionary = {}
+var hero_enter_button: Button
+var hero_title: Label
+var hero_art: TextureRect
+var _directory_columns: HBoxContainer
+var _directory_stack: VBoxContainer
+var _chapter_list: PanelContainer
+var _chapter_hero: PanelContainer
+var _hero_content: VBoxContainer
+var _back_button: Button
+var _section_heading: Label
+var _resume_summary: Label
+var _hero_image_frame: PanelContainer
+var _timeline_scroll: ScrollContainer
 
 func reset_session() -> void:
 	hint_level=0
@@ -58,14 +74,18 @@ func current_focus_target() -> Dictionary:
 func setup(owner_game: Node) -> void:
 	game = owner_game
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	body = Shell.build(self,"电力时代战役","战役目录",open_directory,close)
+	body = Shell.build(self,"电流的足迹","战役目录",open_directory,close)
+	for button in body.find_children("*","Button",true,false):
+		if "返回电网" in button.text: _back_button=button
 	var scroll := ScrollContainer.new()
+	scroll.follow_focus=true
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	body.add_child(scroll)
 	content = UI.column(scroll,14)
 	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	load_profile()
+	resized.connect(_layout_directory)
 	hide()
 
 func load_profile() -> void:
@@ -107,7 +127,14 @@ func record_completion() -> void:
 func _begin(caption: String) -> void:
 	game._prepare_center(self)
 	game._clear_children(content)
-	_label(caption,26,UI.TEAL)
+	_directory_columns=null
+	_directory_stack=null
+	_chapter_list=null
+	_chapter_hero=null
+	_section_heading=_label(caption,26,UI.TEAL)
+	_resume_summary=null
+	if is_instance_valid(_back_button):
+		_back_button.text="返回战役目录  Esc" if mode=="prologue" else ("返回主菜单  Esc" if not bool(game.get("session_started")) else "返回电网  Esc")
 	show()
 
 func _label(caption: String, font_size: int=16, color: Color=UI.TEXT) -> Label:
@@ -118,41 +145,171 @@ func _label(caption: String, font_size: int=16, color: Color=UI.TEXT) -> Label:
 
 func open_directory() -> void:
 	mode = "directory"
-	_begin("从第一盏街灯，到协同运行的电网")
-	_label("15 个历史现场 · 建设 → 经营 → 智能化 → 清洁可靠供电",16,UI.MUTED)
-	var actions := UI.row(content,10)
+	_begin("全球电力史教学战役")
+	var progress:=UI.row(content,12)
+	UI.label(progress,"已完成 %d / 15" % profile.completed.size(),18,UI.TEAL)
+	var completion:=ProgressBar.new()
+	completion.max_value=15
+	completion.value=profile.completed.size()
+	completion.show_percentage=false
+	completion.custom_minimum_size=Vector2(140,12)
+	completion.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	completion.size_flags_vertical=Control.SIZE_SHRINK_CENTER
+	progress.add_child(completion)
+	var actions:=HFlowContainer.new()
+	actions.add_theme_constant_override("h_separation",10)
+	actions.add_theme_constant_override("v_separation",8)
+	content.add_child(actions)
+	var saves: Dictionary=SaveCatalog.inspect([game.campaign_save_path,game.campaign_autosave_path],"campaign")
 	var resume := UI.button(actions,"继续战役",func(): game.continue_campaign(),Vector2(150,40))
-	resume.disabled = not FileAccess.file_exists(game.campaign_save_path)
+	resume.disabled=saves.latest.is_empty()
+	resume.tooltip_text="没有可继续的战役进度" if resume.disabled else str(saves.latest.detail)
 	if game._campaign_active(): UI.button(actions,"返回当前关",close,Vector2(150,40))
-	UI.button(actions,"返回沙盘",func(): game.return_to_sandbox(),Vector2(150,40))
+	if bool(game.get("session_started")): UI.button(actions,"返回沙盘",func(): game.return_to_sandbox(),Vector2(150,40))
+	if not saves.latest.is_empty():
+		_resume_summary=_label("上次进度 · "+str(saves.latest.detail),14,UI.MUTED)
+	elif not saves.invalid.is_empty():
+		_label("存档暂不可用；仍可从已解锁章节开始。",14,UI.AMBER)
+	_directory_columns=UI.row(content,18)
+	_directory_columns.size_flags_vertical=Control.SIZE_EXPAND_FILL
+	_directory_stack=UI.column(content,16)
+	_chapter_list=PanelContainer.new()
+	_chapter_list.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	_chapter_list.size_flags_stretch_ratio=1.05
+	_chapter_list.add_theme_stylebox_override("panel",UI.style(Color("0c252f"),10,Color("365660"),12))
+	_directory_columns.add_child(_chapter_list)
+	var list_body:=UI.column(_chapter_list,10)
+	UI.label(list_body,"章节时间线 · 1882 — 2023",17,UI.MUTED)
+	var timeline_scroll:=ScrollContainer.new()
+	_timeline_scroll=timeline_scroll
+	timeline_scroll.follow_focus=true
+	timeline_scroll.horizontal_scroll_mode=ScrollContainer.SCROLL_MODE_DISABLED
+	timeline_scroll.custom_minimum_size.y=410
+	timeline_scroll.size_flags_vertical=Control.SIZE_EXPAND_FILL
+	list_body.add_child(timeline_scroll)
+	var timeline:=UI.column(timeline_scroll,10)
+	timeline.size_flags_horizontal=Control.SIZE_EXPAND_FILL
 	chapter_buttons.clear()
+	chapter_cards.clear()
 	for chapter in Catalog.chapters():
-		var id := int(chapter.id)
-		var unlocked := id <= int(profile.unlocked)
-		var complete: bool = id in profile.completed
-		var card := PanelContainer.new()
-		card.add_theme_stylebox_override("panel",UI.style(Color("193b47"),8,Color("355561"),12))
-		content.add_child(card)
-		var row := UI.row(card,16)
-		var timeline:=UI.column(row,4)
-		timeline.custom_minimum_size.x=86
-		UI.label(timeline,"●" if complete else ("◉" if unlocked else "○"),28,UI.TEAL if unlocked else UI.MUTED)
-		UI.label(timeline,str(chapter.years),14,UI.TEAL if unlocked else UI.MUTED)
-		var text_box := UI.column(row,6)
-		text_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var title := UI.label(text_box,"%02d  %s%s" % [id,chapter.title,"  ✓" if complete else ""],19,UI.TEXT if unlocked else UI.MUTED)
-		title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		var location := UI.label(text_box,"%s  ·  %s" % [chapter.place,chapter.years],14,UI.TEAL if unlocked else UI.MUTED)
-		location.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		var summary := UI.label(text_box,str(chapter.get("objective","")) if unlocked else "完成前章，继续探索下一种电力能力",14,UI.MUTED)
-		summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		var button := UI.button(row,"重玩" if complete else ("进入情景" if unlocked else "待解锁"),func(): request_start(id),Vector2(112,44))
-		button.disabled = not unlocked
-		chapter_buttons[id] = button
+		_build_chapter_card(timeline,chapter)
+	_chapter_hero=PanelContainer.new()
+	_chapter_hero.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	_chapter_hero.add_theme_stylebox_override("panel",UI.style(Color("153640"),10,Color("5b7c80"),16))
+	_directory_columns.add_child(_chapter_hero)
+	_hero_content=UI.column(_chapter_hero,12)
+	selected_chapter=clampi(int(profile.last_chapter),1,15)
+	select_chapter(selected_chapter,false)
+	_layout_directory()
+	content.get_parent().scroll_vertical=0
 
-func request_start(id: int) -> void:
+func _build_chapter_card(parent: Node, chapter: Dictionary) -> void:
+	var id: int=int(chapter.id)
+	var unlocked: bool=id<=int(profile.unlocked)
+	var complete: bool=id in profile.completed
+	var step_row:=UI.row(parent,8)
+	var spine:=UI.column(step_row,3)
+	spine.custom_minimum_size.x=28
+	UI.label(spine,"●" if complete else ("◉" if unlocked else "○"),24,UI.TEAL if unlocked else UI.MUTED)
+	var line:=ColorRect.new()
+	line.color=Color("40686c") if unlocked else Color("2a454f")
+	line.custom_minimum_size=Vector2(1,100)
+	line.size_flags_horizontal=Control.SIZE_SHRINK_CENTER
+	line.size_flags_vertical=Control.SIZE_EXPAND_FILL
+	spine.add_child(line)
+	var card:=PanelContainer.new()
+	card.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	step_row.add_child(card)
+	chapter_cards[id]=card
+	var column:=UI.column(card,8)
+	var row:=UI.row(column,12)
+	var thumbnail:=_chapter_image(id,Vector2(104,78))
+	if not unlocked: thumbnail.modulate=Color(.65,.72,.74)
+	row.add_child(thumbnail)
+	var copy:=UI.column(row,4)
+	copy.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	UI.label(copy,str(chapter.years),20,UI.TEAL if unlocked else UI.MUTED)
+	var title:=UI.label(copy,"%02d  %s" % [id,chapter.title],17,UI.TEXT if unlocked else UI.MUTED)
+	title.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	var location:=UI.label(copy,str(chapter.place),14,UI.MUTED)
+	location.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	UI.label(copy,"✓ 已完成" if complete else ("可进入" if unlocked else "待解锁 · 完成前章"),14,UI.TEAL if complete else UI.MUTED)
+	var actions:=UI.row(column,8)
+	UI.button(actions,"查看章节",func(): select_chapter(id),Vector2(104,34))
+	UI.spacer(actions)
+	var enter:=UI.button(actions,"重玩" if complete else ("进入情景" if unlocked else "待解锁"),func(): request_start(id),Vector2(108,34))
+	enter.disabled=not unlocked
+	chapter_buttons[id]=enter
+
+func _chapter_image(id: int, extent: Vector2) -> TextureRect:
+	var image:=TextureRect.new()
+	var path: String="res://assets/art/chapters/%02d.png" % id
+	if not ResourceLoader.exists(path): path="res://assets/art/operator_cover.png"
+	if ResourceLoader.exists(path): image.texture=load(path)
+	image.expand_mode=TextureRect.EXPAND_IGNORE_SIZE
+	image.stretch_mode=TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	image.custom_minimum_size=extent
+	image.mouse_filter=Control.MOUSE_FILTER_IGNORE
+	return image
+
+func select_chapter(id: int, reveal_detail: bool=true) -> void:
+	if mode!="directory" or id<1 or id>15 or not is_instance_valid(_hero_content): return
+	selected_chapter=id
+	for chapter_id in chapter_cards:
+		chapter_cards[chapter_id].add_theme_stylebox_override("panel",UI.style(Color("1c494f") if chapter_id==id else Color("112f39"),8,UI.TEAL if chapter_id==id else Color("35545f"),10))
+	game._clear_children(_hero_content)
+	var chapter: Dictionary=Catalog.get_chapter(id)
+	var unlocked: bool=id<=int(profile.unlocked)
+	var complete: bool=id in profile.completed
+	var stamp:=UI.row(_hero_content)
+	UI.badge(stamp,"✓ 已完成" if complete else ("当前可学" if unlocked else "尚未解锁"),UI.TEAL if unlocked else UI.MUTED)
+	UI.spacer(stamp)
+	UI.label(stamp,str(chapter.years),20,UI.AMBER)
+	hero_enter_button=UI.button(stamp,"重玩本章  →" if complete else ("进入本章  →" if unlocked else "尚未解锁"),func(): request_start(id),Vector2(132,40))
+	hero_enter_button.disabled=not unlocked
+	if unlocked: UI.action(hero_enter_button)
+	hero_title=UI.label(_hero_content,"%02d  %s" % [id,chapter.title],24)
+	hero_title.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	var location:=UI.label(_hero_content,str(chapter.place)+" · "+str(chapter.years),15,UI.TEAL)
+	location.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	var image_frame:=PanelContainer.new()
+	_hero_image_frame=image_frame
+	image_frame.add_theme_stylebox_override("panel",UI.style(UI.TEXT.darkened(.07),5,UI.TEXT,5))
+	_hero_content.add_child(image_frame)
+	hero_art=_chapter_image(id,Vector2(0,160))
+	image_frame.add_child(hero_art)
+	var objective:=UI.label(_hero_content,str(chapter.objective),17)
+	objective.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	UI.label(_hero_content,"预计 %s 分钟 · 独立情景与预算" % str(chapter.minutes),14,UI.MUTED)
+	var note:=UI.label(_hero_content,"历史场景经过游戏化改编；插图为章节导览，实际任务以关卡为准。",14,UI.MUTED)
+	note.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	_layout_directory()
+	if reveal_detail and size.x<1050: _reveal_chapter_detail.call_deferred()
+
+func _reveal_chapter_detail() -> void:
+	if mode!="directory" or not is_instance_valid(_chapter_hero): return
+	var scroll: ScrollContainer=content.get_parent()
+	scroll.scroll_vertical+=roundi((_chapter_hero.get_global_rect().position.y-scroll.get_global_rect().position.y)/get_global_transform().get_scale().y)
+
+func _layout_directory() -> void:
+	if mode!="directory" or not is_instance_valid(_directory_columns) or not is_instance_valid(_chapter_list): return
+	var wide: bool=size.x>=1050
+	var target: Node=_directory_columns if wide else _directory_stack
+	for item in [_chapter_list,_chapter_hero]:
+		if item.get_parent()!=target: item.reparent(target)
+	_directory_columns.visible=wide
+	_directory_stack.visible=not wide
+	if is_instance_valid(_section_heading): _section_heading.visible=wide
+	if is_instance_valid(_resume_summary): _resume_summary.visible=wide
+	if is_instance_valid(_hero_image_frame): _hero_image_frame.visible=wide
+	if is_instance_valid(_timeline_scroll): _timeline_scroll.custom_minimum_size.y=410 if wide else 300
+
+func request_start(id: int, confirmed: bool=false) -> void:
 	if id<1 or id>int(profile.unlocked):
 		game._notify("先完成上一章，再进入这个历史现场。",false)
+		return
+	if not confirmed:
+		game.request_campaign_start(id)
 		return
 	if id==1 and not bool(profile.prologue_seen):
 		mode = "prologue"
@@ -161,7 +318,7 @@ func request_start(id: int) -> void:
 		_label("接下来，你将来到不同国家的历史现场，以当时的工程问题学习供电、调度与经营。地图与工程规模经过游戏化压缩；你操作的数值与规则属于游戏模型。",17,UI.MUTED)
 		_label("这段序章只介绍背景，无需完成科学实验。",15,UI.MUTED)
 		UI.button(content,"跳过序章，进入 1882 年",func(): _finish_prologue(),Vector2(0,44))
-		UI.button(content,"我准备好了，进入第一章",func(): _finish_prologue(),Vector2(0,44))
+		UI.action(UI.button(content,"我准备好了，进入第一章",func(): _finish_prologue(),Vector2(0,44)))
 		return
 	game.start_campaign_chapter(id)
 
@@ -184,7 +341,7 @@ func open_briefing() -> void:
 	for entry in Catalog.steps(int(chapter.id)):
 		UI.badge(steps,"○ "+str(entry.title),UI.TEAL)
 	_label("独立预算与进度 · 正常建设及运营费用 · 完成实际操作与持续考核",14,UI.MUTED)
-	UI.button(content,"进入现场  →",func(): close(); game.hud.toggle_popup("missions"),Vector2(0,46))
+	UI.action(UI.button(content,"进入现场  →",func(): close(); game.hud.toggle_popup("missions"),Vector2(0,46)))
 	UI.button(content,"阅读历史档案",open_archive,Vector2(0,38))
 
 func open_archive() -> void:
@@ -244,7 +401,7 @@ func open_report(victory: bool) -> void:
 		record_completion()
 		_label("你把这一时代的工程选择变成了真实供电。下一关将从新的现场开始，已完成章节的解锁进度会单独保留。",16,UI.MUTED)
 		if int(chapter.id)<15:
-			UI.button(content,"前往下一章  →",func(): request_start(int(chapter.id)+1),Vector2(0,46))
+			UI.action(UI.button(content,"前往下一章  →",func(): request_start(int(chapter.id)+1),Vector2(0,46)))
 		else:
 			_label("电力时代战役已完成。你已经掌握建设、调度、经营、通信和恢复的主要系统。",22,UI.TEAL)
 	UI.button(content,"重试本关",func(): game.restart_campaign_chapter(),Vector2(0,42))
@@ -367,5 +524,9 @@ func guide_to(target: String) -> void:
 		_: game.hud.close_popups(); game._notify("已定位当前任务对象；右侧详情只显示已知信息，执行结果请核对回执。")
 
 func close() -> void:
+	if mode=="prologue":
+		open_directory()
+		return
 	hide()
 	game._update_hud()
+	if mode=="directory": game.close_campaign_directory()

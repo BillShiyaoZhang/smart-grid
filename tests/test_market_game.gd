@@ -80,7 +80,7 @@ func _run() -> void:
 	root.add_child(game)
 	await process_frame
 	game.set_process(false)
-	game.welcome.hide()
+	game._activate_session()
 	desk = game.market_panel
 	check(desk != null and not desk.visible,"market desk is created and initially hidden")
 	check(game.build_buttons.has("intertie"),"market terminal is available in construction palette")

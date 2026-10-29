@@ -1,35 +1,108 @@
 class_name GridModelFactory
 extends RefCounted
 
-## Original miniature construction set. One model fits a 2 m map cell.
-const CREAM = Color("f5edda")
-const WHITE = Color("fcfbf1")
-const MINT = Color("8fc5aa")
-const TEAL = Color("327c7c")
-const BLUE = Color("295674")
-const DARK = Color("23434f")
-const ORANGE = Color("e7a36d")
-const CORAL = Color("ce7465")
-const METAL = Color("8caaa8")
-const CONCRETE = Color("c6cfbd")
+## One reproducible source for every live miniature, editable scene and icon.
+## Bases occupy a 2 m cell. Wind blades may overhang above their neighbours.
+const KINDS := ["gas", "solar", "wind", "battery", "substation", "home", "factory", "hospital", "sensor", "intertie", "control", "relay", "soc", "dc_dynamo", "steam", "coal", "hydro", "cooling", "academy", "nuclear", "pumped_storage", "condenser", "hvdc", "ccgt", "flow_battery", "community_battery", "hydrogen", "thermal_storage", "fusion"]
+const CREAM = Color("eee3cb")
+const WHITE = Color("fbf3dd")
+const MINT = Color("87bbaa")
+const TEAL = Color("29676a")
+const BLUE = Color("26495e")
+const DARK = Color("213a43")
+const ORANGE = Color("ce965c")
+const CORAL = Color("b6755d")
+const METAL = Color("93aaa4")
+const CONCRETE = Color("bab9a4")
+const STONE = Color("d6cbb3")
+const BRICK = Color("a87055")
+static var _materials: Dictionary = {}
+static var _bevels: Dictionary = {}
+static var _prefabs: Dictionary = {}
 
 static func material(color: Color, metallic: float = 0.0, roughness: float = 0.82) -> StandardMaterial3D:
+	var key := "%s:%.2f:%.2f" % [color.to_html(),metallic,roughness]
+	if _materials.has(key): return _materials[key]
 	var m = StandardMaterial3D.new()
 	m.albedo_color = color
 	m.metallic = metallic
 	m.roughness = roughness
+	m.metallic_specular = 0.3
+	_materials[key] = m
 	return m
 
 static func box(parent: Node3D, size: Vector3, at: Vector3, color: Color, title: String = "") -> MeshInstance3D:
-	var mesh = BoxMesh.new()
-	mesh.size = size
 	var instance = MeshInstance3D.new()
-	instance.mesh = mesh
+	instance.mesh = _bevel_mesh(size)
 	instance.material_override = material(color)
 	instance.position = at
 	if not title.is_empty(): instance.name = title
 	parent.add_child(instance)
 	return instance
+
+## Chamfered edges catch the light without a postprocessing dependency.
+static func _bevel_mesh(size: Vector3) -> ArrayMesh:
+	var key := str(size)
+	if _bevels.has(key): return _bevels[key]
+	var h := size * 0.5
+	var bevel := minf(0.035,minf(size.x,minf(size.y,size.z))*0.17)
+	var inner := h-Vector3.ONE*bevel
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	for axis in range(3):
+		var u: int=(axis+1)%3
+		var v: int=(axis+2)%3
+		for sign_ in [-1.0,1.0]:
+			var normal := Vector3.ZERO
+			normal[axis]=sign_
+			var points: Array[Vector3]=[]
+			for corner in [Vector2(-1,-1),Vector2(1,-1),Vector2(1,1),Vector2(-1,1)]:
+				var point := Vector3.ZERO
+				point[axis]=h[axis]*sign_
+				point[u]=inner[u]*corner.x
+				point[v]=inner[v]*corner.y
+				points.append(point)
+			_quad(vertices,normals,points[0],points[1],points[2],points[3],normal)
+	for axis in range(3):
+		var u: int=(axis+1)%3
+		var v: int=(axis+2)%3
+		for su in [-1.0,1.0]:
+			for sv in [-1.0,1.0]:
+				var a := Vector3.ZERO
+				var b := Vector3.ZERO
+				a[axis]=-inner[axis]; b[axis]=-inner[axis]
+				a[u]=h[u]*su; a[v]=inner[v]*sv
+				b[u]=inner[u]*su; b[v]=h[v]*sv
+				var c:=b; c[axis]=inner[axis]
+				var d:=a; d[axis]=inner[axis]
+				var normal:=Vector3.ZERO; normal[u]=su; normal[v]=sv
+				_quad(vertices,normals,a,b,c,d,normal.normalized())
+	for sx in [-1.0,1.0]:
+		for sy in [-1.0,1.0]:
+			for sz in [-1.0,1.0]:
+				var sign_ := Vector3(sx,sy,sz)
+				var a:=inner*sign_; a.x=h.x*sx
+				var b:=inner*sign_; b.y=h.y*sy
+				var c:=inner*sign_; c.z=h.z*sz
+				_triangle(vertices,normals,a,b,c,sign_.normalized())
+	var arrays:=[]
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX]=vertices
+	arrays[Mesh.ARRAY_NORMAL]=normals
+	var mesh:=ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,arrays)
+	_bevels[key]=mesh
+	return mesh
+
+static func _triangle(vertices: PackedVector3Array, normals: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3, normal: Vector3) -> void:
+	var points: Array=[a,c,b] if (b-a).cross(c-a).dot(normal)>0 else [a,b,c]
+	for point in points:
+		vertices.append(point)
+		normals.append(normal)
+
+static func _quad(vertices: PackedVector3Array, normals: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3, d: Vector3, normal: Vector3) -> void:
+	_triangle(vertices,normals,a,b,c,normal)
+	_triangle(vertices,normals,a,c,d,normal)
 
 static func cylinder(parent: Node3D, radius: float, height: float, at: Vector3, color: Color, sides: int = 12, top_radius: float = -1.0) -> MeshInstance3D:
 	var mesh = CylinderMesh.new()
@@ -51,11 +124,16 @@ static func beam(parent: Node3D, a: Vector3, b: Vector3, radius: float, color: C
 	return part
 
 static func building(kind: String) -> Node3D:
+	if kind=="synchronous_condenser": kind="condenser"
+	if _prefabs.has(kind): return _prefabs[kind].instantiate()
 	var root = Node3D.new()
 	root.name = kind.capitalize()
-	box(root, Vector3(1.78, 0.10, 1.78), Vector3(0, 0.05, 0), CONCRETE, "Foundation")
-	# Small aprons and curbs make every asset legible at a distance.
-	box(root, Vector3(1.82, 0.035, 0.08), Vector3(0, 0.115, 0.86), CREAM)
+	root.set_meta("asset_kind",kind)
+	root.set_meta("asset_revision",2)
+	box(root, Vector3(1.84, 0.09, 1.84), Vector3(0, 0.045, 0), STONE, "Foundation")
+	box(root, Vector3(1.76, 0.045, 1.76), Vector3(0, 0.105, 0), CONCRETE,"Courtyard")
+	for i in range(4):
+		box(root,Vector3(0.415,0.025,0.13),Vector3(-0.65+float(i)*0.435,0.14,0.80),CREAM)
 	match kind:
 		"home": _home(root)
 		"gas": _gas(root)
@@ -88,7 +166,280 @@ static func building(kind: String) -> Node3D:
 		"thermal_storage": _thermal_storage(root)
 		"fusion": _fusion(root)
 		_: _home(root)
+	_finish_building(root,kind)
+	_merge_static_geometry(root)
+	var bounds:=geometry_bounds(root)
+	root.set_meta("bounds",bounds)
+	root.set_meta("pick_height",maxf(0.65,bounds.end.y))
+	root.set_meta("label_anchor",Vector3(0,bounds.end.y+0.3,0))
+	_set_owner(root,root)
+	var prefab:=PackedScene.new()
+	if prefab.pack(root)==OK: _prefabs[kind]=prefab
 	return root
+
+static func _set_owner(node: Node, root: Node) -> void:
+	for child in node.get_children():
+		child.owner=root
+		_set_owner(child,root)
+
+## One static mesh per paint material instead of one draw for every window rib.
+## Movable rotor geometry remains separate and keeps its original local transforms.
+static func _merge_static_geometry(root: Node3D) -> void:
+	var buckets: Dictionary={}
+	var sources: Array[MeshInstance3D]=[]
+	_collect_static(root,Transform3D.IDENTITY,buckets,sources)
+	for source in sources: source.free()
+	var index:=0
+	for key in buckets:
+		var bucket: Dictionary=buckets[key]
+		var arrays:=[]
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX]=bucket.vertices
+		arrays[Mesh.ARRAY_NORMAL]=bucket.normals
+		arrays[Mesh.ARRAY_INDEX]=bucket.indices
+		var mesh:=ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,arrays)
+		var part:=MeshInstance3D.new()
+		part.name="MiniaturePaint%02d" % index
+		part.mesh=mesh
+		part.material_override=bucket.material
+		root.add_child(part)
+		index+=1
+	root.set_meta("static_material_count",index)
+
+static func _collect_static(node: Node3D, transform_: Transform3D, buckets: Dictionary, sources: Array[MeshInstance3D]) -> void:
+	for child in node.get_children():
+		if not child is Node3D or child.name=="Rotor": continue
+		var local: Transform3D=transform_*child.transform
+		if child is MeshInstance3D and child.mesh!=null:
+			for surface in range(child.mesh.get_surface_count()):
+				var paint: Material=child.material_override if child.material_override!=null else child.mesh.surface_get_material(surface)
+				var key: int=paint.get_instance_id() if paint!=null else 0
+				if not buckets.has(key):
+					buckets[key]={"vertices":PackedVector3Array(),"normals":PackedVector3Array(),"indices":PackedInt32Array(),"material":paint}
+				var bucket: Dictionary=buckets[key]
+				var arrays: Array=child.mesh.surface_get_arrays(surface)
+				var vertices: PackedVector3Array=arrays[Mesh.ARRAY_VERTEX]
+				var normals: PackedVector3Array=arrays[Mesh.ARRAY_NORMAL]
+				var offset: int=bucket.vertices.size()
+				var normal_basis:=local.basis.inverse().transposed()
+				for i in range(vertices.size()):
+					bucket.vertices.append(local*vertices[i])
+					bucket.normals.append((normal_basis*normals[i]).normalized() if i<normals.size() else Vector3.UP)
+				var indices: PackedInt32Array=arrays[Mesh.ARRAY_INDEX] if arrays[Mesh.ARRAY_INDEX]!=null else PackedInt32Array()
+				if indices.is_empty():
+					for i in range(vertices.size()): bucket.indices.append(offset+i)
+				else:
+					for i in indices: bucket.indices.append(offset+i)
+			sources.append(child)
+		_collect_static(child,local,buckets,sources)
+
+static func geometry_bounds(root: Node3D) -> AABB:
+	return _bounds_recursive(root,Transform3D.IDENTITY)
+
+static func _bounds_recursive(node: Node3D, transform_: Transform3D) -> AABB:
+	var result:=AABB()
+	if node is MeshInstance3D and node.mesh!=null:
+		result=transform_*node.get_aabb()
+	for child in node.get_children():
+		if not child is Node3D: continue
+		var bounds:=_bounds_recursive(child,transform_*child.transform)
+		if bounds.size.length_squared()>0:
+			result=bounds if result.size.length_squared()==0 else result.merge(bounds)
+	return result
+
+## A small architectural vocabulary supplies coherent materials, not shared silhouettes.
+static func _finish_building(root: Node3D, kind: String) -> void:
+	var detail:=Node3D.new()
+	detail.name="CraftDetails"
+	root.add_child(detail)
+	# Inlaid brass identification plate and a recessed, low connection terminal.
+	box(detail,Vector3(.23,.018,.075),Vector3(.56,.158,.80),ORANGE,"AssetPlate")
+	box(detail,Vector3(.19,.12,.16),Vector3(-.68,.21,.65),DARK,"CableTerminal")
+	box(detail,Vector3(.12,.025,.13),Vector3(-.68,.285,.65),METAL)
+	match kind:
+		"home":
+			_roof(root,Vector3(-.1,.94,-.08),1.28,1.28,.33,TEAL)
+			_arch_window(detail,Vector3(-.45,.62,.475),.19,.29)
+			_arch_window(detail,Vector3(.25,.62,.475),.19,.29)
+			box(detail,Vector3(.34,.04,.36),Vector3(-.08,.55,.63),ORANGE)
+			_planter(detail,Vector3(.62,.18,-.55),.23)
+		"factory":
+			for x in [-.43,0,.43]:
+				_arch_window(detail,Vector3(x,.67,.67),.23,.34)
+				_roof(detail,Vector3(x,1.11,-.04),.45,.96,.18,TEAL)
+			box(detail,Vector3(.45,.24,.24),Vector3(.48,.25,.65),ORANGE)
+		"hospital":
+			for x in [-.54,-.18,.18,.54]:
+				box(detail,Vector3(.31,.04,.08),Vector3(x,.91,.63),WHITE)
+			box(detail,Vector3(.48,.07,.27),Vector3(0,.17,.72),WHITE)
+			_planter(detail,Vector3(.72,.18,.7),.17)
+		"gas", "ccgt":
+			for x in [-.52,-.18,.16]:
+				box(detail,Vector3(.23,.025,.08),Vector3(x,.39,.55 if kind=="gas" else .73),STONE)
+			for z in [-.48,.1,.48]:
+				box(detail,Vector3(.025,.22,.15),Vector3(.42,.45,z),METAL)
+			box(detail,Vector3(.47,.025,.4),Vector3(-.28,.965 if kind=="gas" else .91,.05),BLUE)
+		"dc_dynamo":
+			for x in [-.58,-.17,.24]:
+				_arch_window(detail,Vector3(x,.51,.647),.24,.36)
+			for y in [.25,.73]:
+				box(detail,Vector3(1.3,.035,.035),Vector3(-.12,y,.655),STONE)
+			_roof(detail,Vector3(-.12,.84,0),1.42,1.34,.27,TEAL)
+			_brick_bands(detail,Vector3(-.12,.48,.64),1.30,.57)
+		"coal":
+			for x in [-.64,-.27,.10]:
+				_arch_window(detail,Vector3(x,.66,.655),.22,.48)
+			for y in [.26,.95]:
+				box(detail,Vector3(1.15,.05,.06),Vector3(-.25,y,.65),STONE)
+			box(detail,Vector3(.82,.08,.92),Vector3(-.25,1.25,0),TEAL)
+			for x in [-.72,.22]:
+				box(detail,Vector3(.055,.8,.06),Vector3(x,.65,.65),CREAM)
+			_brick_bands(detail,Vector3(-.25,.6,.64),1.15,.9)
+		"steam":
+			for x in [-.55,.45]:
+				box(detail,Vector3(.10,.12,.96),Vector3(x,.28,-.1),STONE)
+			for z in [-.58,.18]:
+				beam(detail,Vector3(-.55,.75,z),Vector3(.32,.75,z),.028,ORANGE)
+			var flywheel:=Node3D.new()
+			detail.add_child(flywheel)
+			flywheel.position=Vector3(-.4,.52,.58)
+			for i in range(8):
+				var theta:=TAU*float(i)/8.0
+				beam(flywheel,Vector3.ZERO,Vector3(cos(theta)*.23,sin(theta)*.23,0),.018,ORANGE)
+		"wind":
+			for i in range(3):
+				var theta:=TAU*float(i)/3.0
+				cylinder(detail,.035,.09,Vector3(cos(theta)*.27,.3,sin(theta)*.27),METAL,8)
+			_planter(detail,Vector3(-.62,.18,-.62),.21)
+		"solar":
+			for x in [-.45,.35]:
+				beam(detail,Vector3(x,.17,-.75),Vector3(x,.17,.65),.018,ORANGE)
+			box(detail,Vector3(.33,.035,.36),Vector3(.57,.52,.56),TEAL)
+		"battery", "community_battery":
+			var xs: Array=[-.49,.02,.53] if kind=="battery" else [-.43,.22]
+			for x in xs:
+				box(detail,Vector3(.035,.21,.028),Vector3(float(x)+.11,.72,.47 if kind=="battery" else .36),METAL)
+				_bolt(detail,Vector3(float(x)-.07,.8,.46 if kind=="battery" else .36),.13,MINT)
+		"substation", "intertie":
+			_fence(detail,-.78,.78,-.75,.73)
+			for z in [-.3,.3]:
+				beam(detail,Vector3(-.45,.25,z),Vector3(.45,.25,z),.026,ORANGE)
+		"control":
+			for x in [-.43,0,.43]:
+				box(detail,Vector3(.3,.04,.14),Vector3(x,.47,.60),STONE)
+			box(detail,Vector3(.45,.3,.48),Vector3(.42,1.23,-.23),CREAM)
+			box(detail,Vector3(.49,.06,.52),Vector3(.42,1.42,-.23),TEAL)
+		"soc":
+			for z in [-.42,-.14,.14]:
+				box(detail,Vector3(.07,.40,.025),Vector3(.78,.49,z),STONE)
+			box(detail,Vector3(.18,.17,.18),Vector3(-.64,1.0,.44),MINT)
+			box(detail,Vector3(.2,.035,.20),Vector3(-.64,1.1,.44),TEAL)
+		"sensor", "relay":
+			box(detail,Vector3(.25,.1,.23),Vector3(-.43,.82 if kind=="sensor" else 1.05,.35),WHITE)
+			for x in [-.64,-.48,-.32]:
+				box(detail,Vector3(.05,.025,.16),Vector3(x,.16,.72),ORANGE)
+		"hydro":
+			for x in [-.54,0,.54]:
+				box(detail,Vector3(.23,.025,.36),Vector3(x,.23,.53),WHITE)
+				box(detail,Vector3(.028,.035,.52),Vector3(x,.25,.51),MINT)
+			_rail(detail,Vector3(-.78,1.18,-.26),Vector3(.78,1.18,-.26))
+		"pumped_storage":
+			for z in [-.69,-.18]:
+				box(detail,Vector3(1.46,.09,.07),Vector3(0,.82,z),STONE)
+			for x in [-.7,.7]:
+				box(detail,Vector3(.07,.09,.5),Vector3(x,.82,-.43),STONE)
+			_roof(detail,Vector3(0,.62,.12),.52,.55,.14,TEAL)
+		"nuclear":
+			for z in [-.48,-.2,.08,.36]:
+				box(detail,Vector3(.025,.47,.06),Vector3(-.79,.48,z),STONE)
+			cylinder(detail,.48,.065,Vector3(.26,.77,-.1),STONE,24)
+			box(detail,Vector3(.18,.21,.025),Vector3(-.43,.51,.62),BLUE)
+		"cooling":
+			for x in [-.43,.43]:
+				for i in range(10):
+					var theta:=TAU*float(i)/10.0
+					beam(detail,Vector3(x+cos(theta)*.30,.2,sin(theta)*.30),Vector3(x+cos(theta)*.23,.8,sin(theta)*.23),.013,STONE)
+		"academy":
+			_roof(detail,Vector3(0,1.02,0),1.48,1.27,.29,TEAL)
+			for x in [-.48,0,.48]:
+				box(detail,Vector3(.08,.74,.08),Vector3(x,.53,.65),STONE)
+			box(detail,Vector3(.76,.09,.32),Vector3(0,.96,.65),WHITE)
+		"hvdc":
+			_fence(detail,-.8,.8,-.75,.73)
+			for z in [-.44,-.1,.24]:
+				box(detail,Vector3(.025,.35,.13),Vector3(-.825,.55,z),METAL)
+		"condenser":
+			for x in [-.45,-.3,-.15,0,.15,.3,.45]:
+				var ring:=cylinder(detail,.355,.025,Vector3(x,.65,0),METAL,16)
+				ring.rotation.z=PI*.5
+			_rail(detail,Vector3(-.74,.27,.60),Vector3(.16,.27,.60))
+		"flow_battery", "thermal_storage", "hydrogen":
+			var tank_top:=1.2 if kind!="hydrogen" else 1.15
+			var tank_xs: Array=[-.5,0,.5] if kind=="hydrogen" else [-.46,.46]
+			for x in tank_xs:
+				cylinder(detail,.055,.07,Vector3(float(x),tank_top,-.2 if kind!="hydrogen" else -.3),DARK,10)
+				beam(detail,Vector3(float(x),.4,.33),Vector3(float(x),.4,.62),.026,ORANGE)
+			box(detail,Vector3(.05,.52,.05),Vector3(-.79,.41,-.18),METAL)
+			for y in [.2,.32,.44,.56]:
+				box(detail,Vector3(.17,.02,.04),Vector3(-.72,float(y),-.18),METAL)
+		"fusion":
+			for i in range(8):
+				var theta:=TAU*float(i)/8.0
+				cylinder(detail,.055,.11,Vector3(sin(theta)*.74,.25,cos(theta)*.74),STONE,8)
+			box(detail,Vector3(.24,.20,.028),Vector3(0,.4,.825),BLUE)
+
+static func _arch_window(root: Node3D, at: Vector3, width: float, height: float) -> void:
+	box(root,Vector3(width+.07,height,.035),at,STONE)
+	var arch:=cylinder(root,(width+.07)*.5,.035,at+Vector3(0,height*.5,0),STONE,16)
+	arch.rotation.x=PI*.5
+	box(root,Vector3(width,height-.035,.025),at+Vector3(0,0,.025),BLUE)
+	var glass:=cylinder(root,width*.5,.025,at+Vector3(0,height*.5,.027),BLUE,16)
+	glass.rotation.x=PI*.5
+	box(root,Vector3(.022,height+width*.38,.03),at+Vector3(0,.04,.045),CREAM)
+	box(root,Vector3(width,.018,.035),at+Vector3(0,.025,.047),CREAM)
+	box(root,Vector3(width+.12,.045,.10),at+Vector3(0,-height*.5-.02,.03),WHITE)
+
+static func _roof(root: Node3D, at: Vector3, width: float, depth: float, rise: float, color: Color) -> void:
+	var angle:=atan2(rise,width*.5)
+	var plane_width:=sqrt(pow(width*.5,2)+rise*rise)
+	for side in [-1.0,1.0]:
+		var roof:=box(root,Vector3(plane_width+.045,.075,depth),at+Vector3(width*.25*side,rise*.5,0),color,"RoofPlane")
+		roof.rotation.z=-angle*side
+		for i in range(6):
+			var rib:=box(root,Vector3(plane_width+.045,.013,.014),roof.position+Vector3(0,.048,-depth*.42+float(i)*depth*.168),color.lightened(.12))
+			rib.rotation.z=roof.rotation.z
+	box(root,Vector3(.065,.07,depth+.035),at+Vector3(0,rise+.025,0),ORANGE,"RoofRidge")
+
+static func _brick_bands(root: Node3D, at: Vector3, width: float, height: float) -> void:
+	for i in range(4):
+		box(root,Vector3(width,.009,.008),at+Vector3(0,-height*.45+float(i)*height*.28,.01),CREAM.darkened(.1))
+
+static func _planter(root: Node3D, at: Vector3, radius: float) -> void:
+	cylinder(root,radius,.12,at,STONE,8)
+	cylinder(root,radius*.85,.06,at+Vector3(0,.07,0),Color("5b7660"),8)
+	for i in range(3):
+		var angle:=float(i)*TAU/3.0
+		cylinder(root,radius*.55,.22,at+Vector3(cos(angle)*radius*.35,.19,sin(angle)*radius*.35),MINT.darkened(float(i)*.12),7,.035)
+
+static func _rail(root: Node3D, a: Vector3, b: Vector3) -> void:
+	beam(root,a+Vector3.UP*.19,b+Vector3.UP*.19,.014,METAL)
+	beam(root,a+Vector3.UP*.09,b+Vector3.UP*.09,.009,METAL)
+	for i in range(5):
+		var at:=a.lerp(b,float(i)/4.0)
+		beam(root,at,at+Vector3.UP*.23,.014,ORANGE)
+
+static func _fence(root: Node3D, left: float, right: float, back: float, front: float) -> void:
+	for x in [left,right]:
+		_rail(root,Vector3(x,.13,back),Vector3(x,.13,front))
+	_rail(root,Vector3(left,.13,back),Vector3(right,.13,back))
+
+static func _bolt(root: Node3D, at: Vector3, factor: float, color: Color) -> void:
+	var a:=box(root,Vector3(.18,.7,.016)*factor,at+Vector3(-.05,.2,0)*factor,color)
+	a.rotation.z=-.4
+	var b:=box(root,Vector3(.18,.7,.016)*factor,at+Vector3(.05,-.2,0)*factor,color)
+	b.rotation.z=-.4
+	box(root,Vector3(.5,.16,.016)*factor,at,color)
 
 static func _dynamo(root: Node3D) -> void:
 	box(root,Vector3(1.3,.65,1.2),Vector3(-.12,.43,0),Color("b78061"))
@@ -103,7 +454,7 @@ static func _dynamo(root: Node3D) -> void:
 	box(root,Vector3(.5,.035,.035),Vector3(-.45,1.2,-.1),METAL)
 
 static func _coal(root: Node3D) -> void:
-	box(root,Vector3(1.15,1.0,1.25),Vector3(-.25,.61,0),Color("aaa69b"))
+	box(root,Vector3(1.15,1.0,1.25),Vector3(-.25,.61,0),BRICK)
 	box(root,Vector3(1.2,.1,1.3),Vector3(-.25,1.15,0),DARK)
 	for z in [-.44,.35]:
 		cylinder(root,.15,1.8,Vector3(.58,1.0,z),CORAL,10,.11)
@@ -272,11 +623,6 @@ static func _fusion(root: Node3D) -> void:
 static func _home(root: Node3D) -> void:
 	box(root, Vector3(1.1, 0.8, 1.05), Vector3(-0.1, 0.5, -0.08), CREAM)
 	box(root, Vector3(1.16, 0.10, 1.11), Vector3(-0.1, 0.95, -0.08), WHITE)
-	# Two sloping roof planes meet in a sculpted ridge.
-	var roof_a = box(root, Vector3(0.68, 0.10, 1.22), Vector3(-0.4, 1.12, -0.08), TEAL)
-	roof_a.rotation.z = deg_to_rad(30)
-	var roof_b = box(root, Vector3(0.68, 0.10, 1.22), Vector3(0.2, 1.12, -0.08), TEAL)
-	roof_b.rotation.z = deg_to_rad(-30)
 	box(root, Vector3(0.15, 0.42, 0.16), Vector3(0.24, 1.2, -0.33), CORAL)
 	box(root, Vector3(0.22, 0.4, 0.025), Vector3(-0.08, 0.31, 0.46), BLUE)
 	box(root, Vector3(0.26, 0.25, 0.025), Vector3(-0.45, 0.63, 0.46), BLUE)
@@ -332,7 +678,8 @@ static func _wind(root: Node3D) -> void:
 		var blade = Node3D.new()
 		rotor.add_child(blade)
 		blade.rotation.z = i * TAU / 3.0
-		var surface = box(blade, Vector3(0.115, 0.95, 0.045), Vector3(0.05, 0.57, 0), WHITE)
+		var surface = cylinder(blade, .12, 1.03, Vector3(.03,.56,0), WHITE, 8, .022)
+		surface.scale.z=.28
 		surface.rotation.z = -0.1
 		box(blade, Vector3(0.09, 0.15, 0.048), Vector3(0.09, 0.98, 0), ORANGE)
 
@@ -507,7 +854,7 @@ static func _shield(root: Node3D, at: Vector3, factor: float, color: Color) -> v
 	var instance = MeshInstance3D.new()
 	instance.mesh = mesh
 	instance.position = at
-	var mat = material(color)
+	var mat: StandardMaterial3D = material(color).duplicate()
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	instance.material_override = mat
 	root.add_child(instance)
@@ -554,11 +901,27 @@ static func _sensor(root: Node3D) -> void:
 static func tree(seed: int = 0) -> Node3D:
 	var root = Node3D.new()
 	root.name = "Pine"
-	var variation = 0.88 + (seed % 7) * 0.055
+	var variation: float = 0.88 + (seed % 7) * 0.055
 	cylinder(root, 0.085, 0.47, Vector3(0, 0.23, 0), Color("8c7760"), 6)
 	var greens = [Color("4d8c73"), Color("629a78"), Color("82ab85")]
-	for i in range(3):
-		cylinder(root, (0.43 - i * 0.095) * variation, 0.66 * variation, Vector3(0, (0.65 + i * 0.36) * variation, 0), greens[(i + seed) % 3], 7, 0.025)
+	if seed%3==0:
+		for i in range(3):
+			cylinder(root, (0.43 - i * 0.095) * variation, 0.66 * variation, Vector3(0, (0.65 + i * 0.36) * variation, 0), greens[(i + seed) % 3], 8, 0.025)
+	else:
+		for i in range(5):
+			var theta:=float(i)*2.4
+			var at:=Vector3(cos(theta)*.23,.83+float(i%3)*.19,sin(theta)*.23)*variation
+			var leaf:=MeshInstance3D.new()
+			var mesh:=SphereMesh.new()
+			mesh.radius=.37*variation
+			mesh.height=.65*variation
+			mesh.radial_segments=7
+			mesh.rings=3
+			leaf.mesh=mesh
+			leaf.position=at
+			leaf.material_override=material(greens[(i+seed)%3])
+			root.add_child(leaf)
+			beam(root,Vector3(0,.32,0),at,.035,Color("8c7760"))
 	root.rotation.y = seed * 1.27
 	return root
 
@@ -568,12 +931,12 @@ static func rock(seed: int = 0) -> Node3D:
 	var mesh = SphereMesh.new()
 	mesh.radius = 0.35
 	mesh.height = 0.7
-	mesh.radial_segments = 6
-	mesh.rings = 2
+	mesh.radial_segments = 7
+	mesh.rings = 3
 	var instance = MeshInstance3D.new()
 	instance.mesh = mesh
 	instance.material_override = material(Color("99afa1") if seed % 2 == 0 else Color("b8c4af"))
-	instance.scale = Vector3(1.1 + (seed % 3) * 0.2, 0.65, 0.9)
+	instance.scale = Vector3(1.1 + (seed % 3) * 0.2, 0.8 + float(seed%3)*.2, 0.9)
 	instance.position.y = 0.15
 	instance.rotation.y = seed * 0.89
 	root.add_child(instance)
@@ -586,6 +949,10 @@ static func pylon() -> Node3D:
 	box(root, Vector3(0.56, 0.055, 0.065), Vector3(0, 1.07, 0), DARK)
 	for x in [-0.22, 0.22]:
 		cylinder(root, 0.045, 0.10, Vector3(x, 1.13, 0), CREAM, 6)
+		for y in [1.1,1.15,1.2]:
+			cylinder(root,.065,.025,Vector3(x,y,0),CREAM,8)
+	beam(root,Vector3(0,.65,0),Vector3(-.24,1.04,0),.018,METAL)
+	beam(root,Vector3(0,.65,0),Vector3(.24,1.04,0),.018,METAL)
 	return root
 
 static func vehicle() -> Node3D:
@@ -595,6 +962,12 @@ static func vehicle() -> Node3D:
 	box(root, Vector3(0.37, 0.21, 0.4), Vector3(0, 0.48, 0.1), WHITE)
 	box(root, Vector3(0.30, 0.13, 0.015), Vector3(0, 0.49, 0.31), BLUE)
 	box(root, Vector3(0.24, 0.04, 0.04), Vector3(0, 0.63, 0.10), ORANGE)
+	for x in [-.15,.15]:
+		box(root,Vector3(.025,.025,.55),Vector3(x,.625,-.1),METAL)
+	for z in [-.3,-.15,0,.15]:
+		box(root,Vector3(.3,.02,.02),Vector3(0,.638,z),CREAM)
+	for x in [-.13,.13]:
+		box(root,Vector3(.065,.06,.025),Vector3(x,.26,.395),WHITE)
 	for x in [-0.21, 0.21]:
 		for z in [-0.24, 0.24]:
 			var wheel = cylinder(root, 0.095, 0.065, Vector3(x, 0.15, z), DARK, 10)

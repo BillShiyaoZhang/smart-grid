@@ -4,6 +4,7 @@ extends Control
 var points: Array[Dictionary] = []
 var _hovered := -1
 var threshold_lines: Array = []
+var _base_minimum_height := -1.0
 
 const INK := Color("102c38")
 const MINT := Color("77dbc0")
@@ -17,9 +18,11 @@ func _init() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 
 func _ready() -> void:
-	resized.connect(queue_redraw)
-	theme_changed.connect(queue_redraw)
+	_base_minimum_height=custom_minimum_size.y
+	resized.connect(_refresh_legend_layout)
+	theme_changed.connect(_refresh_legend_layout)
 	mouse_exited.connect(_clear_hover)
+	_refresh_legend_layout()
 
 func set_points(value: Array) -> void:
 	var next_points: Array[Dictionary] = []
@@ -34,7 +37,32 @@ func set_points(value: Array) -> void:
 	queue_redraw()
 
 func _plot_rect() -> Rect2:
-	return Rect2(Vector2(54, 38), Vector2(maxf(1, size.x - 70), maxf(1, size.y - 66)))
+	var legend_height: float=_threshold_header_height()
+	return Rect2(Vector2(54,38+legend_height),Vector2(maxf(1,size.x-70),maxf(1,size.y-66-legend_height)))
+
+func _threshold_legend() -> Array[Dictionary]:
+	var entries: Array[Dictionary]=[]
+	var font: Font=get_theme_default_font()
+	var x:=14.0
+	var row:=0
+	for threshold in threshold_lines:
+		var text: String=str(threshold.get("label","阈值"))+" %.0f" % float(threshold.get("value",0))+(" · 草案" if threshold.get("draft",false) else " · 生效")
+		var width: float=26+font.get_string_size(text,HORIZONTAL_ALIGNMENT_LEFT,-1,FONT_SIZE).x
+		if x>14 and x+width>size.x-14:
+			x=14
+			row+=1
+		entries.append({"text":text,"rect":Rect2(x,30+row*22,width,20),"color":threshold.get("color",MINT),"draft":bool(threshold.get("draft",false))})
+		x+=width+20
+	return entries
+
+func _threshold_header_height() -> float:
+	var entries: Array[Dictionary]=_threshold_legend()
+	return entries[-1].rect.end.y-28 if not entries.is_empty() else 0.0
+
+func _refresh_legend_layout() -> void:
+	if _base_minimum_height<0: _base_minimum_height=custom_minimum_size.y
+	custom_minimum_size.y=_base_minimum_height+_threshold_header_height()
+	queue_redraw()
 
 func _maximum() -> float:
 	var maximum := 100.0
@@ -45,7 +73,7 @@ func _maximum() -> float:
 
 func set_thresholds(value: Array) -> void:
 	threshold_lines=value.duplicate(true)
-	queue_redraw()
+	_refresh_legend_layout()
 
 func _x(index: int, area: Rect2) -> float:
 	return area.position.x + area.size.x * float(index) / maxf(1, points.size() - 1)
@@ -70,6 +98,13 @@ func _draw() -> void:
 	var unit := "¥ / MWh"
 	var unit_width := font.get_string_size(unit, HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SIZE).x
 	draw_string(font, Vector2(maxf(240, size.x - unit_width - 14), 21), unit, HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SIZE, TEXT)
+	# Threshold text has its own wrapping legend, independent of numeric proximity.
+	for entry in _threshold_legend():
+		var rect: Rect2=entry.rect
+		var start:=rect.position+Vector2(0,9)
+		if entry.draft: draw_dashed_line(start,start+Vector2(18,0),entry.color,1.5,4,true)
+		else: draw_line(start,start+Vector2(18,0),Color(entry.color,.8),1.5,true)
+		draw_string(font,rect.position+Vector2(26,15),entry.text,HORIZONTAL_ALIGNMENT_LEFT,size.x-rect.position.x-40,FONT_SIZE,entry.color)
 	# A point represents the beginning of an hourly interval.
 	if points.size() > 1:
 		var interval := area.size.x / float(points.size() - 1)
@@ -120,7 +155,6 @@ func _draw() -> void:
 		var draft: bool=bool(threshold.get("draft",false))
 		if draft: draw_dashed_line(Vector2(area.position.x,y),Vector2(area.end.x,y),color,1.5,5,true)
 		else: draw_line(Vector2(area.position.x,y),Vector2(area.end.x,y),Color(color,.65),1,true)
-		draw_string(font,Vector2(area.position.x+8,clampf(y-4,area.position.y+14,area.end.y-4)),str(threshold.get("label","阈值"))+" %.0f" % value+(" · 草案" if draft else " · 生效"),HORIZONTAL_ALIGNMENT_LEFT,area.size.x-8,14,color)
 	if _hovered >= 0 and _hovered < points.size():
 		var x := _x(_hovered, area)
 		draw_dashed_line(Vector2(x, area.position.y), Vector2(x, area.end.y), Color(TEXT, 0.60), 1, 3, true)

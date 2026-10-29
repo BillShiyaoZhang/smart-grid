@@ -85,7 +85,7 @@ func _run() -> void:
 	root.add_child(game)
 	await process_frame
 	game.set_process(false)
-	game.welcome.hide()
+	game._activate_session()
 	desk = game.digital_panel
 	check(desk != null and not desk.visible,"digital operations desk is created and initially hidden")
 	key(KEY_N)

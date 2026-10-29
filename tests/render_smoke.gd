@@ -11,7 +11,7 @@ func _run() -> void:
 	root.add_child(game)
 	await process_frame
 	await _capture("welcome")
-	game.welcome.hide()
+	game._activate_session()
 	game.speed = 0
 	game.sim.connect_buildings(2,6)
 	var solar: Dictionary = game.sim.build("solar",Vector2i(8,3))
