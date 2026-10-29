@@ -63,6 +63,21 @@ var dock_scroll: ScrollContainer
 var status_flow: HFlowContainer
 var onboarding_panel: PanelContainer
 var onboarding_label: Label
+var city_panel: PanelContainer
+var navigation_panel: PanelContainer
+var layer_panel: PanelContainer
+var supply_column: VBoxContainer
+var cash_column: VBoxContainer
+var clock_column: VBoxContainer
+var supply_gauge: Control
+var deficit_label: Label
+var focus_panel: PanelContainer
+var focus_title: Label
+var focus_evidence: Label
+var focus_action: Button
+var focus_icon: TextureRect
+var build_launcher: Button
+var _focus_item: Dictionary = {}
 
 func setup(owner_game: Node) -> void:
 	game = owner_game
@@ -141,6 +156,7 @@ func _popup(key: String, title: String, width: float=344, right: bool=false) -> 
 func _build() -> void:
 	# Small city identity and current objective; everything else is requested.
 	var city := _panel(self)
+	city_panel=city
 	city.position = Vector2(16,16)
 	var cv := UI.column(city,3)
 	var heading := UI.row(cv,8)
@@ -149,6 +165,7 @@ func _build() -> void:
 	UI.label(heading,"潮汐电网",14,UI.MUTED)
 	objective = UI.button(cv,"当前委托",func(): toggle_popup("missions"),Vector2(292,34))
 	var top := _panel(self)
+	navigation_panel=top
 	top.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
 	top.offset_left = -270
 	top.offset_right = -16
@@ -159,6 +176,7 @@ func _build() -> void:
 	UI.button(nav,"日志",func(): toggle_popup("log"))
 	UI.button(nav,"菜单",func(): toggle_popup("menu"))
 	var layers := _panel(self)
+	layer_panel=layers
 	layers.position = Vector2(16,156)
 	var lv := UI.column(layers,6)
 	UI.button(lv,"图层",func(): toggle_popup("layers"))
@@ -215,11 +233,12 @@ func _build() -> void:
 		tool_buttons[key] = _dock_button(dr,key,spec[1],func(): tool_requested.emit(key))
 		tool_buttons[key].tooltip_text = "%s  [%d]" % [spec[1],tool_buttons.size()]
 	dr.add_child(VSeparator.new())
+	build_launcher=_dock_button(dr,"power","建造",func(): toggle_category(active_category if not active_category.is_empty() else "power"))
 	for spec in [["power","发电"],["grid","输电"],["storage","储能"],["city","城市"],["digital","数字"]]:
 		var key: String = spec[0]
 		category_buttons[key] = _dock_button(dr,key,spec[1],func(): toggle_category(key))
 	dr.add_child(VSeparator.new())
-	for spec in [["market","市场 M"],["network","电网 N"],["planning","科技 T"]]:
+	for spec in [["market","经营 M"],["network","运维 N"],["planning","发展 T"]]:
 		var key: String = spec[0]
 		var entry := _dock_button(dr,key,spec[1],func(): center_requested.emit(key))
 		entry.toggle_mode = false
@@ -236,6 +255,10 @@ func _build() -> void:
 	tray_title = UI.label(th,"设施目录",18)
 	UI.spacer(th)
 	UI.button(th,"收起 ×",func(): close_tray())
+	var categories := HFlowContainer.new()
+	categories.add_theme_constant_override("h_separation",6)
+	tv.add_child(categories)
+	for button in category_buttons.values(): button.reparent(categories)
 	var scroll := ScrollContainer.new()
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -253,7 +276,7 @@ func _build() -> void:
 		elif float(spec.get("demand",0))>0: ability="负荷 %.1f MW" % float(spec.demand)
 		var b := UI.button(tray_flow,"%s\n¥%s · %s" % [spec.name,game._compact(spec.price),ability],func(): build_requested.emit(kind),Vector2(185,68),true)
 		var icon_path := "res://assets/icons/%s.png" % kind
-		if ResourceLoader.exists(icon_path): b.icon = load(icon_path); b.expand_icon = true; b.add_theme_constant_override("icon_max_width",36)
+		if ResourceLoader.exists(icon_path): b.icon = load(icon_path); b.expand_icon = true; b.add_theme_constant_override("icon_max_width",54)
 		b.set_meta("category",category_for(kind))
 		b.tooltip_text = spec.description
 		build_buttons[kind] = b
@@ -274,38 +297,56 @@ func _build() -> void:
 	hint_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	hint.hide()
-	# One slim status rail.
+	# Three operating groups stay visible while the miniature city remains central.
 	var status := _panel(self)
 	status_panel = status
-	status.add_theme_stylebox_override("panel",UI.style(Color("112b35f5"),6,Color("3c5961"),8))
-	status.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-	status.offset_left = 0
-	status.offset_right = 0
-	status.offset_top = -54
-	status.offset_bottom = 0
+	status.add_theme_stylebox_override("panel",UI.style(Color("0d2935f5"),9,Color("4b7078"),10,true))
+	status.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	status.offset_left = 16
+	status.offset_right = -16
+	status.offset_top = 12
+	status.offset_bottom = 124
 	var sr := HFlowContainer.new()
 	status_flow=sr
-	sr.add_theme_constant_override("h_separation",10)
+	sr.add_theme_constant_override("h_separation",18)
 	sr.add_theme_constant_override("v_separation",3)
 	status.add_child(sr)
-	time_label = UI.label(sr,"第 1 天 08:00",14)
-	weather_label = UI.label(sr,"晴朗",14,UI.MUTED)
-	pause_button = UI.button(sr,"Ⅱ",func(): action_requested.emit("pause"),Vector2(34,34),true)
+	supply_column=UI.column(sr,2)
+	var supply_heading := UI.row(supply_column,10)
+	values.reliability = UI.label(supply_heading,"供电 100%",30,UI.TEAL)
+	values.reliability.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	deficit_label=UI.label(supply_heading,"余量充足",18,UI.TEAL)
+	supply_gauge=UI.metric(supply_column,"",0,1)
+	supply_gauge.custom_minimum_size.y=14
+	supply_gauge.show_value=false
+	supply_gauge.compact=true
+	supply_gauge.hatch_remainder=true
+	# The gauge's native track is moved up when used without a heading.
+	supply_gauge.set_meta("headerless",true)
+	values.supply = UI.button(supply_column,"已供 0 / 需求 0 MW",func(): operator_dock.show_page("diagnosis"),Vector2(0,28))
+	values.supply.add_theme_stylebox_override("normal",UI.style(Color.TRANSPARENT,0,Color.TRANSPARENT,0))
+	values.supply.text_overrun_behavior=TextServer.OVERRUN_TRIM_ELLIPSIS
+	values.supply.alignment=HORIZONTAL_ALIGNMENT_LEFT
+	cash_column=UI.column(sr,2)
+	UI.label(cash_column,"可用资金",14,UI.MUTED)
+	values.cash = UI.label(cash_column,"¥180,000",26)
+	values.balance = UI.label(cash_column,"+ ¥0/h",18,UI.TEAL)
+	clock_column=UI.column(sr,3)
+	var date := UI.row(clock_column,6)
+	time_label = UI.label(date,"第 1 天 08:00",14)
+	weather_label = UI.label(date,"晴朗",14,UI.MUTED)
+	var time_controls := UI.row(clock_column,4)
+	pause_button = UI.button(time_controls,"Ⅱ",func(): action_requested.emit("pause"),Vector2(34,34),true)
 	for speed in [1,3,8]:
 		var value: int = speed
-		speed_buttons[value] = UI.button(sr,"%d×" % value,func(): action_requested.emit("speed_%d" % value),Vector2(35,34),true)
-	time_status = UI.label(sr,"运行 1×",14,UI.MUTED)
-	UI.spacer(sr)
-	values.cash = UI.label(sr,"¥180,000",18)
-	values.balance = UI.label(sr,"+ ¥0/h",14,UI.TEAL)
-	UI.spacer(sr)
-	values.supply = UI.button(sr,"已供 0 / 需求 0 MW",func(): operator_dock.show_page("diagnosis"),Vector2(0,34))
-	values.reliability = UI.label(sr,"100%",14,UI.TEAL)
+		speed_buttons[value] = UI.button(time_controls,"%d×" % value,func(): action_requested.emit("speed_%d" % value),Vector2(35,34),true)
+	time_status = UI.label(clock_column,"运行 1×",14,UI.MUTED)
 	values.supply.tooltip_text = "当前已供电 / 当前需求（MW）"
 	values.reliability.tooltip_text = "当前供电可靠率"
 	values.cash.tooltip_text = "可用建设与运营资金"
 	values.balance.tooltip_text = "每游戏小时净收益"
 	for key in ["supply","reliability","cash","balance"]: values[key].mouse_filter = Control.MOUSE_FILTER_PASS
+	_build_focus_card()
 	# Full objectives and actions are in a non-modal popover.
 	var tasks := _popup("missions","运营委托",350)
 	mission_scroll=ScrollContainer.new()
@@ -387,6 +428,66 @@ func _build() -> void:
 	status_flow.minimum_size_changed.connect(func(): layout_workspace.call_deferred())
 	layout_workspace.call_deferred()
 
+func _build_focus_card() -> void:
+	focus_panel=_panel(self)
+	focus_panel.name="CurrentPriority"
+	focus_panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	focus_panel.offset_left=-298
+	focus_panel.offset_right=-16
+	focus_panel.offset_top=190
+	var body := UI.column(focus_panel,8)
+	UI.label(body,"◎ 当前重点",14,UI.MUTED)
+	var heading := UI.row(body,8)
+	focus_icon=TextureRect.new()
+	focus_icon.custom_minimum_size=Vector2(54,54)
+	focus_icon.expand_mode=TextureRect.EXPAND_IGNORE_SIZE
+	focus_icon.stretch_mode=TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	heading.add_child(focus_icon)
+	focus_title=UI.label(heading,"检查供电与备用",18)
+	focus_title.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	focus_title.size_flags_horizontal=Control.SIZE_EXPAND_FILL
+	focus_evidence=UI.label(body,"",14,UI.MUTED)
+	focus_evidence.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	focus_action=UI.action(UI.button(body,"打开诊断",_act_on_focus,Vector2(0,40)))
+
+func _act_on_focus() -> void:
+	if int(_focus_item.get("target_id",-1))>=0:
+		game.focus_target(str(_focus_item.get("target_type","building")),int(_focus_item.target_id))
+		if _focus_item.get("action","")=="connect":
+			game._set_tool("line")
+			game.connection_start=int(_focus_item.target_id)
+			game._update_hud()
+	else: operator_dock.show_page("diagnosis")
+
+func refresh_visuals() -> void:
+	if supply_gauge==null or game.sim==null: return
+	var snapshot: Dictionary=Presenter.operating_snapshot(game.sim)
+	var demand: float=float(snapshot.demand)
+	var served: float=float(snapshot.served)
+	var deficit: float=float(snapshot.deficit)
+	values.reliability.text="供电 %.0f%%" % (float(snapshot.reliability)*100) if demand>.000001 else "暂无用电需求"
+	values.reliability.add_theme_color_override("font_color",UI.TEXT)
+	deficit_label.text="缺口 %.1f MW" % deficit if deficit>.01 else "供电充足"
+	deficit_label.add_theme_color_override("font_color",UI.RED if deficit>.01 else UI.TEAL)
+	supply_gauge.configure("",served,maxf(demand,.001),"MW",UI.TEAL,true)
+	supply_gauge.hatch_remainder=deficit>.01
+	supply_gauge.remainder_color=Color("392d36") if deficit>.01 else Color("28434d")
+	var data: Dictionary=Presenter.diagnosis(game.sim)
+	var causes: Array=data.get("causes",[])
+	_focus_item=causes[0] if not causes.is_empty() else {}
+	if _focus_item.is_empty():
+		var alerts: Array=Presenter.alerts(game.sim)
+		if not alerts.is_empty(): _focus_item=alerts[0]
+	focus_title.text=str(_focus_item.get("title","供电满足需求")).replace(" · 未接电力线路","未接网")
+	focus_evidence.text=str(_focus_item.get("source","继续规划扩张与备用"))
+	if _focus_item.get("action","")=="connect": focus_evidence.text="配电站 → 待接网设施"
+	var target: Dictionary=game.sim.get_building(int(_focus_item.get("target_id",-1))) if str(_focus_item.get("target_type","")) in ["building","facility"] else {}
+	var icon_path: String="res://assets/icons/%s.png" % target.get("kind","substation")
+	focus_icon.texture=load(icon_path) if ResourceLoader.exists(icon_path) else null
+	focus_action.text=str({"connect":"开始接线","repair":"定位并安排抢修","inspect":"定位并检查","observe":"核实运行状态","security":"检查已检测事件"}.get(str(_focus_item.get("action","")),"查看供电诊断"))
+	focus_panel.visible=not game._modal_open() and not inspector.visible and not tray.visible and size.y>=620 and not _focus_item.is_empty()
+	layout_workspace()
+
 func toggle_popup(key: String) -> void:
 	if key=="alerts":
 		close_popups()
@@ -443,16 +544,19 @@ func refresh_context() -> void:
 			if category_for(kind)==category and game.sim.can_build(kind).ok: available_category=true; break
 		category_buttons[category].disabled=not available_category
 	tool_buttons.datalink.disabled = not game.sim.feature_enabled("digital")
+	tool_buttons.datalink.visible = game.tool=="datalink" or game.overlay=="comm"
 	category_buttons.digital.disabled = not game.sim.feature_enabled("digital")
 	for key in center_buttons:
 		var feature: String = {"market":"market","network":"digital","planning":"research"}[key]
 		center_buttons[key].disabled = not game.sim.feature_enabled(feature)
-	research_button.visible = not campaign_active or game.sim.feature_enabled("digital")
-	response_button.visible = not campaign_active or game.sim.feature_enabled("demand_response")
-	storm_button.visible = not campaign_active or game.sim.feature_enabled("storm")
+	research_button.visible = game.sim.feature_enabled("digital")
+	response_button.visible = game.sim.feature_enabled("demand_response")
+	storm_button.visible = game.sim.feature_enabled("storm")
+	if game.sim.management.state.active and not game.sim.management.state.first_storm_prepared: storm_button.hide()
 	for key in tool_buttons: tool_buttons[key].button_pressed = game.tool == key
+	build_launcher.button_pressed=tray.visible
 	for key in tool_buttons: tool_buttons[key].tooltip_text=str({"select":"选择","line":"电缆接线","repair":"现场抢修","datalink":"通信布线"}[key])+"  ["+game.preferences.binding_label(key)+"]"
-	for key in center_buttons: center_buttons[key].text=str({"market":"市场","network":"电网","planning":"科技"}[key])+" "+game.preferences.binding_label(key)
+	for key in center_buttons: center_buttons[key].text=str({"market":"经营","network":"运维","planning":"发展"}[key])+" "+game.preferences.binding_label(key)
 	for button in popups.menu.find_children("*","Button",true,false):
 		var action: String=str(button.get_meta("menu_action",""))
 		if action in ["save","load","help"]: button.text=str({"save":"保存游戏","load":"读取游戏","help":"调度员手册"}[action])+"  "+game.preferences.binding_label(action)
@@ -478,6 +582,9 @@ func refresh_context() -> void:
 		if task.get("done",false): completed += 1
 		elif current == "全部委托完成 · 自由运营": current = str(task.get("title",task.get("name","运营委托")))
 	objective.text = "%d/%d  ·  %s  ›" % [completed,game.sim.objectives.size(),current]
+	if game.sim.management.state.active:
+		var stage: Dictionary=game.sim.management_status()
+		objective.text="%d/5 · %s  ›" % [mini(5,int(stage.get("stage",0))+1),stage.get("title","经营路线")]
 	if campaign_active:
 		var step: Dictionary=game.sim.campaign.current_step()
 		objective.text = "%02d  ·  %s  ›" % [game.sim.campaign.chapter_id,step.get("title","本关报告")]
@@ -485,6 +592,7 @@ func refresh_context() -> void:
 	var totals: Dictionary = game.sim.totals
 	statistics.text = "设施 %d  ·  线路 %d  ·  作业队 %d/2\n累计可靠率 %.1f%%  ·  碳排 %.1f t/h" % [game.sim.buildings.size(),game.sim.lines.size(),totals.get("crews_busy",0),float(totals.get("reliability_lifetime",1))*100,totals.get("carbon",0)]
 	_refresh_alerts()
+	refresh_visuals()
 	layout_workspace()
 
 func _refresh_alerts() -> void:
@@ -504,20 +612,50 @@ func _refresh_alerts() -> void:
 func layout_workspace() -> void:
 	if dock_panel == null: return
 	var narrow: bool = size.x < 1120
-	var rail_height: float = maxf(50,status_flow.get_combined_minimum_size().y+16)
-	status_panel.offset_top=-rail_height
-	var dock_height: float = 66 if narrow else 62
-	dock_panel.offset_left=-minf(1080,size.x-32)/2
-	dock_panel.offset_right=minf(1080,size.x-32)/2
-	dock_panel.offset_bottom=-rail_height-10
-	dock_panel.offset_top=-rail_height-10-dock_height
-	var bottom: float = rail_height+dock_height+24
+	var compact: bool=size.y<620 or size.x<1000
+	var available: float=maxf(560,size.x-88)
+	supply_column.custom_minimum_size.x=available*.43
+	cash_column.custom_minimum_size.x=available*.21
+	clock_column.custom_minimum_size.x=available*.36
+	values.reliability.add_theme_font_size_override("font_size",24 if compact else 30)
+	deficit_label.add_theme_font_size_override("font_size",14 if compact else 18)
+	values.cash.add_theme_font_size_override("font_size",22 if compact else 26)
+	values.balance.add_theme_font_size_override("font_size",14 if compact else 18)
+	var rail_height: float=maxf(100,status_flow.get_combined_minimum_size().y+20)
+	status_panel.offset_top=12
+	status_panel.offset_bottom=12+rail_height
+	city_panel.position=Vector2(16,rail_height+24)
+	city_panel.custom_minimum_size.x=0
+	city_panel.size.x=minf(320,size.x*.42)
+	objective.custom_minimum_size.x=minf(276,size.x*.39)
+	objective.text_overrun_behavior=TextServer.OVERRUN_TRIM_ELLIPSIS
+	navigation_panel.offset_top=rail_height+24
+	navigation_panel.offset_bottom=rail_height+70
+	navigation_panel.visible=not (compact and inspector.visible)
+	layer_panel.position=Vector2(16,rail_height+128)
+	layer_panel.visible=not compact
+	var dock_height: float = 62 if narrow else 66
+	dock_panel.offset_left=-minf(880,size.x-32)/2
+	dock_panel.offset_right=minf(880,size.x-32)/2
+	dock_panel.offset_bottom=-12
+	dock_panel.offset_top=-12-dock_height
+	dock_flow.custom_minimum_size.x=maxf(680,minf(860,size.x-52))
+	for button in tool_buttons.values(): button.custom_minimum_size.x=52 if narrow else 70
+	for button in category_buttons.values(): button.custom_minimum_size.x=52 if narrow else 70
+	for button in center_buttons.values(): button.custom_minimum_size.x=60 if narrow else 80
+	var bottom: float = dock_height+24
 	inspector.offset_bottom=-bottom
+	inspector.offset_top=rail_height+(24 if compact else 82)
 	inspector.offset_left=-minf(364,size.x*.45)
+	focus_panel.offset_top=rail_height+82
+	focus_panel.offset_left=-minf(294,size.x*.32)
+	focus_panel.visible=focus_panel.visible and not compact and not inspector.visible and not tray.visible
+	onboarding_panel.position=Vector2(100 if not compact else 16,rail_height+128)
+	onboarding_panel.custom_minimum_size.x=minf(310,size.x*.44)
 	tray.offset_left=100 if not narrow else 16
 	tray.offset_right=-100 if not narrow else -16
 	tray.offset_bottom=-bottom
-	tray.offset_top=-minf(bottom+198,size.y-20)
+	tray.offset_top=-minf(bottom+244,size.y-20)
 	var hint: Control = get_node("ToolHint")
 	hint.offset_left=-minf(960,size.x-32)/2
 	hint.offset_right=minf(960,size.x-32)/2
@@ -528,8 +666,8 @@ func layout_workspace() -> void:
 		var popup: Control=popups[key]
 		popup.custom_minimum_size.x=0
 		popup.size.x=minf(popup.size.x,size.x-32)
+		popup.position.y=rail_height+82
 		if key=="stats":
-			popup.position.y=112
 			chart.custom_minimum_size.y=110 if size.y<650 else 155
 			topology.custom_minimum_size.y=100 if size.y<650 else 125
 		var content: Control=popup_scrolls[key].get_child(0)

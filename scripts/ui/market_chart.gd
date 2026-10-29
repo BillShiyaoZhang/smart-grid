@@ -3,6 +3,7 @@ extends Control
 ## Presentation-only forecast chart. Values are read from the supplied snapshot.
 var points: Array[Dictionary] = []
 var _hovered := -1
+var threshold_lines: Array = []
 
 const INK := Color("102c38")
 const MINT := Color("77dbc0")
@@ -39,7 +40,12 @@ func _maximum() -> float:
 	var maximum := 100.0
 	for point in points:
 		maximum = maxf(maximum, maxf(float(point.get("spot", 0)), float(point.get("retail", 0))))
+	for line in threshold_lines: maximum=maxf(maximum,float(line.get("value",0)))
 	return ceilf(maximum / 100.0) * 100.0
+
+func set_thresholds(value: Array) -> void:
+	threshold_lines=value.duplicate(true)
+	queue_redraw()
 
 func _x(index: int, area: Rect2) -> float:
 	return area.position.x + area.size.x * float(index) / maxf(1, points.size() - 1)
@@ -107,6 +113,14 @@ func _draw() -> void:
 			draw_polyline(line, color, 2.0, true)
 		else:
 			draw_circle(line[0], 2.5, color)
+	for threshold in threshold_lines:
+		var value: float=float(threshold.get("value",0))
+		var y: float=area.end.y-clampf(value/maximum,0,1)*area.size.y
+		var color: Color=threshold.get("color",MINT)
+		var draft: bool=bool(threshold.get("draft",false))
+		if draft: draw_dashed_line(Vector2(area.position.x,y),Vector2(area.end.x,y),color,1.5,5,true)
+		else: draw_line(Vector2(area.position.x,y),Vector2(area.end.x,y),Color(color,.65),1,true)
+		draw_string(font,Vector2(area.position.x+8,clampf(y-4,area.position.y+14,area.end.y-4)),str(threshold.get("label","阈值"))+" %.0f" % value+(" · 草案" if draft else " · 生效"),HORIZONTAL_ALIGNMENT_LEFT,area.size.x-8,14,color)
 	if _hovered >= 0 and _hovered < points.size():
 		var x := _x(_hovered, area)
 		draw_dashed_line(Vector2(x, area.position.y), Vector2(x, area.end.y), Color(TEXT, 0.60), 1, 3, true)

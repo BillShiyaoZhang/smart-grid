@@ -13,8 +13,8 @@ const DEFAULT_BINDINGS := {
 const ACTION_NAMES := {
 	"pause":"暂停 / 继续", "select":"选择", "line":"电缆接线", "repair":"现场抢修",
 	"datalink":"通信布线", "rotate_left":"向左旋转", "rotate_right":"向右旋转",
-	"save":"保存", "load":"读取", "help":"操作手册", "market":"市场中心",
-	"network":"数字电网", "planning":"科技规划", "move_up":"视角向上",
+	"save":"保存", "load":"读取", "help":"操作手册", "market":"经营工作台",
+	"network":"运维工作台", "planning":"发展规划", "move_up":"视角向上",
 	"move_down":"视角向下", "move_left":"视角向左", "move_right":"视角向右"
 }
 var ui_scale := 1.0

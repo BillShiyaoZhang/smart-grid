@@ -3,6 +3,8 @@ extends Control
 const PriceChart = preload("res://scripts/ui/market_chart.gd")
 const Shell = preload("res://scripts/ui/management_shell.gd")
 const Drafts = preload("res://scripts/ui/config_drafts.gd")
+const VisualChart = preload("res://scripts/ui/center_charts.gd")
+const UI = preload("res://scripts/ui/ui_kit.gd")
 const TEAL := Color("77dbc0")
 const CREAM := Color("f2eddb")
 const MUTED := Color("95b0b6")
@@ -44,6 +46,19 @@ var _ledger_signature := ""
 var drafts: RefCounted = Drafts.new()
 var draft_labels: Dictionary = {}
 var _inputs_ready := false
+var intent_mode: OptionButton
+var export_toggle: CheckButton
+var storage_intent: OptionButton
+var contract_chart: Control
+var profit_chart: Control
+var waterfall_chart: Control
+var ledger_details: ScrollContainer
+var satisfaction_gauge: Control
+var exchange_gauge: Control
+var trade_advanced: Button
+var intent_reserve: SpinBox
+var intent_draft: Label
+var storage_intent_draft: Label
 
 func reset_session() -> void:
 	drafts.clear()
@@ -74,7 +89,7 @@ func close() -> void:
 	game._update_inspector()
 
 func _build() -> void:
-	var layout: VBoxContainer = Shell.build(self,"电力市场","推进 1 小时",_advance,close)
+	var layout: VBoxContainer = Shell.build(self,"经营 · 电力市场","推进 1 小时",_advance,close)
 	var summary: HBoxContainer = game._row(layout,24)
 	funds_label = game._label(summary,"",16,CREAM)
 	game._label(summary,"现货买价",14,MUTED)
@@ -93,6 +108,7 @@ func _build() -> void:
 	_build_storage_tab()
 	_build_ledger_tab()
 	_build_graph()
+	for input in [buy_limit,sell_floor,charge_price,discharge_price]: input.value_changed.connect(func(_value: float): _update_thresholds())
 	tabs.tab_changed.connect(_place_graph)
 	tabs.tab_changed.connect(_scroll_page_top)
 	_place_graph(0)
@@ -119,12 +135,13 @@ func _build_graph() -> void:
 	build.tooltip_text = "联络站是跨区交易的物理节点。建成后用线路连到你的电网。"
 
 func _place_graph(index: int) -> void:
-	graph_section.visible = index < 2
-	if index < 2:
+	graph_section.visible = index < 3
+	if index < 3:
 		if graph_section.get_parent() != graph_hosts[index]:
 			graph_section.reparent(graph_hosts[index])
 		# Keep Apply and the actual outcome above the reference chart in short windows.
 		graph_hosts[index].move_child(graph_section,0 if size.y >= 780 else graph_hosts[index].get_child_count()-1)
+	_update_thresholds()
 
 func _split(parent: Node) -> GridContainer:
 	var grid := GridContainer.new()
@@ -202,18 +219,40 @@ func _build_trade_tab() -> void:
 	var row := _split(body)
 	var config := _box(row)
 	game._label(config,"交易策略",20,CREAM)
-	policy_mode = _select(config,"运行策略",["离网运行 · 禁用交易","缺电保供 · 只补缺额","经济交易 · 择价购售"])
-	buy_limit = _spin(config,"最高现货买价",0,500,5)
-	sell_floor = _spin(config,"最低外售电价",0,500,5)
-	game._button(config,"应用交易策略",_apply_policy,Vector2(0,37))
-	_draft_controls(config,"trade")
+	intent_mode=_select(config,"经营目标",["经济运行 · 优先低成本供电","自给优先 · 本地电源补足后购电","禁用外网 · 独立运行"])
+	intent_mode.add_item("旧版自定义 · 保留当前行为")
+	intent_mode.set_item_disabled(3,true)
+	intent_mode.item_selected.connect(func(_value: int): _capture_intents())
+	export_toggle=CheckButton.new()
+	export_toggle.text="允许外售富余电力"
+	config.add_child(export_toggle)
+	export_toggle.toggled.connect(func(_value: bool): _capture_intents())
+	UI.action(game._button(config,"应用经营目标",func():
+		if intent_mode.selected>=3:
+			game._notify("先选择经济运行、自给优先或禁用外网。")
+			return
+		if game.sim.has_method("set_operating_intent"):
+			var outcome: Dictionary=game.sim.set_operating_intent(["economic","self_supply","island"][intent_mode.selected],export_toggle.button_pressed)
+			if outcome.get("ok",false): drafts.reset("operating_intent",_effective_intent())
+			_commit(outcome)
+	,Vector2(0,38)))
+	intent_draft=_text(config,"",ORANGE,14)
+	var advanced: Button=game._button(config,"价格阈值与旧版自定义",func(): pass,Vector2(0,34),true)
+	trade_advanced=advanced
+	var details: VBoxContainer=game._column(config,8)
+	details.hide()
+	advanced.toggled.connect(func(value: bool): details.visible=value)
+	policy_mode = _select(details,"运行策略",["离网运行 · 禁用交易","缺电保供 · 只补缺额","经济交易 · 择价购售"])
+	buy_limit = _spin(details,"最高现货买价",0,500,5)
+	sell_floor = _spin(details,"最低外售电价",0,500,5)
+	game._button(details,"应用交易策略",_apply_policy,Vector2(0,37))
+	_draft_controls(details,"trade")
 	var notes := _box(row)
 	game._label(notes,"实际交易与线路约束",18,CREAM)
 	headline.exchange = _text(notes,"",TEAL,18)
+	exchange_gauge=UI.metric(notes,"接口使用",0,1,"MW",TEAL)
 	trade_status = _text(notes,"")
-	_text(notes,"保供模式优先使用本地电源；经济交易按燃气成本、现货报价与储能策略择价购售。")
-	_text(notes,"外网电力经联络站与电缆送达用户。容量、断线及风暴均会限制交付；同一电气岛不会同时购电与售电。")
-	_text(notes,"外售结算价为现货买价的 72%。",ORANGE)
+	_text(notes,"外网容量与线路共同限制实际交付。外售价为现货买价的72%。",MUTED)
 
 func _build_tariff_tab() -> void:
 	var body := _tab("零售电价")
@@ -234,6 +273,7 @@ func _build_tariff_tab() -> void:
 	var readouts: HBoxContainer = game._row(notes,16)
 	headline.retail = _text(readouts,"",TEAL,18)
 	headline.satisfaction = _text(readouts,"",TEAL,18)
+	satisfaction_gauge=UI.metric(notes,"客户满意度",85,100,"%",TEAL)
 	tariff_status = _text(notes,"")
 	_text(notes,"高价会压低住宅与工业的需求。高账单和停电降低满意度，低于 60 后用户逐步流失。医院不减少需求，保持关键负荷优先。")
 	_text(notes,"统一电价使用平价覆盖全天；峰谷和自定方案按上方曲线结算。观察晚高峰购电成本，再决定峰价与储能策略。")
@@ -241,15 +281,36 @@ func _build_tariff_tab() -> void:
 
 func _build_storage_tab() -> void:
 	var body := _tab("储能与锁价合约")
+	graph_hosts.append(body)
 	var row := _split(body)
 	var storage := _box(row)
 	game._label(storage,"储能运行策略",20,CREAM)
-	storage_mode = _select(storage,"电池策略",["保供备用","峰谷套利"])
-	charge_price = _spin(storage,"现货低于此价购电充能",0,500,5)
-	discharge_price = _spin(storage,"现货高于此价释放储能",0,500,5)
-	reserve_soc = _spin(storage,"最低备用电量",0,95,5,"% SOC")
-	game._button(storage,"应用储能策略",_apply_storage,Vector2(0,37))
-	_draft_controls(storage,"storage")
+	storage_intent=_select(storage,"全网默认方案",["保供优先","高峰支援","低买高卖"])
+	storage_intent.add_item("旧版自定义 · 保留当前行为")
+	storage_intent.set_item_disabled(3,true)
+	storage_intent.item_selected.connect(func(_value: int): _capture_intents())
+	intent_reserve=_spin(storage,"有效备用电量",0,90,5,"% SOC")
+	intent_reserve.value_changed.connect(func(_value: float): _capture_intents())
+	game._button(storage,"应用全网储能方案",func():
+		if storage_intent.selected>=3:
+			game._notify("先选择保供优先、高峰支援或低买高卖。")
+			return
+		if game.sim.has_method("set_storage_intent"):
+			var outcome: Dictionary=game.sim.set_storage_intent(["supply","peak","arbitrage"][storage_intent.selected],intent_reserve.value/100.0)
+			if outcome.get("ok",false): drafts.reset("storage_intent",_effective_storage_intent())
+			_commit(outcome)
+	,Vector2(0,38))
+	storage_intent_draft=_text(storage,"",ORANGE,14)
+	var advanced: Button=game._button(storage,"价格阈值与旧版储能自定义",func(): pass,Vector2(0,34),true)
+	var legacy: VBoxContainer=game._column(storage,8)
+	legacy.hide()
+	advanced.toggled.connect(func(value: bool): legacy.visible=value)
+	storage_mode = _select(legacy,"旧版策略",["保供备用","峰谷套利"])
+	charge_price = _spin(legacy,"现货低于此价购电充能",0,500,5)
+	discharge_price = _spin(legacy,"现货高于此价释放储能",0,500,5)
+	reserve_soc = _spin(legacy,"旧版备用电量",0,95,5,"% SOC")
+	game._button(legacy,"应用储能策略",_apply_storage,Vector2(0,37))
+	_draft_controls(legacy,"storage")
 	storage_status = _text(storage,"",MUTED,11)
 	var contract := _box(row)
 	game._label(contract,"12 小时锁价合约",20,CREAM)
@@ -257,6 +318,11 @@ func _build_storage_tab() -> void:
 	contract_mw = _spin(contract,"约定购电功率",1,14,1,"MW")
 	contract_mw.value_changed.connect(func(_value: float): _update_commitment())
 	commitment_label = _text(contract,"",ORANGE,12)
+	commitment_label.add_theme_font_size_override("font_size",22)
+	contract_chart=VisualChart.new()
+	contract_chart.mode="contract"
+	contract_chart.custom_minimum_size=Vector2(0,144)
+	contract.add_child(contract_chart)
 	contract_button = game._button(contract,"签订 12 小时锁价合约",_sign_contract,Vector2(0,37))
 	_text(contract,"按约定功率持续付费，即使用不完、线路故障或主动离网也要付款。合约期内不可撤销；超额用电按现货阈值购买。",ORANGE,11)
 	_text(contract,"合约对冲涨价，也可能错过低价；先判断负荷与风光预测。每次只允许一份有效合约。",MUTED,11)
@@ -265,11 +331,25 @@ func _build_ledger_tab() -> void:
 	var body := _tab("运营结算账本")
 	game._label(body,"逐小时计费，按游戏日归集",18,CREAM)
 	ledger_summary = _text(body,"",TEAL,16)
+	ledger_summary.add_theme_font_size_override("font_size",26)
+	profit_chart=VisualChart.new()
+	profit_chart.mode="profit"
+	profit_chart.custom_minimum_size=Vector2(0,138)
+	body.add_child(profit_chart)
+	game._label(body,"本日收入与成本 · ¥",18,CREAM)
+	waterfall_chart=VisualChart.new()
+	waterfall_chart.mode="waterfall"
+	waterfall_chart.custom_minimum_size=Vector2(0,230)
+	body.add_child(waterfall_chart)
 	var table_scroll := ScrollContainer.new()
+	ledger_details=table_scroll
+	var toggle: Button=game._button(body,"查看账本明细",func(): table_scroll.visible=not table_scroll.visible,Vector2(0,34))
+	toggle.tooltip_text="完整运营科目与购售电量"
 	table_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	table_scroll.custom_minimum_size.y = 110
 	table_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	body.add_child(table_scroll)
+	table_scroll.hide()
 	ledger_grid = GridContainer.new()
 	ledger_grid.columns = 10
 	ledger_grid.add_theme_constant_override("h_separation",12)
@@ -304,6 +384,9 @@ func _sign_contract() -> void:
 	_commit(game.sim.sign_supply_contract(contract_mw.value,12.0))
 
 func _advance() -> void:
+	if game.has_method("advance_management"):
+		game.advance_management(1.0)
+		return
 	game.sim.step(1.0)
 	game._sync_world(true)
 	game._update_hud()
@@ -362,8 +445,11 @@ func refresh(sync_inputs: bool=false) -> void:
 		high = maxf(high,float(point.get("spot",0)))
 	advice.text = "现货参考区间 ¥%.2f–%.2f/MWh\n外售结算价 ¥%.2f/MWh\n预测采用当前天气；风暴可能改变报价。" % [low if is_finite(low) else 0,high,state.get("export_price",0)]
 	var capacity: float = t.get("grid_capacity",0)
+	exchange_gauge.configure("接口使用",maxf(imports,exports),maxf(1,capacity),"MW",TEAL,true,"进口与出口共用容量")
+	satisfaction_gauge.configure("客户满意度",satisfaction,100,"%",TEAL if satisfaction>=60 else ORANGE,true,"低于60会流失客户")
 	connection_label.text = "尚未接入外网。先建设联络站并接线。" if capacity<=0 else "外网可用容量 %.1f MW · 进口与出口共用" % capacity
 	trade_status.text = "当前进口 %.2f MW / 外售 %.2f MW\n现货购电 ¥%.0f/h · 外售收入 ¥%.0f/h" % [imports,exports,t.get("import_cost",0),t.get("export_income",0)]
+	if sim.has_method("operating_reason"): trade_status.text+="\n"+str(sim.operating_reason())
 	tariff_status.text = "当前生效电价 ¥%.0f/MWh\n零售收入 ¥%.0f/h · 失供补偿 ¥%.0f/h\n住宅需求系数 %.0f%% · 工业 %.0f%%" % [state.get("retail_price",145),t.get("retail_income",0),t.get("outage_cost",0),100*sim.market.demand_multiplier("home"),100*sim.market.demand_multiplier("factory")]
 	storage_status.text = "当前储能 %.1f MWh · 净放电 %.2f MW。\n套利会损耗能量；备用比例与电池功率共同限制出力。" % [t.get("battery_mwh",0),t.get("battery_power",0)]
 	var remaining: float = state.get("contract_remaining",0)
@@ -376,8 +462,17 @@ func refresh(sync_inputs: bool=false) -> void:
 		_update_draft_label(section)
 	if not _inputs_ready and contract_mw.value<=1: contract_mw.value=minf(5,contract_mw.max_value)
 	_inputs_ready=true
+	var operating: Dictionary=drafts.retain("operating_intent",_effective_intent())
+	intent_mode.select(int(operating.mode))
+	export_toggle.set_pressed_no_signal(bool(operating.export))
+	var storage_plan: Dictionary=drafts.retain("storage_intent",_effective_storage_intent())
+	storage_intent.select(int(storage_plan.mode))
+	intent_reserve.set_value_no_signal(float(storage_plan.reserve))
+	intent_draft.text="经营目标草案尚未应用" if drafts.dirty("operating_intent") else "✓ 当前经营目标已生效"
+	storage_intent_draft.text="全网方案草案尚未应用" if drafts.dirty("storage_intent") else "✓ 当前全网方案已生效 · 单台可覆盖"
 	_update_commitment()
 	_refresh_ledger()
+	_update_thresholds()
 
 func _draft_controls(parent: Node, section: String) -> void:
 	draft_labels[section]=_text(parent,"",ORANGE,14)
@@ -410,6 +505,7 @@ func _write_section(section: String, value: Dictionary) -> void:
 
 func _capture_drafts() -> void:
 	if not _inputs_ready: return
+	_capture_intents()
 	for section in ["trade","tariff","storage"]:
 		drafts.retain(section,_effective_section(section),_read_section(section))
 		_update_draft_label(section)
@@ -429,7 +525,7 @@ func _update_draft_label(section: String) -> void:
 	draft_labels[section].add_theme_color_override("font_color",ORANGE if not changes.is_empty() else MUTED)
 
 func _has_drafts() -> bool:
-	for section in ["trade","tariff","storage"]:
+	for section in ["trade","tariff","storage","operating_intent","storage_intent"]:
 		if drafts.dirty(section): return true
 	return false
 
@@ -444,6 +540,7 @@ func _update_commitment() -> void:
 		return
 	var price: float = game.sim.market.state.get("contract_quote",0)
 	commitment_label.text = "本次承诺：%.1f MW × 12h × ¥%.2f\n合计约 ¥%s，无论实际用电量都需支付。" % [contract_mw.value,price,game._number(contract_mw.value*12*price)]
+	contract_chart.set_snapshot({"mw":contract_mw.value,"hours":12.0,"max":maxf(1,float(game.sim.totals.get("grid_capacity",0)))})
 
 func _refresh_ledger() -> void:
 	var signature := str(game.sim.market.ledger)+str(game.sim.day)
@@ -455,6 +552,13 @@ func _refresh_ledger() -> void:
 		var heading: Label = game._label(ledger_grid,title,11,MUTED)
 		heading.custom_minimum_size.x = 104
 	var entries: Array = game.sim.market.ledger
+	profit_chart.set_snapshot({"entries":entries.slice(maxi(0,entries.size()-14))})
+	var waterfall_rows: Array=[]
+	if not entries.is_empty():
+		var day: Dictionary=entries[-1]
+		for spec in [["retail_revenue","零售",1],["export_revenue","外售",1],["import_cost","购电",-1],["contract_cost","合约",-1],["fuel_cost","燃料",-1],["maintenance_cost","运维",-1],["outage_cost","失供",-1]]:
+			waterfall_rows.append({"label":spec[1],"value":float(day.get(spec[0],0))*float(spec[2])})
+	waterfall_chart.set_snapshot({"rows":waterfall_rows})
 	if entries.is_empty():
 		ledger_summary.text = "尚无结算。返回运营或推进一小时，开始积累账单。"
 		return
@@ -467,3 +571,33 @@ func _refresh_ledger() -> void:
 		for j in range(values.size()):
 			game._label(ledger_grid,values[j],12,TEAL if j==8 and float(entry.get("net",0))>=0 else CREAM)
 	ledger_summary.text = "最近 %d 个游戏日累计运营净收益  ¥%s · 当前第 %d 天" % [entries.size(),game._number(total_net),game.sim.day]
+
+func _update_thresholds() -> void:
+	if forecast_chart==null or game==null or tabs==null: return
+	var state: Dictionary=game.sim.market.state
+	var lines: Array=[]
+	var storage: bool=tabs.current_tab==2
+	var active_buy: float=float(state.get("charge_price",60)) if storage else float(state.get("buy_limit",120))
+	var active_sell: float=float(state.get("discharge_price",150)) if storage else float(state.get("sell_floor",90))
+	var draft_buy: float=charge_price.value if storage else buy_limit.value
+	var draft_sell: float=discharge_price.value if storage else sell_floor.value
+	lines.append({"label":"充能阈值" if storage else "买价上限","value":active_buy,"color":TEAL})
+	lines.append({"label":"放电阈值" if storage else "外售底价","value":active_sell,"color":ORANGE})
+	if not is_equal_approx(active_buy,draft_buy): lines.append({"label":"充能" if storage else "买价","value":draft_buy,"color":TEAL,"draft":true})
+	if not is_equal_approx(active_sell,draft_sell): lines.append({"label":"放电" if storage else "外售","value":draft_sell,"color":ORANGE,"draft":true})
+	forecast_chart.set_thresholds(lines if tabs.current_tab!=1 else [])
+
+func _effective_intent() -> Dictionary:
+	var policy: Dictionary=game.sim.operating_policy() if game.sim.has_method("operating_policy") else {"intent":"self_supply","allow_export":false}
+	return {"mode":maxi(0,["economic","self_supply","island","legacy_custom"].find(str(policy.get("intent","self_supply")))),"export":bool(policy.get("allow_export",false))}
+
+func _effective_storage_intent() -> Dictionary:
+	var policy: Dictionary=game.sim.storage_status(-1) if game.sim.has_method("storage_status") else {"intent":"supply"}
+	return {"mode":maxi(0,["supply","peak","arbitrage","legacy_custom"].find(str(policy.get("intent","supply")))),"reserve":float(policy.get("reserve_soc",.2))*100}
+
+func _capture_intents() -> void:
+	if not _inputs_ready: return
+	drafts.retain("operating_intent",_effective_intent(),{"mode":intent_mode.selected,"export":export_toggle.button_pressed})
+	drafts.retain("storage_intent",_effective_storage_intent(),{"mode":storage_intent.selected,"reserve":intent_reserve.value})
+	if intent_draft!=null: intent_draft.text="经营目标草案尚未应用" if drafts.dirty("operating_intent") else "✓ 当前经营目标已生效"
+	if storage_intent_draft!=null: storage_intent_draft.text="全网方案草案尚未应用" if drafts.dirty("storage_intent") else "✓ 当前全网方案已生效 · 单台可覆盖"

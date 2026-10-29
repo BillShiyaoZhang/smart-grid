@@ -115,14 +115,14 @@ func _run() -> void:
 	root.size=Vector2i(1440,900); game.preferences.ui_scale=1.0; game._apply_preferences()
 	planning.tabs.current_tab=1; planning.facility_modes.current_tab=1
 	for frame in range(5): await process_frame
-	check(planning.comparison_grid.columns==3 and planning.comparison_grid.get_child_count()==3,"wide comparison shows three facility cards in three columns")
+	check(planning.comparison_chart.is_visible_in_tree() and planning.comparison_chart.snapshot.items.size()==3,"wide comparison exposes three alternatives on metric-first common scales")
 	var battery_card: Control=planning.comparison_cards.battery
 	var pumped_card: Control=planning.comparison_cards.pumped_storage
-	check(pumped_card.get_global_rect().position.x>battery_card.get_global_rect().end.x,"wide cards render side by side rather than sequential prose")
+	check(planning.comparison_chart.snapshot.metrics[0].max==24 and planning.comparison_chart.snapshot.metrics[1].max==20,"power and nominal duration use one actual maximum across alternatives")
 	check("基础维护" in labels(battery_card) and "88%" in labels(battery_card) and "180 MWh" in labels(pumped_card),"comparison exposes uniform maintenance efficiency and energy metrics")
 	root.size=Vector2i(1280,720); game.preferences.ui_scale=1.5; game._apply_preferences()
 	for frame in range(5): await process_frame
-	check(planning.comparison_grid.columns==1 and pumped_card.get_global_rect().position.y>battery_card.get_global_rect().position.y,"narrow logical viewport stacks the same comparison cards")
+	check(planning.comparison_chart.snapshot.items.size()==3 and planning.comparison_grid.columns==3,"narrow logical viewport retains the same alternatives together per metric")
 	root.size=Vector2i(1440,900); game.preferences.ui_scale=1.0; game._apply_preferences()
 	market.reset_session(); market.refresh(true)
 	digital.reset_session(); digital.refresh(true)

@@ -7,7 +7,8 @@ extends RefCounted
 signal changed
 signal event_logged(entry: Dictionary)
 
-const SCHEMA_VERSION := 6
+const SCHEMA_VERSION := 7
+const ManagementModel = preload("res://scripts/sim/management_model.gd")
 const CampaignModel = preload("res://scripts/sim/campaign.gd")
 const ScenarioMap = preload("res://scripts/sim/scenario_map.gd")
 const MarketModel = preload("res://scripts/sim/power_market.gd")
@@ -41,6 +42,7 @@ var digital: RefCounted = DigitalModel.new()
 var evolution: RefCounted = EvolutionModel.new()
 var region: RefCounted = RegionModel.new()
 var campaign: RefCounted = CampaignModel.new()
+var management: RefCounted = ManagementModel.new()
 var _scenario_map_id := 0
 var _scenario_map: Dictionary = {}
 var catalog: Dictionary = CATALOG.merged(EvolutionModel.EXTRA_CATALOG)
@@ -90,6 +92,7 @@ func _init() -> void:
 
 func reset(seed_value: int = 42) -> void:
 	campaign = CampaignModel.new()
+	management.reset()
 	_scenario_map_id = 0
 	_scenario_map = {}
 	initial_seed = seed_value
@@ -141,7 +144,7 @@ func reset(seed_value: int = 42) -> void:
 		_add_line(endpoints[0], endpoints[1])
 	objectives = [
 		{"id": "industry", "title": "点亮海湾", "description": "把工业园区接入电网，并为全城提供至少 98% 的电力。", "reward": 12000, "done": false, "progress": 0.0},
-		{"id": "renewable", "title": "绿色转型", "description": "拥有至少 3 座风电或光伏设施，可再生能源供电占比达到 35%。", "reward": 18000, "done": false, "progress": 0.0},
+		{"id": "renewable", "title": "绿色转型", "description": "拥有至少3座风电或光伏设施，可再生发电占当前总供给（含进口及储能放电）至少35%。", "reward": 18000, "done": false, "progress": 0.0},
 		{"id": "smart", "title": "可观测的城市", "description": "完成两级智能电网研究，解锁遥测和自动恢复。", "reward": 20000, "done": false, "progress": 0.0},
 		{"id": "resilience", "title": "风暴之后", "description": "经历一次风暴，并修复所有故障线路、恢复至少 98% 的供电。", "reward": 25000, "done": false, "progress": 0.0}
 	]
@@ -358,6 +361,8 @@ func repair(id: int) -> Dictionary:
 		return _fail("资金不足。")
 	cash -= 1200.0
 	building.repair_remaining = 0.65
+	building.repair_started_at=elapsed_hours
+	building.repair_duration=0.65
 	building.online = false
 	_log("维修队前往%s，预计 39 游戏分钟完成检修。" % building.name, "info")
 	_refresh()
@@ -382,6 +387,8 @@ func repair_line(id: int) -> Dictionary:
 		return _fail("资金不足。")
 	cash -= 900.0
 	line.repair_remaining = 0.6 if located else 1.1
+	line.repair_started_at=elapsed_hours
+	line.repair_duration=float(line.repair_remaining)
 	line.closed = false
 	_log("维修队已出发，预计 %s 游戏分钟完成%s。" % ["36" if located else "66", "精准抢修" if located else "巡检与抢修"], "info")
 	_refresh()
@@ -505,12 +512,130 @@ func map_spec() -> Dictionary:
 	return _scenario_map
 
 func feature_enabled(feature: String) -> bool:
-	return campaign.allows(feature)
+	return campaign.allows(feature) and management.allows(feature)
 
 func can_build(kind: String) -> Dictionary:
 	if not campaign.can_build(kind):
 		return _fail("本关未开放这类设施，请查看当前任务与时代档案。")
+	if not management.can_build(kind): return _fail("先完成当前经营任务；这一类设施将在后续阶段开放。")
 	return evolution.can_build(kind)
+
+func start_management_game(seed_value: int=42) -> Dictionary:
+	reset(seed_value)
+	management.start(self)
+	_refresh()
+	return _ok("经营路线已开始：先接通工业园，再逐步了解昼夜、成本、备用与城市扩张。")
+
+func management_status() -> Dictionary:
+	return management.status(self)
+
+func prepare_first_storm() -> Dictionary:
+	var result: Dictionary=management.prepare_storm(self)
+	if result.ok: _refresh()
+	return result
+
+func operating_snapshot() -> Dictionary:
+	var public_totals: Dictionary={}
+	for key in ["demand","generation","served","renewable_supply_share","renewable_share","reliability","income","expenses","retail_income","export_income","import_cost","contract_cost","fuel_cost","maintenance_cost","outage_cost","import_mw","export_mw","market_price","retail_price","satisfaction","charging_mw","battery_mwh","battery_power","carbon","crews_busy","reliability_lifetime","storm_in","grid_capacity"]:
+		if totals.has(key): public_totals[key]=totals[key]
+	return {"elapsed_hours":elapsed_hours,"day":day,"time_hours":time_hours,"weather":weather,
+		"cash":cash,"totals":public_totals,"management":management_status(),"source":"公开运营汇总",
+		"operating_policy":operating_policy(),"operating_reason":operating_reason(),"history":management.state.history.duplicate(true)}
+
+func operating_reason() -> String:
+	var policy:=operating_policy()
+	if not bool(policy.enabled): return "外网交换已禁用，当前使用本地电源和储能。"
+	if float(totals.get("grid_capacity",0))<=0: return "尚无可用外网接口；现货策略等待联络站接入。"
+	if float(market.state.spot_price)>float(market.state.buy_limit): return "现货买价高于生效阈值，当前不追加现货采购。"
+	if float(totals.get("import_mw",0))>0.000001: return "经济调度在实际可交付范围内采购电力。" if policy.economic else "本地电源优先，外网补足可交付缺额。"
+	if float(totals.get("export_mw",0))>0.000001: return "已允许外售，实际交付受报价、线路和接口容量共同限制。"
+	return "当前没有外网交付；等待需求、价格或可交付能力变化。"
+
+func next_event_hours(max_hours: float=1.0) -> float:
+	# Only known schedules and accepted work are considered. Never reveal a hidden attack.
+	var duration:=clampf(max_hours,0.001,24.0)
+	for queue in [digital.pending_commands,digital.field_jobs]:
+		for job in queue:
+			if float(job.remaining)>0.000001: duration=minf(duration,float(job.remaining))
+	for item in buildings+lines+digital.links:
+		if float(item.get("repair_remaining",0))>0.000001: duration=minf(duration,float(item.repair_remaining))
+	for building in buildings:
+		var observed:=facility_observation(int(building.id))
+		if bool(observed.trusted) and "启动" in str(observed.get("status","")) and float(building.get("startup_remaining",0))>0.000001:
+			duration=minf(duration,float(building.startup_remaining))
+	if not evolution.project.is_empty() and float(evolution.remaining_hours)>0.000001: duration=minf(duration,float(evolution.remaining_hours))
+	if storm_warning_sent and next_storm_at>elapsed_hours: duration=minf(duration,next_storm_at-elapsed_hours)
+	if storm_active: duration=minf(duration,maxf(0.001,storm_remaining))
+	if float(market.state.contract_remaining)>0.000001: duration=minf(duration,float(market.state.contract_remaining))
+	if management.state.active and int(management.state.stage)<5:
+		duration=minf(duration,maxf(0.001,float(management_status().remaining_hours)))
+	return duration
+
+func operating_policy() -> Dictionary:
+	var intent:=str(management.state.operating_intent)
+	if intent=="legacy_custom":
+		return {"intent":intent,"enabled":market.state.market_mode!="off","economic":market.state.market_mode=="trade","allow_export":market.state.market_mode=="trade"}
+	return {"intent":intent,"enabled":intent!="island","economic":intent=="economic","allow_export":bool(management.state.allow_export) and intent!="island"}
+
+func set_operating_intent(intent: String, allow_export: bool=false) -> Dictionary:
+	if not feature_enabled("market"): return _fail("当前阶段尚未开放市场经营。")
+	if intent not in ["economic","self_supply","island"]: return _fail("未知经营意图。")
+	management.state.operating_intent=intent
+	management.state.allow_export=allow_export
+	_refresh()
+	return _ok("经营意图已生效；外售许可独立于经济调度。")
+
+func storage_dispatch_policy(building: Dictionary) -> Dictionary:
+	var local:=str(building.get("storage_intent","inherit"))
+	var inherited:=local=="inherit"
+	var intent:=str(management.state.storage_intent) if inherited else local
+	var reserve: float=float(management.state.storage_reserve) if inherited else float(building.get("storage_reserve",0.2))
+	if intent=="legacy_custom": reserve=maxf(float(building.get("reserve_soc",0)),float(market.state.reserve_soc) if market.state.storage_mode=="arbitrage" else 0.0)
+	return {"intent":intent,"reserve_soc":reserve,"reserve":reserve,"inherited":inherited,"inherit":inherited,
+		"legacy_custom":intent=="legacy_custom","peak_hour":float(building.get("peak_hour",17)),
+		"charge_price":float(market.state.charge_price),"discharge_price":float(market.state.discharge_price)}
+
+func storage_status(id: int) -> Dictionary:
+	if id<0:
+		var reserve: float=float(market.state.reserve_soc) if management.state.storage_intent=="legacy_custom" else float(management.state.storage_reserve)
+		return {"intent":str(management.state.storage_intent),"reserve_soc":reserve,"reserve":reserve,
+			"inherited":false,"inherit":false,"legacy_custom":management.state.storage_intent=="legacy_custom","known":true,"reason":"全网默认；单台覆盖设置不受此项改动影响。",
+			"peak_hour":17.0,"charge_price":float(market.state.charge_price),"discharge_price":float(market.state.discharge_price)}
+	var building:=get_building(id)
+	if building.is_empty() or not evolution.is_storage(str(building.kind)): return {}
+	var result:=storage_dispatch_policy(building)
+	var observed:=facility_observation(id)
+	result.known=bool(observed.trusted)
+	result.reason="尚无新鲜可信观测；当前充放电原因需要先核实。"
+	result.charging=observed.get("charging")
+	result.output=observed.get("output")
+	result.energy=observed.get("energy")
+	result.duration_hours=null
+	if not bool(building.get("enabled",true)): result.reason="运行许可已关闭。"
+	elif result.known:
+		var floor_energy:=float(building.energy_capacity)*float(result.reserve_soc)
+		if observed.get("charging")!=null and float(observed.charging)>0.000001: result.reason="正在吸收可交付富余电力。"
+		elif float(observed.output)>0.000001:
+			result.reason="正在向负荷交付电力。"
+			result.duration_hours=maxf(0,float(observed.energy)-floor_energy)*evolution.storage_efficiency(building)/float(observed.output)
+		elif observed.get("charging")==null: result.reason="旧记录缺少充电功率；需刷新可信测量后判断充放电状态。"
+		elif float(observed.energy)<=floor_energy+0.000001: result.reason="已到有效备用电量下限。"
+		elif result.legacy_custom and building.get("storage_mode","auto")=="hold": result.reason="旧版自定义处于保留电量状态，两个方向均暂停。"
+		elif result.intent=="peak" and not digital.control_reachable(self,id): result.reason="协同通信不可用，当前退回本地保供。"
+		elif result.intent=="peak" and fposmod(time_hours-float(result.peak_hour),24)>=4: result.reason="尚未进入削峰窗口，等待充电或负荷变化。"
+		else: result.reason="等待可交付富余电力、负荷或价格条件。"
+	return result
+
+func set_storage_intent(intent: String, reserve: float=0.2, building_id: int=-1, method: String="field") -> Dictionary:
+	if intent not in ["inherit","supply","peak","arbitrage","legacy_custom"] or not _saved_number(reserve,0,0.9): return _fail("请选择保供、削峰或套利，备用电量范围0—90%。")
+	if intent=="peak" and (not feature_enabled("storage_control") or not evolution.has_technology("smart_storage")): return _fail("削峰意图需要储能协同研究与本阶段能力。")
+	if intent=="arbitrage" and not feature_enabled("market"): return _fail("套利需要开放市场经营。")
+	if building_id>=0: return configure_facility(building_id,{"storage_intent":intent,"storage_reserve":reserve},method)
+	if intent=="inherit": return _fail("全网策略不能继承自身。")
+	management.state.storage_intent=intent
+	management.state.storage_reserve=reserve
+	_refresh()
+	return _ok("全网储能默认意图已生效；采用单机覆盖的设施保留各自设置。")
 
 func start_campaign(chapter_id: int = 1) -> Dictionary:
 	if chapter_id < 1 or chapter_id > 15:
@@ -613,6 +738,30 @@ func expand_region() -> Dictionary:
 		_refresh()
 	return result
 
+func explore_region() -> Dictionary:
+	if campaign.active: return _fail("战役使用本章区域，城市扩张位于自由经营。")
+	if management.state.active and int(management.state.stage)<4: return _fail("先完成备用与风暴恢复，再逐城拓展服务。")
+	var result: Dictionary=region.activate(self,true)
+	if result.ok:
+		_log(result.message,"success")
+		_refresh()
+	return result
+
+func plan_city(id: int) -> Dictionary:
+	var result: Dictionary=region.plan_city(id)
+	if result.ok: _refresh()
+	return result
+
+func start_city_service(id: int) -> Dictionary:
+	var result: Dictionary=region.start_service(self,id)
+	if result.ok:
+		_log(result.message,"success")
+		_refresh()
+	return result
+
+func customer_service_active(id: int) -> bool:
+	return region.service_active(get_building(id))
+
 func sandbox_goals() -> Array[Dictionary]:
 	var definitions: Array[Dictionary] = [
 		{"id": "regional", "name": "区域电力共同体", "description": "至少四座城市达到 98% 供电，并保持全网可靠率 ≥98%，连续运营 24 小时。"},
@@ -623,6 +772,8 @@ func sandbox_goals() -> Array[Dictionary]:
 		var required := 12.0 if goal.id == "clean" else 24.0
 		goal.complete = goal.id in completed_sandbox_goals
 		goal.progress = 1.0 if goal.complete else (clampf(sandbox_goal_hours / required, 0.0, 1.0) if sandbox_goal == goal.id else 0.0)
+		goal.best_hours=float(management.state.sandbox_best.get(goal.id,0))
+		goal.interruption=str(management.state.sandbox_interruption) if sandbox_goal==goal.id else ""
 	return definitions
 
 func set_sandbox_goal(id: String) -> Dictionary:
@@ -633,6 +784,7 @@ func set_sandbox_goal(id: String) -> Dictionary:
 		return _ok("已在追踪此目标，持续运营记录保留。")
 	sandbox_goal = id
 	sandbox_goal_hours = 0.0
+	management.state.sandbox_interruption=""
 	changed.emit()
 	return _ok("目标已设定；连续达标计时会在条件失效时重新开始。")
 
@@ -649,7 +801,17 @@ func _advance_sandbox_goal(dt: float) -> void:
 			qualifies = qualifies and region.active and supplied >= 4
 		"clean": qualifies = qualifies and float(totals.get("renewable_supply_share",0.0)) >= 0.7
 		"profitable": qualifies = qualifies and float(totals.income) > float(totals.expenses)
-	sandbox_goal_hours = sandbox_goal_hours + dt if qualifies else 0.0
+	if qualifies:
+		sandbox_goal_hours+=dt
+		management.state.sandbox_best[sandbox_goal]=maxf(float(management.state.sandbox_best.get(sandbox_goal,0)),sandbox_goal_hours)
+		management.state.sandbox_interruption=""
+	else:
+		if sandbox_goal_hours>0.000001:
+			var reason:="供电率或实际需求未达标"
+			if float(totals.reliability)>=0.98 and float(totals.demand)>1:
+				reason={"regional":"可靠服务城市不足四座","clean":"实际清洁供电不足70%","profitable":"运营净收益未为正"}.get(sandbox_goal,reason)
+			management.state.sandbox_interruption=reason+"；计时重新开始，最佳纪录已保留。"
+		sandbox_goal_hours=0.0
 	var required := 12.0 if sandbox_goal == "clean" else 24.0
 	if sandbox_goal_hours + 0.000001 >= required:
 		completed_sandbox_goals.append(sandbox_goal)
@@ -750,6 +912,7 @@ func demand_response() -> Dictionary:
 	return _ok("需求响应已启动。")
 
 func trigger_storm() -> Dictionary:
+	if management.state.active and not management.state.first_storm_prepared: return _fail("请先完成经营准备，再确认首次风暴；确认后有1游戏小时预警。")
 	if campaign.active: return _fail("战役灾害由当前教学阶段安排，请使用任务中的开始考核。")
 	if storm_active:
 		return _fail("风暴仍在持续。")
@@ -887,6 +1050,7 @@ func _tick(dt: float) -> void:
 		restored_storms = storm_count
 		_log("全网供电已恢复。环网、储能与快速抢修让城市更有韧性。", "success")
 	_update_objectives()
+	management.advance(self,dt)
 	campaign.advance(self, dt)
 	if contract_was_active and float(market.state.contract_remaining) <= 0.0:
 		_log("固定供电合约已履行完毕，可按新报价签订下一份合约。", "info")
@@ -899,6 +1063,7 @@ func _tick(dt: float) -> void:
 func _update_storm_schedule() -> void:
 	# A fixed forecast is independent of random damage selection, so weather
 	# remains reproducible even when the player runs a manual emergency drill.
+	if management.state.active and not management.state.first_storm_prepared: return
 	if not storm_warning_sent and elapsed_hours + 0.000001 >= next_storm_at - 1.0:
 		storm_warning_sent = true
 		_log("气象预警：约 1 游戏小时后强风将抵达海湾，请检查备用路径与维修队。", "warning")
@@ -958,6 +1123,7 @@ func set_market_policy(mode: String, buy_limit: float = 120.0, sell_floor: float
 	if not feature_enabled("market"): return _fail("本关未开放现货购售电策略。")
 	var result: Dictionary = market.set_policy(mode, buy_limit, sell_floor)
 	if result.ok:
+		management.state.operating_intent="legacy_custom"
 		record_campaign_action("market", -1, {"kind":"policy","operation":"policy"})
 		_log(result.message, "info")
 		_refresh()
@@ -967,6 +1133,8 @@ func set_storage_policy(mode: String, charge_price: float = 60.0, discharge_pric
 	if not feature_enabled("market"): return _fail("本关未开放市场储能套利策略。")
 	var result: Dictionary = market.set_storage(mode, charge_price, discharge_price, reserve)
 	if result.ok:
+		management.state.storage_intent="legacy_custom"
+		management.state.storage_reserve=reserve
 		record_campaign_action("market", -1, {"kind":"storage","operation":"storage"})
 		_log(result.message, "info")
 		_refresh()
@@ -1009,7 +1177,7 @@ func _update_market_prices(pricing_day: int, pricing_hour: float) -> void:
 
 func _solve(dt: float) -> void:
 	_update_market_prices(_pricing_day if _pricing_day >= 0 else day, _pricing_hour if _pricing_hour >= 0.0 else time_hours)
-	_contract_budget = float(market.state.contract_mw) if float(market.state.contract_remaining) > 0.0 and market.state.market_mode != "off" else 0.0
+	_contract_budget = float(market.state.contract_mw) if float(market.state.contract_remaining) > 0.0 and bool(operating_policy().enabled) else 0.0
 	var adjacency := {}
 	for building in buildings:
 		adjacency[int(building.id)] = []
@@ -1097,7 +1265,13 @@ func _solve(dt: float) -> void:
 	var import_cost := maxf(0.0, import_mw - contract_delivered) * float(market.state.spot_price)
 	var contract_cost := float(market.state.contract_mw) * float(market.state.contract_price) if float(market.state.contract_remaining) > 0.0 else 0.0
 	var comm: Dictionary = digital.summarize(self)
-	var maintenance_cost: float = float(buildings.size()) * 9.0 + float(lines.size()) * 2.0 + float(comm.communication_cost) + float(comm.security_cost) + evolution.operating_cost(self)
+	var billable_buildings:=0
+	var billable_lines:=0
+	for building in buildings:
+		if region.billable_building(building): billable_buildings+=1
+	for line in lines:
+		if region.billable_building(get_building(int(line.a))) or region.billable_building(get_building(int(line.b))): billable_lines+=1
+	var maintenance_cost: float = float(billable_buildings) * 9.0 + float(billable_lines) * 2.0 + float(comm.communication_cost) + float(comm.security_cost) + evolution.operating_cost(self)
 	var max_loading := 0.0
 	for line in lines:
 		max_loading = maxf(max_loading, absf(float(line.flow)) / maxf(0.1, float(line.capacity)))
@@ -1147,7 +1321,8 @@ func _discharge_batteries(batteries: Array[Dictionary], requested: float, dt: fl
 			continue
 		if not evolution.storage_can_discharge(self, battery):
 			continue
-		var reserve := maxf(float(battery.get("reserve_soc", 0.0)), float(market.state.reserve_soc) if preserve_reserve else 0.0)
+		var policy:=storage_dispatch_policy(battery)
+		var reserve: float=float(policy.reserve_soc) if not policy.legacy_custom else maxf(float(battery.get("reserve_soc", 0.0)), float(market.state.reserve_soc) if preserve_reserve else 0.0)
 		var floor_energy := float(battery.energy_capacity) * reserve
 		var energy_power: float = maxf(0.0, float(battery.energy) - floor_energy) * evolution.storage_efficiency(battery) / interval
 		var rated: float = float(battery.capacity) * evolution.storage_power_factor(self, battery)
@@ -1248,7 +1423,7 @@ func _fault_count() -> int:
 	return count
 
 func _update_objectives() -> void:
-	if campaign.active: return
+	if campaign.active or management.state.active: return
 	var renewable_count := 0
 	var industry_powered := false
 	for building in buildings:
@@ -1313,6 +1488,7 @@ func snapshot() -> Dictionary:
 		"market": market.snapshot(), "digital": digital.snapshot(),
 		"evolution": evolution.snapshot(), "region": region.snapshot(),
 		"campaign": campaign.snapshot(),
+		"management": management.snapshot(),
 		"sandbox_goal": sandbox_goal, "sandbox_goal_hours": sandbox_goal_hours,
 		"completed_sandbox_goals": completed_sandbox_goals.duplicate()}
 
@@ -1342,6 +1518,8 @@ func load_game(path: String = "user://bay_grid_save.json") -> Dictionary:
 	var restored_evolution: RefCounted = EvolutionModel.new()
 	var restored_region: RefCounted = RegionModel.new()
 	var restored_campaign: RefCounted = CampaignModel.new()
+	var restored_management: RefCounted = ManagementModel.new()
+	if int(data.schema_version)>=7: restored_management.load_snapshot(data.management)
 	if int(data.schema_version) >= 6 and not restored_campaign.load_snapshot(data.campaign):
 		return _fail("战役存档数据不完整，当前游戏未改变。")
 	if int(data.schema_version) >= 4:
@@ -1364,6 +1542,9 @@ func load_game(path: String = "user://bay_grid_save.json") -> Dictionary:
 		restored.renewable_energy_mwh = 0.0 if int(data.schema_version)<5 else float(restored.renewable_energy_mwh)
 		restored.renewable_served_mw = 0.0
 		restored_evolution.initialize_building(restored)
+		if int(data.schema_version)<7:
+			restored.storage_intent="legacy_custom"
+			restored.storage_reserve=0.2
 		buildings.append(restored)
 	lines.clear()
 	for item in data.lines:
@@ -1374,9 +1555,16 @@ func load_game(path: String = "user://bay_grid_save.json") -> Dictionary:
 	market = restored_market
 	evolution = restored_evolution
 	region = restored_region
+	if int(data.schema_version)<7:
+		for city in region.cities:
+			city.service_phase="active"
+			city.erase("role_effects")
+			city.erase("initial_demand_scale")
 	campaign = restored_campaign
+	management = restored_management
 	sandbox_goal = str(data.get("sandbox_goal", ""))
 	sandbox_goal_hours = float(data.get("sandbox_goal_hours", 0.0))
+	if int(data.schema_version)<7 and not sandbox_goal.is_empty(): management.state.sandbox_best[sandbox_goal]=sandbox_goal_hours
 	completed_sandbox_goals.clear()
 	for goal in data.get("completed_sandbox_goals", []):
 		completed_sandbox_goals.append(str(goal))
@@ -1411,6 +1599,7 @@ func load_game(path: String = "user://bay_grid_save.json") -> Dictionary:
 	for item in data.objectives:
 		var restored_objective: Dictionary = item.duplicate(true)
 		restored_objective.reward = int(restored_objective.reward)
+		if not management.state.active and restored_objective.id=="renewable": restored_objective.description="拥有至少3座风电或光伏设施，可再生发电占当前总供给（含进口及储能放电）至少35%。"
 		objectives.append(restored_objective)
 	log_entries.clear()
 	for item in data.log_entries:
@@ -1435,10 +1624,14 @@ func _valid_save(data: Dictionary) -> bool:
 		return false
 	if int(data.schema_version) >= 6 and not CampaignModel.valid_snapshot(data.get("campaign")):
 		return false
+	if int(data.schema_version)>=7:
+		if not ManagementModel.valid_snapshot(data.get("management"),float(data.get("elapsed_hours",-1))): return false
+		if bool(data.management.active) and bool(data.campaign.get("active",false)): return false
 	for key in ["buildings", "lines", "objectives", "log_entries"]:
 		if not data.get(key) is Array:
 			return false
-	if data.buildings.size() > 512 or data.lines.size() > 2000 or data.objectives.size() > 4 or data.log_entries.size() > 40:
+	var managed: bool=int(data.schema_version)>=7 and bool(data.get("management",{}).get("active",false))
+	if data.buildings.size() > 512 or data.lines.size() > 2000 or data.objectives.size() > (5 if managed else 4) or data.log_entries.size() > 40:
 		return false
 	if not _saved_number(data.get("cash"), -1e15, 1e15) or not _saved_number(data.get("time_hours"), 0.0, 24.0) or float(data.time_hours) >= 24.0:
 		return false
@@ -1488,6 +1681,7 @@ func _valid_save(data: Dictionary) -> bool:
 			return false
 		if float(building.energy) > float(building.energy_capacity) + 0.00001 or not building.get("online") is bool or not building.get("powered") is bool:
 			return false
+		if not _valid_repair_timing(building,float(data.elapsed_hours)): return false
 		if int(data.schema_version)>=5:
 			if building.get("ownership") not in ["player","municipal"]: return false
 			for key in ["invested_capital","refund_basis","renewable_energy_mwh"]:
@@ -1525,6 +1719,7 @@ func _valid_save(data: Dictionary) -> bool:
 		for key in ["heat", "repair_remaining"]:
 			if not _saved_number(line.get(key), 0.0, 1000000.0):
 				return false
+		if not _valid_repair_timing(line,float(data.elapsed_hours)): return false
 	if int(data.next_line_id) <= maximum_line_id:
 		return false
 	if int(data.schema_version) >= 6 and bool(data.campaign.get("active",false)):
@@ -1547,11 +1742,18 @@ func _valid_save(data: Dictionary) -> bool:
 		for key in ["id", "title", "description"]:
 			if not objective.get(key) is String:
 				return false
-		if objective.id not in ["industry", "renewable", "smart", "resilience"] or objective_ids.has(objective.id):
+		if objective.id not in (["industry", "renewable", "smart", "resilience","regional"] if managed else ["industry", "renewable", "smart", "resilience"]) or objective_ids.has(objective.id):
 			return false
 		objective_ids[objective.id] = true
 		if not objective.get("done") is bool or not _saved_number(objective.get("progress"), 0.0, 1.0) or not _saved_integer(objective.get("reward"), 0, 1000000):
 			return false
+	if managed:
+		if data.objectives.size()!=5: return false
+		if int(data.management.stage)<3 and bool(data.management.first_storm_prepared): return false
+		if int(data.management.stage)>=4 and not bool(data.management.first_storm_prepared): return false
+		var sequence: Array=["industry","renewable","smart","resilience","regional"]
+		for index in 5:
+			if data.objectives[index].id!=sequence[index] or bool(data.objectives[index].done)!=(index<int(data.management.stage)): return false
 	for entry in data.log_entries:
 		if not entry is Dictionary:
 			return false
@@ -1583,6 +1785,10 @@ func _valid_save(data: Dictionary) -> bool:
 
 func _saved_number(value: Variant, minimum: float, maximum: float) -> bool:
 	return (value is int or value is float) and is_finite(float(value)) and float(value) >= minimum and float(value) <= maximum
+
+func _valid_repair_timing(item: Dictionary, elapsed: float) -> bool:
+	if not item.has("repair_duration") and not item.has("repair_started_at"): return true
+	return _saved_number(item.get("repair_duration"),0.000001,100) and _saved_number(item.get("repair_started_at"),0,elapsed+0.00001) and float(item.get("repair_remaining",0))<=float(item.repair_duration)+0.00001
 
 func _saved_integer(value: Variant, minimum: int, maximum: int) -> bool:
 	return _saved_number(value, float(minimum), float(maximum)) and float(value) == floorf(float(value))

@@ -97,7 +97,7 @@ func _run() -> void:
 	check(is_equal_approx(float(game.sim.elapsed_hours),before+0.25),"explicit advance executes fifteen game minutes inside modal")
 	key(KEY_ESCAPE)
 	check(not desk.visible and not game._modal_open(),"Escape closes digital operations modal")
-	press(game.root_ui,"电网 N")
+	game.hud.center_buttons.network.pressed.emit()
 	check(desk.visible and desk.tabs.get_tab_count() == 4 and desk.cards.has("observed") and desk.cards.has("trusted"),"navigation opens four digital tabs with distinct path and observation indicators")
 	var pure_snapshot: Dictionary = game.sim.snapshot().duplicate(true)
 	for i in 4:

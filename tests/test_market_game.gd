@@ -91,10 +91,10 @@ func _run() -> void:
 	check(is_equal_approx(float(game.sim.elapsed_hours),before_hours),"market planning pauses automatic simulation time")
 	key(KEY_ESCAPE)
 	check(not desk.visible and not game._modal_open(),"Escape returns to grid")
-	press(game.root_ui,"市场 M")
+	game.hud.center_buttons.market.pressed.emit()
 	check(desk.visible,"top navigation opens market")
 	desk.close()
-	press(game.root_ui,"市场 M")
+	game.hud.center_buttons.market.pressed.emit()
 	check(desk.visible,"market ticker opens trading desk")
 	check(desk.tabs.get_tab_count() == 4 and desk.headline.size() == 5,"four market tabs and five live indicators are available")
 	check(desk.forecast_chart.points.size() == 24,"forecast chart contains twenty-four actual market quotes")
@@ -104,7 +104,7 @@ func _run() -> void:
 	desk.tabs.current_tab = 1
 	check(desk.forecast_chart.is_visible_in_tree(),"tariff page shows reference prices beside the tariff decision")
 	desk.tabs.current_tab = 2
-	check(not desk.forecast_chart.is_visible_in_tree(),"storage and contract decisions do not carry an unrelated price chart")
+	check(desk.forecast_chart.is_visible_in_tree(),"storage decisions show reference prices and charge/discharge thresholds")
 	desk.tabs.current_tab = 3
 	check(not desk.forecast_chart.is_visible_in_tree(),"ledger uses the full work area without a price chart")
 	desk.tabs.current_tab = 0

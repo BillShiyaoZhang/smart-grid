@@ -8,6 +8,7 @@ var served_history: Array[float] = []
 var mode: String = "chart"
 var sim: RefCounted
 var clock_offset := 8.0
+var events: Array[Dictionary]=[]
 const TEAL := Color("77dbc0")
 const AMBER := Color("efbb7d")
 const TEXT := Color("f2eddb")
@@ -23,7 +24,17 @@ func reset_history() -> void:
 	history.clear()
 	sample_hours.clear()
 	served_history.clear()
+	events.clear()
 	queue_redraw()
+
+func record_event(title: String, elapsed_hours: float) -> void:
+	if not events.is_empty() and is_equal_approx(float(events[-1].hour),elapsed_hours) and str(events[-1].title)==title: return
+	events.append({"title":title,"hour":elapsed_hours})
+	while events.size()>24: events.pop_front()
+	queue_redraw()
+
+func has_continuous_segment(index: int) -> bool:
+	return index>0 and index<sample_hours.size() and sample_hours[index]-sample_hours[index-1]<=1.0/6.0+.00001
 
 func sample(demand: float, generation: float, elapsed_hours: float=-1.0, served: float=-1.0) -> void:
 	if history.size() != sample_hours.size(): reset_history()
@@ -88,12 +99,22 @@ func _draw() -> void:
 		demand_points.append(Vector2(x,area.end.y-history[i].x/maximum*area.size.y))
 		generation_points.append(Vector2(x,area.end.y-history[i].y/maximum*area.size.y))
 		served_points.append(Vector2(x,area.end.y-served_history[i]/maximum*area.size.y))
-		if i>0 and (served_history[i]<history[i].x-0.001 or served_history[i-1]<history[i-1].x-0.001):
+		if has_continuous_segment(i) and (served_history[i]<history[i].x-0.001 or served_history[i-1]<history[i-1].x-0.001):
 			draw_colored_polygon(PackedVector2Array([demand_points[i-1],demand_points[i],served_points[i],served_points[i-1]]),Color(RED,0.28))
-	draw_polyline(demand_points,AMBER,2.0,true)
-	draw_polyline(generation_points,TEAL,2.0,true)
-	for i in range(1,served_points.size()):
-		draw_dashed_line(served_points[i-1],served_points[i],TEXT,1.3,3.0,true)
+	for i in range(demand_points.size()):
+		if has_continuous_segment(i):
+			draw_line(demand_points[i-1],demand_points[i],AMBER,2,true)
+			draw_line(generation_points[i-1],generation_points[i],TEAL,2,true)
+			draw_dashed_line(served_points[i-1],served_points[i],TEXT,1.3,3.0,true)
+		else:
+			draw_circle(demand_points[i],2.2,AMBER)
+			draw_circle(generation_points[i],2.2,TEAL)
+			draw_circle(served_points[i],1.8,TEXT)
+	for item in events:
+		if float(item.hour)<first or float(item.hour)>sample_hours[-1]: continue
+		var x: float=area.position.x+(float(item.hour)-first)/span*area.size.x
+		draw_dashed_line(Vector2(x,area.position.y),Vector2(x,area.end.y),Color(MUTED,.5),1,3,true)
+		draw_circle(Vector2(x,area.position.y),3,AMBER)
 	draw_string(font,Vector2(46,15),"供 %.1f  需 %.1f  已供 %.1f" % [history[-1].y,history[-1].x,served_history[-1]],HORIZONTAL_ALIGNMENT_LEFT,-1,14,TEXT)
 
 func _node_position(cell: Vector2i) -> Vector2:
@@ -140,7 +161,16 @@ func _draw_topology() -> void:
 	draw_string(get_theme_default_font(),Vector2(4,size.y-2),"△电源  ○负荷  ▭储能  ◇输电 · 点击定位",HORIZONTAL_ALIGNMENT_LEFT,-1,14,MUTED)
 
 func _get_tooltip(at: Vector2) -> String:
-	if mode != "topology": return "实线：供给 / 需求；白虚线：已供电；红色区域：未满足需求。横轴为当前情景的真实游戏日期与时刻，保留最近24游戏小时。"
+	if mode != "topology":
+		if sample_hours.size()>1:
+			var area: Rect2=_plot_rect()
+			var span: float=maxf(.000001,sample_hours[-1]-sample_hours[0])
+			for item in events:
+				if float(item.hour)<sample_hours[0] or float(item.hour)>sample_hours[-1]: continue
+				var x: float=area.position.x+(float(item.hour)-sample_hours[0])/span*area.size.x
+				if absf(at.x-x)<8 and at.y>=area.position.y-6 and at.y<=area.end.y:
+					return str(item.title)+" · "+_time_label(float(item.hour))+"\n事件与同期观测对照；供需变化还可能受天气和负荷影响。"
+		return "实线：供给 / 需求；白虚线：已供电；红色区域：未满足需求。横轴为实际游戏时刻；超过10分钟的观测空档不补造曲线。"
 	if sim == null: return ""
 	for building in sim.buildings:
 		if at.distance_to(_node_position(building.cell))<13: return "%02d · %s · 点击定位" % [building.id,building.name]

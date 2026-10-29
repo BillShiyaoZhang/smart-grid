@@ -117,7 +117,12 @@ func _run() -> void:
 			if child is PanelContainer and child.is_visible_in_tree():
 				check(rect.encloses(child.get_global_rect()),"default HUD panel fits "+str(resolution)+" "+str(child.name)+" "+str(child.get_global_rect())+" within "+str(rect))
 				area += child.get_global_rect().get_area()
-		check(area / rect.get_area() < .215,"default HUD covers about 20 percent at "+str(resolution))
+		check(area / rect.get_area() < .35,"visual operating HUD preserves at least 65 percent of the map at "+str(resolution))
+		var map_center := Vector2(rect.size.x*.5,rect.size.y*.50)
+		var center_clear := true
+		for child in hud.get_children():
+			if child is PanelContainer and child.is_visible_in_tree() and child.get_global_rect().has_point(map_center): center_clear=false
+		check(center_clear,"the central map remains directly operable at "+str(resolution))
 		hud.toggle_category("storage")
 		await settle()
 		check(rect.encloses(hud.tray.get_global_rect()),"construction tray fits "+str(resolution))

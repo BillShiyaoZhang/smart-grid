@@ -8,7 +8,7 @@ static func create(size: int = 16, spacing: float = 2.0) -> Node3D:
 	var root = Node3D.new()
 	root.name = "BayIsland"
 	var half = size * spacing * 0.5
-	Models.box(root, Vector3(180, 0.2, 180), Vector3(0, -1.5, 0), Color("72b8ba"), "Sea")
+	_water(root, half, 180.0, "Sea")
 	_prism(root, _octagon(half + 1.7, 2.0), -0.75, -1.42, Color("a7bbae"), Color("8aa99d"), "Bedrock")
 	_prism(root, _octagon(half + 1.4, 1.8), -0.32, -0.88, Color("dcd9b7"), Color("c5c5a7"), "Beach")
 	_prism(root, _octagon(half + 1.05, 1.5), -0.04, -0.36, Color("a9c9a1"), Color("86ad86"), "Meadow")
@@ -46,13 +46,14 @@ static func create(size: int = 16, spacing: float = 2.0) -> Node3D:
 				2: tree.position = Vector3(-off, -0.04, along)
 				3: tree.position = Vector3(off, -0.04, along)
 			tree.scale *= 0.75 + (i % 4) * 0.06
-	for i in range(16):
+	for i in range(40):
 		var rock = Models.rock(i)
 		root.add_child(rock)
-		var theta = i * TAU / 16.0
+		var theta = i * TAU / 40.0
 		var dir = Vector2(cos(theta), sin(theta))
 		dir /= maxf(absf(dir.x), absf(dir.y))
 		rock.position = Vector3(dir.x * (half + 1.25), -0.28, dir.y * (half + 1.25))
+		rock.scale = Vector3.ONE * (0.75 + float(i % 4) * 0.22)
 	# A little service pier on the southeastern shore.
 	Models.box(root, Vector3(1.4, 0.15, 4.5), Vector3(10.5, -0.22, half + 2.2), Color("b6a78b"), "ServicePier")
 	for i in range(15):
@@ -74,6 +75,13 @@ static func create(size: int = 16, spacing: float = 2.0) -> Node3D:
 	van.position = Vector3(road_x + 0.25, 0.04, 3.6)
 	_coastal_landmarks(root,half)
 	return root
+
+static func _water(root: Node3D, half: float, extent: float, title: String) -> void:
+	var water := Models.box(root, Vector3(extent, 0.2, extent), Vector3(0, -1.5, 0), Color("72b8ba"), title)
+	var surface := ShaderMaterial.new()
+	surface.shader = preload("res://scripts/art/coastal_water.gdshader")
+	surface.set_shader_parameter("island_half", half)
+	water.material_override = surface
 
 ## Decoration stays beyond the playable grid, so it cannot obscure a siting cell.
 static func _coastal_landmarks(root: Node3D, half: float) -> void:
@@ -126,7 +134,7 @@ static func create_for_map(spec: Dictionary, spacing: float = 2.0) -> Node3D:
 		if int(spec.get("chapter", 0)) == 15:
 			meadow = Color("c9c19b")
 			shore = Color("ded0a6")
-	Models.box(root, Vector3(maxf(180.0, half * 4.0), 0.2, maxf(180.0, half * 4.0)), Vector3(0, -1.5, 0), water, "WaterSurround")
+	_water(root, half, maxf(180.0, half * 4.0), "WaterSurround")
 	_prism(root, _octagon(half + 1.7, 2.0), -0.75, -1.42, Color("a7bbae"), Color("8aa99d"), "Bedrock")
 	_prism(root, _octagon(half + 1.4, 1.8), -0.32, -0.88, shore, shore.darkened(0.10), "Shore")
 	_prism(root, _octagon(half + 1.05, 1.5), -0.04, -0.36, meadow, meadow.darkened(0.15), "Ground")

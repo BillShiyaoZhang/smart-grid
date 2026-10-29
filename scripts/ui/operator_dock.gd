@@ -15,6 +15,8 @@ var pinned := false
 var page := "object"
 var watched: Array[int] = []
 var _signature := ""
+var _expanded_evidence: Dictionary={}
+var _show_all_causes := false
 
 func setup(owner_game: Node, owner_hud: Control) -> void:
 	game = owner_game
@@ -70,6 +72,8 @@ func reset_session() -> void:
 	filter.select(0)
 	category.select(0)
 	_signature = ""
+	_expanded_evidence.clear()
+	_show_all_causes=false
 
 func _sync_visibility() -> void:
 	if scroll == null: return
@@ -140,6 +144,7 @@ func _shape(node: Node) -> String:
 	return result
 
 func _sync_values(live: Node, draft: Node) -> void:
+	if live.has_method("sync_from"): live.sync_from(draft)
 	if live is Label or live is Button:
 		live.text=draft.text
 		live.add_theme_color_override("font_color",draft.get_theme_color("font_color"))
@@ -152,42 +157,78 @@ func _restore_focus(node: Node, key: String) -> void:
 	for child in node.get_children(): _restore_focus(child,key)
 
 func _diagnosis(data: Dictionary) -> void:
-	_text("已供 %.1f / 需求 %.1f MW" % [data.get("served",0),data.get("demand",0)],UI.TEAL)
-	_text("当前缺额 %.2f MW" % float(data.get("deficit",0)),UI.AMBER if float(data.get("deficit",0))>.01 else UI.MUTED)
-	_text(str(data.get("summary","")))
-	var alerts: Array = Presenter.alerts(game.sim)
-	if not alerts.is_empty():
-		_text("已知告警 · 定位后选择适用处置",UI.AMBER)
-		for alert in alerts:
-			_text(("! " if alert.severity=="critical" else "△ ")+str(alert.title),UI.RED if alert.severity=="critical" else UI.AMBER)
-			_text(str(alert.detail),UI.MUTED)
-			_text("依据："+str(alert.source),UI.MUTED)
-			if int(alert.target_id)>=0: _target_button(body,"定位并处置  ›",str(alert.target_type),int(alert.target_id))
-	_text("证据与可执行下一步",UI.MUTED)
-	for cause in data.get("causes",[]):
-		body.add_child(HSeparator.new())
-		_text(str(cause.get("title",cause.get("reason","待核实"))),UI.AMBER)
-		_text(str(cause.get("detail",cause.get("message",""))),UI.MUTED)
-		if int(cause.get("target_id",-1)) >= 0:
-			_target_button(body,"定位并检查  ›",str(cause.get("target_type","building")),int(cause.target_id))
-		if not str(cause.get("action","")).is_empty(): _text("下一步："+str({"connect":"检查接线","repair":"安排维修或备用","inspect":"核实运行与相连线路","observe":"建立可信遥测或安排现场巡检","diagnose":"比较供给与实际交付"}.get(cause.action,cause.action)),UI.TEAL)
+	var deficit: float=float(data.get("deficit",0))
+	var compact: bool=game.root_ui.size.y<780
+	if not compact:
+		UI.label(body,"缺口 %.1f MW" % deficit if deficit>.01 else "当前供电充足",26,UI.RED if deficit>.01 else UI.TEAL)
+		var gauge: Control=UI.metric(body,"已供 / 需求",float(data.get("served",0)),maxf(.001,float(data.get("demand",0))),"MW",UI.TEAL,true,"当前需求 %.1f MW" % float(data.get("demand",0)))
+		gauge.hatch_remainder=true
+		_text("按已知证据处置",UI.MUTED)
+	var causes: Array=data.get("causes",[])
+	for index in causes.size():
+		if index>=3 and not _show_all_causes: break
+		var cause: Dictionary=causes[index]
+		var accent: Color=UI.RED if cause.get("severity","")=="critical" else UI.AMBER
+		var card: VBoxContainer=UI.card(body,Color(accent,.5),10)
+		var title := UI.label(card,str(cause.get("title","待核实")),17,UI.TEXT)
+		title.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+		UI.badge(card,str(cause.get("source","已知证据")),accent)
+		if int(cause.get("target_id",-1))>=0:
+			var action: String=str({"connect":"开始接线","repair":"定位并安排抢修","inspect":"定位并检查","observe":"核实运行状态"}.get(cause.get("action",""),"定位对象"))
+			var button := UI.action(UI.button(card,action,func(): _act_on_cause(cause)))
+			button.set_meta("action_key","cause:"+str(cause.id))
+		var evidence_key: String=str(cause.get("id",index))
+		var expand := UI.button(card,"收起证据 ▴" if _expanded_evidence.get(evidence_key,false) else "证据与说明 ▾",func():
+			_expanded_evidence[evidence_key]=not _expanded_evidence.get(evidence_key,false)
+			_signature=""
+			refresh(),Vector2(0,30))
+		expand.set_meta("action_key","evidence:"+evidence_key)
+		if _expanded_evidence.get(evidence_key,false):
+			var detail := UI.label(card,str(cause.get("detail","")),14,UI.MUTED)
+			detail.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	if causes.size()>3:
+		UI.button(body,"收起其他证据" if _show_all_causes else "查看其余 %d 项证据" % (causes.size()-3),func(): _show_all_causes=not _show_all_causes; _signature=""; refresh())
 	var storm: float = float(game.sim.totals.get("storm_in",99))
-	if storm < 99: _text("已知预报：风暴约 %.1f 游戏小时后抵达" % storm,UI.AMBER)
-	_text("读数来自可信遥测、现场核实及公开供电反馈；未知原因需进一步核实。",UI.MUTED)
+	if storm < 99: _text("△ 风暴预报 · %.1f 游戏小时" % storm,UI.AMBER)
+	if int(data.get("unknown_count",0))>0: _text("? 未知设备状态保持待核实",UI.MUTED)
+
+func _act_on_cause(cause: Dictionary) -> void:
+	_focus(str(cause.get("target_type","building")),int(cause.target_id))
+	if cause.get("action","")=="connect":
+		game._set_tool("line")
+		game.connection_start=int(cause.target_id)
+		game._update_hud()
 
 func _jobs(rows: Array) -> void:
-	_text("操作队列与实际执行回执",UI.TEAL)
-	_text("已排队尚未生效；返回运行或手动推进后执行。",UI.MUTED)
-	if rows.is_empty(): _text("没有在途命令或本次会话执行回执。",UI.MUTED)
+	_text("草案 → 提交 → 执行 → 生效 / 拒绝",UI.MUTED)
+	var field_jobs: Array=rows.filter(func(job: Dictionary): return job.get("method","")=="field" and job.get("phase","")=="pending")
+	for index in 2:
+		var card: VBoxContainer=UI.card(body,Color("36515b"),10)
+		var heading := UI.row(card,6)
+		UI.label(heading,"▣ 队伍 %d" % (index+1),16)
+		UI.spacer(heading)
+		UI.badge(heading,"执行中" if index<field_jobs.size() else "空闲",UI.AMBER if index<field_jobs.size() else UI.TEAL)
+		if index<field_jobs.size(): _job_body(card,field_jobs[index])
+	if rows.is_empty(): _text("没有在途命令或近期回执。",UI.MUTED)
 	for job in rows:
-		body.add_child(HSeparator.new())
 		var phase: String = str(job.get("phase","pending"))
-		var terminal: bool = phase in ["executed","success","completed","failed","rejected"]
+		if job.get("method","")=="field" and phase=="pending": continue
 		var failed: bool = phase in ["failed","rejected"]
-		_text(str(job.get("title","操作")),UI.RED if failed else UI.TEAL)
-		_text(str(job.get("message",phase)),UI.MUTED)
-		if not terminal: _text("预计剩余 %.0f 游戏分钟" % (float(job.get("remaining",0))*60))
-		if int(job.get("target_id",-1))>=0: _target_button(body,"查看目标",str(job.get("target_type","building")),int(job.target_id))
+		var card: VBoxContainer=UI.card(body,UI.RED if failed else Color("36515b"),10)
+		UI.badge(card,str({"pending":"◷ 远程在途","executed":"✓ 已执行","rejected":"× 已拒绝"}.get(phase,phase)),UI.RED if failed else UI.TEAL)
+		_job_body(card,job)
+
+func _job_body(parent: Node, job: Dictionary) -> void:
+	UI.label(parent,str(job.get("title","操作")),16)
+	var remaining: float=float(job.get("remaining",0))
+	if job.get("phase","")=="pending":
+		var duration: float=float(job.get("duration",0))
+		var progress: Control=UI.metric(parent,"预计剩余",maxf(0,duration-remaining),maxf(.001,duration),"",UI.AMBER,duration>0,"%.0f 游戏分钟 · 尚未生效" % (remaining*60))
+		progress.show_value=false
+	else:
+		var message := UI.label(parent,str(job.get("message","请核对实际生效值")),14,UI.MUTED)
+		message.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	if int(job.get("target_id",-1))>=0: _target_button(parent,"查看目标",str(job.get("target_type","building")),int(job.target_id))
 
 func _facilities(rows: Array) -> void:
 	if search.text.is_empty() and filter.selected == 0 and not watched.is_empty():
@@ -196,6 +237,8 @@ func _facilities(rows: Array) -> void:
 			var building: Dictionary = game.sim.get_building(id)
 			if building.is_empty(): watched.erase(id); continue
 			_target_button(body,"★ %02d · %s" % [id,building.name],"building",id)
+			for item in rows:
+				if int(item.id)==id: _facility_gauge(item); break
 		body.add_child(HSeparator.new())
 	# Cities are public feedback, rather than device telemetry.
 	for city in game.sim.region.cities:
@@ -211,4 +254,27 @@ func _facilities(rows: Array) -> void:
 		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		UI.button(line,"★" if watched.has(id) else "☆",func(): watch(id),Vector2(34,34)).set_meta("action_key","watch:%d" % id)
 		_text(str(row.get("status","待核实")),UI.TEAL if row.get("trusted",false) else UI.AMBER)
+		_facility_gauge(row)
 	if rows.is_empty(): _text("没有匹配设施；试试名称、类型或编号。",UI.MUTED)
+
+func _facility_gauge(row: Dictionary) -> void:
+	var known: bool=bool(row.get("trusted",false))
+	var category_name: String=str(row.get("category",""))
+	var value: float=0.0
+	var maximum: float=maxf(.001,float(row.get("capacity",1)))
+	var title := "实际输出"
+	var unit := "MW"
+	if category_name=="storage":
+		title="储存电量"
+		unit="MWh"
+		maximum=maxf(.001,float(row.get("energy_capacity",0)))
+		value=float(row.get("energy",0)) if known else 0.0
+	elif category_name=="city":
+		title="实际供电"
+		maximum=maxf(.001,float(row.get("demand",.001))) if known else maximum
+		value=float(row.get("served",0)) if known else 0.0
+	elif category_name=="power": value=float(row.get("output",0)) if known else 0.0
+	else: return
+	var gauge: Control=UI.metric(body,title,value,maximum,unit,UI.TEAL,known)
+	gauge.compact=true
+	gauge.custom_minimum_size.y=44

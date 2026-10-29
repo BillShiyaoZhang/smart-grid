@@ -45,10 +45,12 @@ func _draw() -> void:
 		return
 	for city in sim.region.cities:
 		var at := _position(city.anchor)
-		var color := TEAL if float(city.service) >= 0.93 else ORANGE
-		var radius := clampf(sqrt(float(city.population) / 100.0), 4.5, 10.0)
+		var active: bool=str(city.get("service_phase","active"))=="active"
+		var color := (TEAL if float(city.service) >= 0.93 else ORANGE) if active else MUTED
+		var radius := sqrt(maxf(0,float(city.population))/100.0)*1.7
 		draw_circle(at, radius + 5, Color(color, 0.1))
 		draw_circle(at, radius, color)
+		if not active: draw_circle(at,maxf(0,radius-2),Color("12333d"))
 		if int(city.id) == selected_id:
 			draw_arc(at, radius + 5, 0, TAU, 32, CREAM, 1.5, true)
 		var caption := str(city.name)
@@ -56,8 +58,11 @@ func _draw() -> void:
 		var caption_at := at+Vector2(14,-10 if int(city.id)%2==0 else 17)
 		caption_at.x = clampf(caption_at.x,12,maxf(12,size.x-caption_width-12))
 		draw_string(font,caption_at,caption,HORIZONTAL_ALIGNMENT_LEFT,-1,14,CREAM)
-	draw_string(font, Vector2(16, size.y - 28), "点击城市定位 · 圆点大小表示人口", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, MUTED)
-	draw_string(font, Vector2(16, size.y - 9), "青色 稳定供电 / 琥珀色 需要改善", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, MUTED)
+	draw_string(font, Vector2(16, size.y - 45), "圆面积 ∝ 人口 · ○ 潜在市场 / ● 已服务", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, MUTED)
+	draw_circle(Vector2(24,size.y-22),sqrt(1000.0/100.0)*1.7,MUTED,false,1)
+	draw_string(font, Vector2(38, size.y - 17), "1千人", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, MUTED)
+	draw_circle(Vector2(116,size.y-22),sqrt(5000.0/100.0)*1.7,MUTED,false,1)
+	draw_string(font, Vector2(135, size.y - 17), "5千人 · 青绿 稳定 / 琥珀 改善", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, MUTED)
 
 func _background() -> StyleBoxFlat:
 	var style := StyleBoxFlat.new()

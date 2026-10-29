@@ -48,7 +48,6 @@ func _draw() -> void:
 	for line in game.sim.lines:
 		var selected: bool = int(line.id) == game.selected_line or int(line.id) == game.hover_line
 		var related: bool = game.connection_start in [int(line.a),int(line.b)] or game.selected_id in [int(line.a),int(line.b)]
-		if not electrical and not selected and not related: continue
 		var first: Dictionary = game.sim.get_building(int(line.a))
 		var second: Dictionary = game.sim.get_building(int(line.b))
 		if first.is_empty() or second.is_empty(): continue
@@ -60,11 +59,21 @@ func _draw() -> void:
 		var flow: float = float(observation.get("flow",0)) if observation.get("flow") != null and current else 0.0
 		var fault: bool = current and observation.get("fault_known",false) and observation.get("fault",false)
 		var closed: bool = current and observation.get("closed",false)
+		if not electrical and not selected and not related and not fault and not (current and absf(flow)>.02): continue
+		# A dark outline preserves the route against both sunlit grass and storm light.
+		if current: draw_line(start,finish,Color("0a202ccc"),7 if selected else 5,true)
 		if current and absf(flow) / maxf(.1,float(line.capacity)) > .85: color = UI.AMBER
 		if fault: color = UI.RED
 		if selected: draw_line(start,finish,UI.TEXT,6,true)
 		if not current or not closed or fault: draw_dashed_line(start,finish,color,3 if selected else 2,7)
-		else: draw_line(start,finish,color,3.5 if selected else 2,true)
+		else: draw_line(start,finish,color,3.5 if selected else (3 if absf(flow)/maxf(.1,float(line.capacity))>.85 else 2),true)
+		if fault:
+			var center: Vector2=start.lerp(finish,.5)
+			draw_circle(center,10,Color("142b35"))
+			draw_arc(center,10,0,TAU,24,UI.RED,2,true)
+			draw_line(center-Vector2(4,4),center+Vector2(4,4),UI.RED,2,true)
+			draw_line(center+Vector2(-4,4),center+Vector2(4,-4),UI.RED,2,true)
+			if not selected and game.zoom<65: _label(center+Vector2(12,-12),"× 已核实故障",UI.RED)
 		if selected:
 			draw_circle(start,5,UI.TEXT); draw_circle(finish,5,UI.TEXT)
 			var state: String = "%.1f / %.0f MW" % [absf(flow),line.capacity] if current else str({"unknown":"? 未知","stale":"? 缓存过时","suspect":"? 读数可疑"}.get(observation.get("visibility","unknown"),"? 待核实"))
@@ -77,6 +86,24 @@ func _draw() -> void:
 			var middle: Vector2 = start.lerp(finish,.55)
 			draw_line(middle,middle-direction.rotated(.55)*9,color,2,true)
 			draw_line(middle,middle-direction.rotated(-.55)*9,color,2,true)
+	# The priority card can suggest a connection using public topology, never a
+	# hidden fault or a promised post-construction power outcome.
+	if game.tool=="select" and not game.hud._focus_item.is_empty() and game.hud._focus_item.get("action","")=="connect":
+		var target: Dictionary=game.sim.get_building(int(game.hud._focus_item.get("target_id",-1)))
+		var nearest: Dictionary={}
+		var distance := INF
+		if not target.is_empty():
+			for building in game.sim.buildings:
+				if building.kind!="substation" or int(building.id)==int(target.id): continue
+				var candidate: float=Vector2(building.cell).distance_to(Vector2(target.cell))
+				if candidate<distance: nearest=building; distance=candidate
+			if not nearest.is_empty():
+				var start: Vector2=_screen(game._cell_position(nearest.cell)+Vector3.UP*.65)
+				var finish: Vector2=_screen(game._cell_position(target.cell)+Vector3.UP*.65)
+				draw_dashed_line(start,finish,UI.AMBER,2.5,8,true)
+				draw_circle(start,5,UI.AMBER)
+				draw_arc(finish,11,0,TAU,24,UI.AMBER,2,true)
+				if game.zoom<65: _label(start.lerp(finish,.35)+Vector2(8,-36),"候选连接",UI.AMBER)
 	if game.tool in ["line","datalink"] and game.connection_start >= 0:
 		var first: Dictionary = game.sim.get_building(game.connection_start)
 		if not first.is_empty():
@@ -91,31 +118,42 @@ func _draw() -> void:
 	for building in game.sim.buildings:
 		var id: int = int(building.id)
 		var point := _screen(game._cell_position(building.cell)+Vector3.UP*2)
+		if point.x < -24 or point.y < -24 or point.x > size.x+24 or point.y > size.y+24: continue
 		var targeted: bool = id in [game.selected_id,game.connection_start,game._building_at(game.hover_cell)]
+		var feedback: Dictionary=Presenter.customer_feedback(game.sim,id)
+		if not feedback.is_empty() and not bool(feedback.powered) and (game.zoom<=60 or targeted):
+			var ground: Vector2=_screen(game._cell_position(building.cell)+Vector3.UP*.12)
+			draw_arc(ground,17,0,TAU,24,UI.AMBER,2.5,true)
+			draw_circle(point,9,Color("112b35"))
+			draw_string(get_theme_default_font(),point+Vector2(-3,5),"!",HORIZONTAL_ALIGNMENT_LEFT,-1,16,UI.AMBER)
+			if not targeted and game.zoom<65: _label(point+Vector2(12,5),"用户报告停电",UI.AMBER)
+		elif not feedback.is_empty() and building.kind=="hospital" and game.zoom<65 and not targeted and game.sim.storm_active:
+			_label(point+Vector2(8,-4),"✚ 医院供电正常",UI.TEXT)
 		if targeted:
 			_label(point+Vector2(7,-5),"%02d · %s" % [id,building.name],UI.TEXT)
 		elif game.zoom>60:
 			var bucket := Vector2i(floori(point.x/64),floori(point.y/44))
-			if not clusters.has(bucket): clusters[bucket] = {"point":Vector2(bucket)*Vector2(64,44)+Vector2(10,22),"count":0,"kind":str(building.kind)}
+			if not clusters.has(bucket): clusters[bucket] = {"point":Vector2(bucket)*Vector2(64,44)+Vector2(10,22),"count":0,"outages":0,"kind":str(building.kind)}
 			clusters[bucket].count += 1
+			if not feedback.is_empty() and not bool(feedback.powered): clusters[bucket].outages+=1
 	for cluster in clusters.values():
 		var point: Vector2 = cluster.point
 		_draw_role(point,str(cluster.kind))
-		_label(point+Vector2(9,5),"×%d" % cluster.count,UI.TEXT)
+		_label(point+Vector2(9,5),("×%d · !%d" % [cluster.count,cluster.outages]) if cluster.outages>0 else "×%d" % cluster.count,UI.AMBER if cluster.outages>0 else UI.TEXT)
 	var show_legend: bool=not (game.tool=="build" and size.y<650)
 	if electrical and show_legend:
-		_label(Vector2(100,148),"电力：实线已核实 · 虚线未知/断开 · 箭头潮流 · × 已知故障",UI.MUTED)
+		_label(Vector2(100,size.y-96),"实线已核实 · 虚线未知/断开 · 箭头潮流 · × 已知故障",UI.MUTED)
 	elif game.overlay == "comm" and show_legend:
-		_label(Vector2(100,148),"通信：实线光纤 · 虚线无线 · ✓可信 · ?待核实",Color("81c9ee"))
+		_label(Vector2(100,size.y-96),"通信：实线光纤 · 虚线无线 · ✓可信 · ?待核实",Color("81c9ee"))
 
 func _draw_role(at: Vector2, kind: String) -> void:
 	var category: String=Presenter.category_for(kind)
 	draw_circle(at,9,UI.SURFACE)
 	match category:
 		"power": draw_polyline(PackedVector2Array([at+Vector2(0,-7),at+Vector2(7,6),at+Vector2(-7,6),at+Vector2(0,-7)]),UI.TEAL,2,true)
-		"city": draw_rect(Rect2(at-Vector2(6,6),Vector2(12,12)),UI.TEXT,false,2)
+		"city": draw_circle(at,5,UI.AMBER)
 		"storage":
 			draw_rect(Rect2(at-Vector2(7,4),Vector2(14,9)),UI.AMBER,false,2)
 			draw_line(at+Vector2(0,-2),at+Vector2(0,3),UI.AMBER,2)
-		"digital": draw_polyline(PackedVector2Array([at+Vector2(0,-7),at+Vector2(7,0),at+Vector2(0,7),at+Vector2(-7,0),at+Vector2(0,-7)]),Color("81c9ee"),2,true)
-		_: draw_arc(at,6,0,TAU,12,UI.TEXT,2,true)
+		"grid": draw_polyline(PackedVector2Array([at+Vector2(0,-7),at+Vector2(7,0),at+Vector2(0,7),at+Vector2(-7,0),at+Vector2(0,-7)]),UI.TEXT,2,true)
+		_: draw_rect(Rect2(at-Vector2(4,4),Vector2(8,8)),Color("81c9ee"),false,2)

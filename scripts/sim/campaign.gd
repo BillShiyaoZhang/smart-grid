@@ -451,7 +451,10 @@ func _qualifies(sim: RefCounted, predicate: String) -> bool:
 			return false
 		"coordinated_storage":
 			for b in sim.buildings:
-				if b.kind=="community_battery" and b.storage_mode=="peak" and sim.digital.control_reachable(sim,int(b.id)) and bool(flags.get("facility_remote",false)) and bool(flags.get("setting_reserve_soc",false)): return _connected(sim,int(b.id),int(roles.node))
+				var policy: Dictionary=sim.storage_dispatch_policy(b)
+				var peak: bool=policy.intent=="peak" or (policy.legacy_custom and b.get("storage_mode","")=="peak")
+				var reserve_set: bool=bool(flags.get("setting_reserve_soc",false)) or bool(flags.get("setting_storage_reserve",false))
+				if b.kind=="community_battery" and peak and sim.digital.control_reachable(sim,int(b.id)) and bool(flags.get("facility_remote",false)) and reserve_set: return _connected(sim,int(b.id),int(roles.node))
 			return false
 		"final_assessment": return assessment_started and _reliable(sim) and float(sim.totals.get("renewable_supply_share",0.0))>=0.5
 	return false
