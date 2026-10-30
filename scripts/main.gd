@@ -1619,6 +1619,7 @@ func _populate_inspector() -> void:
 	if b.is_empty(): return
 	_label(inspector_box,"设施档案  /  ASSET %02d" % int(b.id),11,TEAL)
 	_label(inspector_box,str(b.name),23)
+	_append_lens_explanation(inspector_box,"facility",int(b.id))
 	var observation: Dictionary = sim.facility_observation(int(b.id))
 	var customer: bool=b.kind in ["home","factory","hospital"]
 	var service_active: bool=not customer or not sim.has_method("customer_service_active") or sim.customer_service_active(int(b.id))
@@ -1691,6 +1692,9 @@ func _populate_inspector() -> void:
 	_button(actions,"＋ 维护 ¥1.2k",func(): _apply(sim.repair(id)); _update_inspector(),Vector2(113,34))
 	_button(inspector_box,"⌁  从这里连接线路",func(): _set_tool("line"); connection_start=id; _notify("再点击目标设施，完成接线"),Vector2(0,34))
 	_button(inspector_box,"☆ 固定关注此设施",func(): hud.operator_dock.watch(id); _notify("已更新关注列表；Ctrl+F 查看"),Vector2(0,34))
+	if sim.feature_enabled("research") and not _campaign_active():
+		_button(inspector_box,"比较此设施的运行或退出影响",func(): _preview_object("facility",id),Vector2(0,36))
+		if sim.lifecycle.enabled: _button(inspector_box,"比较继续运行、检修与更换",func(): _preview_object("facility",id,true),Vector2(0,36))
 	_append_object_jobs(inspector_box,"facility",id)
 	_button(inspector_box,"拆除设施 · 回收 ¥%s" % _number(float(b.get("refund_basis",data.get("price",0)))*0.35),func(): _request_demolition(id),Vector2(0,30))
 
@@ -1705,6 +1709,7 @@ func _inspect_line() -> void:
 	var names: Dictionary={"unknown":"未观测 · 等待查线","stale":"缓存已过时","verified":"可信馈线遥测","suspect":"读数可疑 · 控制受限","patrol":"现场巡检核实"}
 	_label(inspector_box,"线路档案 / FEEDER %02d" % int(line.id),11,TEAL)
 	_label(inspector_box,"配电线路",23)
+	_append_lens_explanation(inspector_box,"line",int(line.id))
 	_paragraph(inspector_box,"%s → %s" % [sim.get_building(line.a).get("name",""),sim.get_building(line.b).get("name","")])
 	_label(inspector_box,"● "+str(names.get(visibility,visibility)),12,TEAL if trusted else ORANGE)
 	if trusted and observation.get("fault_known",false):
@@ -1723,7 +1728,50 @@ func _inspect_line() -> void:
 	_button(inspector_box,"巡检定位 · ¥500",func(): _apply(sim.patrol_line(id)); _update_inspector(),Vector2(0,34))
 	_button(inspector_box,"＋ 派遣线路抢修队",func(): _apply(sim.repair_line(id)); _update_inspector(),Vector2(0,34))
 	_button(inspector_box,"↑ 线路增容 · ¥%s" % _compact(4500.0*float(line.get("level",1))),func(): _apply(sim.upgrade_line(id)); _sync_world(true); _update_hud(); _update_inspector(),Vector2(0,34))
+	if sim.feature_enabled("research") and not _campaign_active():
+		_button(inspector_box,"比较退出此线后的供电与成本",func(): _preview_object("line",id),Vector2(0,36))
+		if sim.lifecycle.enabled: _button(inspector_box,"比较继续运行、检修与更换",func(): _preview_object("line",id,true),Vector2(0,36))
 	_append_object_jobs(inspector_box,"line",id)
+
+func _append_lens_explanation(parent: Node,kind: String,id: int) -> void:
+	var data: Dictionary=hud.lens_snapshot
+	var explained:=false
+	for risk in data.get("risks",[]):
+		if str(risk.get("target_type",""))!=kind or int(risk.get("target_id",-1))!=id: continue
+		var card:=UI.card(parent,Color("50686b"),8)
+		_paragraph(card,str(GameHud.LENSES.get(hud.lens,"运行"))+"视角 · "+str(risk.get("consequence","")),ORANGE,14)
+		if preferences.information_depth!="beginner": _paragraph(card,"原因与证据："+str(risk.get("detail",""))+"\n来源："+str(risk.get("source","")),MUTED,14)
+		explained=true
+		break
+	if not explained and hud.lens!="operations":
+		var interpretation:=""
+		match hud.lens:
+			"assets":
+				for asset in data.get("assets",[]):
+					if str(asset.target_type)==kind and int(asset.target_id)==id:
+						interpretation=str(asset.criticality_label)+" · "+str(asset.criticality_detail)
+						break
+			"customers":
+				var feedback: Dictionary=Presenter.customer_feedback(sim,id) if kind=="facility" else {}
+				interpretation=str(feedback.get("text","客户影响须结合街区反馈核实；连接关系不等于实际停电范围。"))
+			"digital":
+				var status: Dictionary=sim.communication_status(id) if kind=="facility" else {}
+				interpretation="可信通信路径已建立；执行前仍需新鲜观测和权限。" if status.get("trusted",false) else "? 控制条件尚未核实；检查通信路径、读数新鲜度与权限。"
+			"market": interpretation="现货 ¥%.0f/MWh · 改变交换功率也会改变线路负载；收益需结合实际交付与结算。" % float(sim.totals.get("market_price",0))
+			"planning": interpretation="比较同一24小时的供电、成本和备用，检查本对象退出或运行调整的后果。"
+			"maintenance": interpretation="现场队 %d/2 · 备件 %d；先核实状态，再比较短时停运与后续恢复。" % [sim.active_repairs(),sim.lifecycle.spares]
+		if not interpretation.is_empty(): _paragraph(parent,str(GameHud.LENSES[hud.lens])+"视角 · "+interpretation,MUTED,14)
+	if preferences.information_depth=="engineer":
+		var observed: Dictionary=sim.facility_observation(id) if kind=="facility" else sim.line_observation(id)
+		_paragraph(parent,"观测年龄 %.2f h · %s" % [float(observed.get("age_hours",0)),str(observed.get("reason","待核实"))],MUTED,14)
+
+func _preview_object(kind: String,id: int,maintenance: bool=false) -> void:
+	_open_center("planning")
+	if not planning_panel.visible or planning_panel.tabs.is_tab_hidden(3): return
+	planning_panel.tabs.current_tab=3
+	var bench: Node=planning_panel.decision_workbench
+	if maintenance and bench.has_method("preview_maintenance_target"): bench.preview_maintenance_target(kind,id)
+	else: bench.preview_target(kind,id)
 
 func _inspect_communication() -> void:
 	var link: Dictionary={}
@@ -1975,7 +2023,7 @@ func _apply_preferences() -> void:
 	if root_ui==null: return
 	preferences.apply_runtime(get_viewport())
 	if audio: audio.apply_preferences(preferences)
-	var visual: String = str([preferences.ui_scale,preferences.high_contrast,preferences.reduced_motion])
+	var visual: String = str([preferences.ui_scale,preferences.high_contrast,preferences.reduced_motion,preferences.information_depth])
 	var bindings: String = str(preferences.bindings)
 	if visual==_visual_preferences:
 		if bindings!=_binding_preferences and is_ready: _update_hud()

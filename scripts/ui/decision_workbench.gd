@@ -2,6 +2,7 @@ extends VBoxContainer
 const UI=preload("res://scripts/ui/ui_kit.gd")
 const Chart=preload("res://scripts/ui/forecast_chart.gd")
 const RecoveryChart=preload("res://scripts/ui/recovery_chart.gd")
+const DecisionDelta=preload("res://scripts/ui/decision_delta.gd")
 const CASH_LABELS={"opening_adjustment":"期初调整","operations":"运营净额","investment":"设施与线路投资","construction":"工程预付款","research":"研发","maintenance":"检修抢修","disposal":"拆除回收","loan":"贷款到账","repayment":"偿还本金","demand_response":"需求响应补偿","customers":"街区能源改造","engineering":"输配电改造","field":"现场操作","digital":"通信与数字化","security":"安全恢复","reward":"任务奖励","spares":"备件采购","reserve_penalty":"备用违约","project_refund":"工程退款"}
 const GOAL_LABELS={"":"尚未选择","reliable":"可靠供电","affordable":"可负担电价","sustainable":"清洁供电","resilient":"灾后韧性","solvent":"财务稳健"}
 var game: Node
@@ -13,6 +14,12 @@ var status: Label
 var details: Label
 var chart: Control
 var recovery_chart: Control
+var delta_view: Control
+var _result_stale:=false
+var operation_options: Control
+var asset_options: Control
+var asset_state: Label
+var _comparison_titles: Array=["当前","计划","退出情景"]
 var _signature:=""
 var _world: RefCounted
 var calculating:=false
@@ -101,25 +108,113 @@ func _build_planning() -> void:
 	status=_label(box,"尚未计算。")
 	_button(box,"forecast","计算24小时供需预测",_forecast)
 	var plan:=_section("运行方案比较与单故障检查")
-	_pick(plan,"generator","计划调整的机组")
-	_spin(plan,"dispatch","计划出力比例",0,1,1,.05)
-	_spin(plan,"reserve","储能备用比例",0,.9,.2,.05)
-	_pick(plan,"imports","计划外购",[[true,"允许外购"],[false,"禁止外购"]])
-	_pick(plan,"failure_type","假设退出",[["none","无额外退出"],["line","线路退出"],["facility","设施退出"]])
-	_pick(plan,"failure_line","故障演练线路")
-	_pick(plan,"failure_facility","故障演练设施")
+	_pick(plan,"comparison_mode","比较内容",[["operation","运行方案与单故障"],["asset","继续运行 / 检修 / 更换"]])
+	operation_options=UI.column(plan,8)
+	_pick(operation_options,"generator","计划调整的机组")
+	_spin(operation_options,"dispatch","计划出力比例",0,1,1,.05)
+	_spin(operation_options,"reserve","储能备用比例",0,.9,.2,.05)
+	_pick(operation_options,"imports","计划外购",[[true,"允许外购"],[false,"禁止外购"]])
+	_pick(operation_options,"failure_type","假设退出",[["none","无额外退出"],["line","线路退出"],["facility","设施退出"]])
+	_pick(operation_options,"failure_line","故障演练线路")
+	_pick(operation_options,"failure_facility","故障演练设施")
+	asset_options=UI.column(plan,8)
+	asset_state=_label(asset_options,"")
+	_pick(asset_options,"maintenance_target_type","检修对象类别",[["facility","设施"],["line","电力线路"]])
+	_pick(asset_options,"maintenance_facility","设施对象（设施类别时使用）")
+	_pick(asset_options,"maintenance_line","线路对象（线路类别时使用）")
+	_pick(asset_options,"maintenance_action","与继续运行、更换比较的处置",[["service","计划保养"],["overhaul","部件大修"],["inspect","现场巡检"]])
+	_label(asset_options,"比较使用副本内真实工单：计入费用、备件、队伍等待、路程和作业停运；不计算虚构净现值，也不保证未来故障减少。")
 	_button(plan,"compare","比较：当前方案 / 所选运行方案 / 单故障情景",_compare)
+	_button(plan,"target_controls","查看机组实际控制（另行提交）",_open_actual_controls)
+	fields.comparison_mode.item_selected.connect(func(_index: int): _adapt_comparison_controls())
 	details=_label(plan,"比较失供电量、现金变化、最大负载和最低电压。")
+	delta_view=DecisionDelta.new()
+	plan.add_child(delta_view)
+	delta_view.hide()
+	for input in fields.values():
+		if input is SpinBox: input.value_changed.connect(func(_value: float): _plan_edited())
+		elif input is OptionButton: input.item_selected.connect(func(_index: int): _plan_edited())
+	_adapt_comparison_controls()
+
+func _adapt_comparison_controls() -> void:
+	if operation_options==null: return
+	var asset_mode: bool=_selected("comparison_mode")=="asset"
+	operation_options.visible=not asset_mode
+	asset_options.visible=asset_mode
+	if asset_state!=null:
+		asset_state.text="资产风险管理已投运；计算后列出副本工单报价。" if bool(game.sim.lifecycle.enabled) else "资产风险管理尚未投运，当前不能提交检修推演；请先在运维中心投运。"
+	if actions.has("compare"):
+		actions.compare.text="比较：继续运行 / 所选检修 / 设备更换" if asset_mode else "比较：当前方案 / 所选运行方案 / 单故障情景"
+	if actions.has("target_controls"):
+		actions.target_controls.text="查看设备实际操作（另行派工）" if asset_mode else "查看机组实际控制（另行提交）"
+
+func _open_actual_controls() -> void:
+	var asset_mode: bool=_selected("comparison_mode")=="asset"
+	var target_type:=str(_selected("maintenance_target_type")) if asset_mode else "facility"
+	var id:=int(_selected("maintenance_line" if target_type=="line" else "maintenance_facility")) if asset_mode else int(_selected("generator"))
+	if id>0: game.focus_target(target_type,id)
+
+func _plan_edited() -> void:
+	_mark_result_stale("方案草案已改动")
+
+func _mark_result_stale(reason: String) -> void:
+	if mode!="planning" or chart==null or chart.rows.is_empty(): return
+	if not _result_stale: status.text="已过期 · %s，请重新计算。\n%s" % [reason,status.text]
+	_result_stale=true
+	if delta_view!=null: delta_view.set_stale(true,reason)
+
+func preview_target(kind: String,id: int) -> bool:
+	if mode!="planning" or calculating: return false
+	refresh()
+	_write("comparison_mode","operation")
+	if kind in ["line","power"]:
+		if game.sim.get_line(id).is_empty(): return false
+		_write("failure_type","line"); _write("failure_line",id)
+	else:
+		var building: Dictionary=game.sim.get_building(id)
+		if building.is_empty(): return false
+		if game.sim.evolution.is_generator(str(building.kind)):
+			_write("generator",id)
+			_write("dispatch",float(building.get("dispatch",1.0)))
+		else:
+			_write("failure_type","facility"); _write("failure_facility",id)
+	_plan_edited()
+	_adapt_comparison_controls()
+	message.text="已带入所选对象。编辑方案后比较；实际运行设置仍需另行提交。"
+	return true
+
+func preview_maintenance_target(kind: String,id: int) -> bool:
+	if mode!="planning" or calculating: return false
+	var target_type: String="line" if kind in ["line","power"] else "facility"
+	var target: Dictionary=game.sim.get_line(id) if target_type=="line" else game.sim.get_building(id)
+	if target.is_empty(): return false
+	refresh()
+	_write("comparison_mode","asset")
+	_write("maintenance_target_type",target_type)
+	_write("maintenance_line" if target_type=="line" else "maintenance_facility",id)
+	_plan_edited(); _adapt_comparison_controls()
+	message.text="已带入设备。比较继续运行、所选检修与更换；实际派工需要另行提交。"
+	return true
 
 func _forecast() -> void:
 	_start_calculation([])
 
 func _display_forecast(result: Dictionary) -> void:
 	if not result.ok: _perform(result); return
+	_result_stale=false
+	if delta_view!=null: delta_view.set_results([])
 	chart.set_rows(result.rows)
 	status.text="未来24小时失供 %.1f MWh · 现金变化 ¥%.0f · 最大负载 %.0f%% · 信息可信度 %s\n%s" % [result.unserved_mwh,result.net_cash,float(result.max_loading)*100,result.confidence,"\n".join(result.assumptions)]
 	message.text="预测已更新；主世界未推进。"
 func _compare() -> void:
+	if _selected("comparison_mode")=="asset":
+		var target_type:=str(_selected("maintenance_target_type"))
+		var target_id:=int(_selected("maintenance_line" if target_type=="line" else "maintenance_facility"))
+		var action:=str(_selected("maintenance_action"))
+		_comparison_titles=["继续运行",str(game.sim.lifecycle.ACTIONS[action].name),"设备更换"]
+		_start_calculation([{}, {"maintenance":{"target_type":target_type,"target_id":target_id,"action":action}}, {"maintenance":{"target_type":target_type,"target_id":target_id,"action":"replace"}}])
+		return
+	_comparison_titles=["当前","计划","退出情景"]
 	var selected:={"reserve":fields.reserve.value,"imports":bool(_selected("imports"))}
 	if int(_selected("generator"))>0:
 		selected.generator_id=int(_selected("generator")); selected.dispatch=fields.dispatch.value
@@ -130,12 +225,19 @@ func _compare() -> void:
 
 func _display_comparison(result: Dictionary) -> void:
 	if not result.ok: _perform(result); return
+	_result_stale=false
 	var lines: Array[String]=[]
 	for i in result.plans.size():
 		var p: Dictionary=result.plans[i]
-		lines.append("%s：失供 %.1f MWh · 现金 ¥%+.0f · 负载 %.0f%% · 电压 %.3f pu" % [["当前","计划","退出情景"][i],p.unserved_mwh,p.net_cash,float(p.max_loading)*100,p.min_voltage])
+		lines.append("%s：失供 %.1f MWh · 现金 ¥%+.0f · 负载 %.0f%% · 电压 %.3f pu" % [_comparison_titles[i],p.unserved_mwh,p.net_cash,float(p.max_loading)*100,p.min_voltage])
 	details.text="\n".join(lines)
-	chart.set_rows(result.plans[-1].rows)
+	chart.set_rows(result.plans[0].rows)
+	delta_view.set_results(result.plans,_comparison_titles)
+	var assumptions: Array=[]
+	for plan in result.plans:
+		for assumption in plan.assumptions:
+			if assumption not in assumptions: assumptions.append(assumption)
+	status.text="未来24小时三方案 · 相同起点与时段 · %s\n%s" % [" / ".join(_comparison_titles),"\n".join(assumptions)]
 	message.text="三方案已计算；结果为所列假设下的参考。"
 
 func _watch_world() -> void:
@@ -147,6 +249,7 @@ func _watch_world() -> void:
 
 func _world_changed() -> void:
 	_revision+=1
+	_mark_result_stale("运行状态已变化")
 
 func _calculation_controls(busy: bool) -> void:
 	for key in ["forecast","compare"]:
@@ -169,6 +272,7 @@ func _start_calculation(plans: Array) -> void:
 	_calculation_world=game.sim
 	_calculation_revision=_revision
 	calculating=true
+	_mark_result_stale("正在重新计算")
 	_calculation_controls(true)
 	message.text="后台推演中；可返回电网继续操作，当前世界未被推进。"
 	_worker=Thread.new()
@@ -327,6 +431,8 @@ func reset_session() -> void:
 	_load_effective()
 	for section_name in DRAFT_GROUPS: _baselines[section_name]=_read_group(section_name)
 	if chart!=null: chart.set_rows([])
+	if delta_view!=null: delta_view.set_results([])
+	_result_stale=false
 	if mode=="planning":
 		status.text="尚未计算。"; details.text="选择运行方案后计算。"
 	refresh()
@@ -340,6 +446,8 @@ func refresh() -> void:
 		_load_effective()
 		for section_name in DRAFT_GROUPS: _baselines[section_name]=_read_group(section_name)
 		if chart!=null: chart.set_rows([])
+		if delta_view!=null: delta_view.set_results([])
+		_result_stale=false
 		if mode=="planning": status.text="尚未计算。"; details.text="选择运行方案后计算。"
 		message.text="参数编辑为草案；点击操作才生效。"
 	var facilities: Array=[]
@@ -352,9 +460,13 @@ func refresh() -> void:
 		if game.sim.evolution.is_generator(str(b.kind)): generators.append(item)
 		if game.sim.evolution.is_generator(str(b.kind)) or game.sim.evolution.is_storage(str(b.kind)): providers.append(item)
 	for l in game.sim.lines: circuits.append([int(l.id),"线路 #%d · %d → %d" % [l.id,l.a,l.b]])
-	for key in ["line_a","line_b","failure_facility"]: _fill(key,facilities)
-	_fill("generator",generators); _fill("reserve_target",providers); _fill("failure_line",circuits)
-	if mode=="planning": return
+	for key in ["line_a","line_b","failure_facility","maintenance_facility"]: _fill(key,facilities)
+	_fill("generator",generators); _fill("reserve_target",providers); _fill("failure_line",circuits); _fill("maintenance_line",circuits)
+	if mode=="planning":
+		_adapt_comparison_controls()
+		var asset_mode: bool=_selected("comparison_mode")=="asset"
+		actions.target_controls.disabled=int(_selected("maintenance_line" if _selected("maintenance_target_type")=="line" else "maintenance_facility"))<=0 if asset_mode else int(_selected("generator"))<=0
+		return
 	var kinds: Array=[]
 	for kind in game.sim.catalog:
 		if game.sim.can_build(kind).ok: kinds.append([kind,str(game.sim.catalog[kind].name)])

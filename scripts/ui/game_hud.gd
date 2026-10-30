@@ -4,6 +4,8 @@ const UI = preload("res://scripts/ui/ui_kit.gd")
 const Chart = preload("res://scripts/ui/power_chart.gd")
 const OperatorDock = preload("res://scripts/ui/operator_dock.gd")
 const Presenter = preload("res://scripts/ui/grid_presenter.gd")
+const Attention = preload("res://scripts/ui/attention_model.gd")
+const LENSES={"operations":"运行","planning":"规划","maintenance":"运维","market":"市场","assets":"资产","customers":"客户","digital":"数字"}
 signal tool_requested(value: String)
 signal build_requested(kind: String)
 signal overlay_requested(value: String)
@@ -76,8 +78,17 @@ var focus_title: Label
 var focus_evidence: Label
 var focus_action: Button
 var focus_icon: TextureRect
+var focus_caption: Label
 var build_launcher: Button
 var _focus_item: Dictionary = {}
+var lens := "operations"
+var lens_panel: PanelContainer
+var lens_buttons: Dictionary={}
+var lens_flow: HBoxContainer
+var lens_picker: OptionButton
+var depth_picker: OptionButton
+var lens_risks: Array=[]
+var lens_snapshot: Dictionary={}
 
 func setup(owner_game: Node) -> void:
 	game = owner_game
@@ -348,6 +359,7 @@ func _build() -> void:
 	values.balance.tooltip_text = "每游戏小时净收益"
 	for key in ["supply","reliability","cash","balance"]: values[key].mouse_filter = Control.MOUSE_FILTER_PASS
 	_build_focus_card()
+	_build_lenses()
 	# Full objectives and actions are in a non-modal popover.
 	var tasks := _popup("missions","运营委托",350)
 	mission_scroll=ScrollContainer.new()
@@ -437,7 +449,7 @@ func _build_focus_card() -> void:
 	focus_panel.offset_right=-16
 	focus_panel.offset_top=190
 	var body := UI.column(focus_panel,8)
-	UI.label(body,"◎ 当前重点",14,UI.MUTED)
+	focus_caption=UI.label(body,"◎ 当前重点",14,UI.MUTED)
 	var heading := UI.row(body,8)
 	focus_icon=TextureRect.new()
 	focus_icon.custom_minimum_size=Vector2(54,54)
@@ -451,6 +463,43 @@ func _build_focus_card() -> void:
 	focus_evidence.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
 	focus_action=UI.action(UI.button(body,"打开诊断",_act_on_focus,Vector2(0,40)))
 
+func _build_lenses() -> void:
+	lens_panel=_panel(self)
+	lens_panel.name="DepartmentLenses"
+	lens_panel.add_theme_stylebox_override("panel",UI.style(Color("112b35f5"),8,Color("3c5961"),5))
+	lens_panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	lens_panel.offset_left=16; lens_panel.offset_right=-16
+	var row:=UI.row(lens_panel,6)
+	lens_flow=UI.row(row,4)
+	for key in LENSES:
+		var value: String=key
+		lens_buttons[key]=UI.button(lens_flow,LENSES[key],func(): set_lens(value),Vector2(52,34),true)
+		lens_buttons[key].tooltip_text="切换"+str(LENSES[key])+"视角；共用当前地图与对象"
+	lens_picker=OptionButton.new()
+	for key in LENSES: lens_picker.add_item(LENSES[key]+"视角"); lens_picker.set_item_metadata(lens_picker.item_count-1,key)
+	lens_picker.item_selected.connect(func(index: int): set_lens(str(lens_picker.get_item_metadata(index))))
+	row.add_child(lens_picker)
+	UI.spacer(row)
+	UI.button(row,"部门总览",func(): operator_dock.show_page("department"),Vector2(84,34))
+	depth_picker=OptionButton.new()
+	for title in ["入门","运营","工程"]: depth_picker.add_item(title)
+	depth_picker.tooltip_text="信息深度独立于难度；不改变仿真"
+	depth_picker.item_selected.connect(func(index: int): game.preferences.set_option("information_depth",["beginner","operator","engineer"][index]); game._apply_preferences(); operator_dock.refresh())
+	row.add_child(depth_picker)
+
+func set_lens(value: String,open_workspace: bool=true) -> void:
+	if not LENSES.has(value): return
+	lens=value
+	if game.tool!="select": game._set_tool("select")
+	game.overlay=str({"operations":"power","planning":"power","maintenance":"health","market":"power","assets":"health","customers":"normal","digital":"comm"}[value])
+	game.previous_overlay=game.overlay
+	game._sync_world(true)
+	close_popups()
+	if open_workspace: operator_dock.show_page("department")
+	game._update_inspector()
+	refresh_context()
+	if game.operator_map: game.operator_map.queue_redraw()
+
 func _act_on_focus() -> void:
 	if int(_focus_item.get("target_id",-1))>=0:
 		game.focus_target(str(_focus_item.get("target_type","building")),int(_focus_item.target_id))
@@ -458,7 +507,7 @@ func _act_on_focus() -> void:
 			game._set_tool("line")
 			game.connection_start=int(_focus_item.target_id)
 			game._update_hud()
-	else: operator_dock.show_page("diagnosis")
+	else: operator_dock.show_page("diagnosis" if lens=="operations" else "department")
 
 func refresh_visuals() -> void:
 	if supply_gauge==null or game.sim==null: return
@@ -479,7 +528,19 @@ func refresh_visuals() -> void:
 	if _focus_item.is_empty():
 		var alerts: Array=Presenter.alerts(game.sim)
 		if not alerts.is_empty(): _focus_item=alerts[0]
+	var attention: Dictionary=Attention.snapshot(game.sim,lens,game.preferences.information_depth)
+	lens_snapshot=attention
+	lens_risks=attention.get("risks",[])
+	if not lens_risks.is_empty():
+		_focus_item=lens_risks[0].duplicate(true)
+		# Public topology can make the first evidence-gathering step concrete.
+		for cause in causes:
+			if cause.get("action","")=="connect" and int(cause.get("target_id",-1))==int(_focus_item.get("target_id",-2)):
+				_focus_item.action="connect"
+				break
 	focus_title.text=str(_focus_item.get("title","供电满足需求")).replace(" · 未接电力线路","未接网")
+	focus_title.tooltip_text=focus_title.text
+	if size.x<1400: focus_title.text=focus_title.text.replace(" · 用户报告停电","停电").replace(" · 医院报告停电","停电")
 	focus_evidence.text=str(_focus_item.get("source","继续规划扩张与备用"))
 	if _focus_item.get("action","")=="connect": focus_evidence.text="配电站 → 待接网设施"
 	var target: Dictionary=game.sim.get_building(int(_focus_item.get("target_id",-1))) if str(_focus_item.get("target_type","")) in ["building","facility"] else {}
@@ -570,7 +631,10 @@ func refresh_context() -> void:
 	for key in speed_buttons: speed_buttons[key].button_pressed = game.speed == key
 	pause_button.button_pressed = game.speed == 0
 	pin_button.button_pressed = operator_dock.pinned
-	workspace_title.text=str({"object":"对象详情","diagnosis":"供电诊断","watch":"检索与关注","jobs":"队列与执行回执"}.get(operator_dock.page,"调度工作区"))
+	workspace_title.text=str({"object":"对象详情","diagnosis":"供电诊断","watch":"检索与关注","jobs":"队列与执行回执","department":str(LENSES[lens])+"视角 · 证据与决策"}.get(operator_dock.page,"调度工作区"))
+	for key in lens_buttons: lens_buttons[key].button_pressed=key==lens
+	lens_picker.select(LENSES.keys().find(lens))
+	depth_picker.select(["beginner","operator","engineer"].find(game.preferences.information_depth))
 	get_node("ToolHint").visible = game.tool != "select"
 	get_node("ToolHint").offset_top = -396 if tray.visible else -190
 	get_node("ToolHint").offset_bottom = -348 if tray.visible else -144
@@ -625,15 +689,24 @@ func layout_workspace() -> void:
 	var rail_height: float=maxf(100,status_flow.get_combined_minimum_size().y+20)
 	status_panel.offset_top=12
 	status_panel.offset_bottom=12+rail_height
-	city_panel.position=Vector2(16,rail_height+24)
+	city_panel.position=Vector2(16,rail_height+70)
+	city_panel.visible=not (compact and onboarding_panel.visible)
 	city_panel.custom_minimum_size.x=0
 	city_panel.size.x=minf(320,size.x*.42)
 	objective.custom_minimum_size.x=minf(276,size.x*.39)
 	objective.text_overrun_behavior=TextServer.OVERRUN_TRIM_ELLIPSIS
-	navigation_panel.offset_top=rail_height+24
-	navigation_panel.offset_bottom=rail_height+70
+	navigation_panel.offset_top=rail_height+70
+	navigation_panel.offset_bottom=rail_height+116
 	navigation_panel.visible=not (compact and inspector.visible)
-	layer_panel.position=Vector2(16,rail_height+128)
+	if lens_panel:
+		lens_panel.offset_top=rail_height+18
+		lens_panel.offset_bottom=rail_height+62
+		var lens_width: float=minf(360 if narrow else 640,size.x-32-(minf(364,size.x*.45)+8 if compact and inspector.visible else 0))
+		lens_panel.offset_right=16+lens_width
+		lens_flow.visible=not narrow
+		lens_picker.visible=narrow
+		depth_picker.visible=not (compact and inspector.visible)
+	layer_panel.position=Vector2(16,rail_height+178)
 	layer_panel.visible=not compact
 	var dock_height: float = 62 if narrow else 66
 	dock_panel.offset_left=-minf(880,size.x-32)/2
@@ -646,12 +719,15 @@ func layout_workspace() -> void:
 	for button in center_buttons.values(): button.custom_minimum_size.x=60 if narrow else 80
 	var bottom: float = dock_height+24
 	inspector.offset_bottom=-bottom
-	inspector.offset_top=rail_height+(24 if compact else 82)
+	inspector.offset_top=rail_height+(24 if compact else 134)
 	inspector.offset_left=-minf(364,size.x*.45)
-	focus_panel.offset_top=rail_height+82
+	focus_panel.offset_top=rail_height+134
 	focus_panel.offset_left=-minf(294,size.x*.32)
+	focus_caption.visible=size.x>=1400
+	focus_icon.visible=size.x>=1400
+	focus_evidence.visible=size.x>=1400
 	focus_panel.visible=focus_panel.visible and not compact and not inspector.visible and not tray.visible
-	onboarding_panel.position=Vector2(100 if not compact else 16,rail_height+128)
+	onboarding_panel.position=Vector2(100 if not compact else 16,rail_height+(70 if compact else 178))
 	onboarding_panel.custom_minimum_size.x=minf(310,size.x*.44)
 	tray.offset_left=100 if not narrow else 16
 	tray.offset_right=-100 if not narrow else -16

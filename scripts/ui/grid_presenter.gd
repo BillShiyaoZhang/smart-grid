@@ -176,7 +176,7 @@ static func jobs(sim: RefCounted) -> Array[Dictionary]:
 		for command in queue:
 			var facility: bool = str(command.get("kind",""))=="facility"
 			var title: String = ("远程" if method=="remote" else "现场")+("设施设置" if facility else ("线路巡检" if command.get("kind","")=="patrol" else "线路开关"))
-			result.append({"id":int(command.id),"command_id":int(command.id),"phase":"pending","method":method,
+			result.append({"id":int(command.id),"command_id":int(command.id),"key":"digital:%s:%d" % [method,int(command.id)],"source":"数字控制工单","phase":"pending","method":method,"crew_active":method=="field","work_stage":"field",
 				"target_type":"facility" if facility else "line","target_id":int(command.get("building_id",-1) if facility else command.get("line_id",-1)),
 				"title":title,"remaining":float(command.remaining),"duration":float(command.get("duration",0)),"started_at":float(command.get("started_at",-1)),"message":"已受理，等待实际执行；远程到达时重新验证。" if method=="remote" else "现场队执行中，完成后查看回执。"})
 	# Physical maintenance also occupies the same two field crews. Its timing is a
@@ -184,18 +184,54 @@ static func jobs(sim: RefCounted) -> Array[Dictionary]:
 	for target in [[sim.buildings,"facility"],[sim.lines,"line"],[sim.digital.links,"communication"]]:
 		for item in target[0]:
 			if float(item.get("repair_remaining",0))<=.000001: continue
-			result.append({"id":-int(item.id)-1000,"command_id":-int(item.id)-1000,"phase":"pending","method":"field",
+			result.append({"id":-int(item.id)-1000,"command_id":-int(item.id)-1000,"key":"repair:%s:%d" % [target[1],int(item.id)],"source":"现场抢修工单","phase":"pending","method":"field","crew_active":true,"work_stage":"work",
 				"target_type":target[1],"target_id":int(item.id),"title":"设施检修" if target[1]=="facility" else ("线路抢修" if target[1]=="line" else "通信链路修复"),
 				"remaining":float(item.repair_remaining),"duration":float(item.get("repair_duration",0)),"started_at":float(item.get("repair_started_at",-1)),"message":"现场作业中，完成后核对恢复状态。"})
+	# Submitted maintenance orders are public records, including waiting jobs. A
+	# waiting order has no known departure time and must never consume a crew lane.
+	for job in sim.lifecycle.jobs:
+		var stage: String=str(job.status)
+		var remaining: float=float(job.travel_remaining)+float(job.work_remaining)
+		result.append({"id":int(job.id),"command_id":int(job.id),"key":"lifecycle:%d" % int(job.id),"source":"资产检修工单",
+			"phase":"queued" if stage=="queued" else "pending","method":"field","crew_active":stage in ["travel","work"],"work_stage":stage,
+			"target_type":str(job.target_type),"target_id":int(job.target_id),"title":str(sim.lifecycle.ACTIONS[job.action].name),
+			"remaining":remaining,"duration":0.0,"travel_remaining":float(job.travel_remaining),"work_remaining":float(job.work_remaining),"priority":int(job.priority),"queued_at":float(job.queued_at),
+			"message":"等待空闲现场队；排队时长未定。" if stage=="queued" else ("现场队赶往设备，完成后查看回执。" if stage=="travel" else "现场作业中，完成后核对恢复状态。")})
+	# Microgrid switching shares the same crew pool, but targets a partition. A
+	# member facility is a navigable map target; the title retains partition ID.
+	for grid in sim.customers.microgrids:
+		var target_id: int=int(grid.members[0]) if not grid.members.is_empty() else -1
+		var pending: Dictionary=grid.pending
+		if not pending.is_empty():
+			var method: String=str(pending.method)
+			result.append({"id":int(grid.id),"command_id":int(grid.id),"key":"microgrid:%d:pending" % int(grid.id),"source":"微电网切换工单",
+				"phase":"pending","method":method,"crew_active":method=="field","work_stage":"travel",
+				"target_type":"facility","target_id":target_id,"title":"%s #%d · %s" % [str(grid.name),int(grid.id),"离网切换" if bool(pending.island) else "边界重联"],
+				"remaining":float(pending.remaining),"duration":0.0,"message":str(grid.receipt)})
+		elif str(grid.receipt)!="已登记，尚未离网":
+			# The model stores the latest explicit receipt, without its original
+			# method or timestamp. Preserve that boundary instead of inventing either.
+			var message: String=str(grid.receipt)
+			var phase: String="executed" if message.begins_with("已离网") or message=="边界重联完成" else ("rejected" if message.begins_with("切换被拒绝") else ("cancelled" if "作业取消" in message else "reported"))
+			result.append({"id":int(grid.id),"command_id":int(grid.id),"key":"microgrid:%d:receipt" % int(grid.id),"source":"微电网最近回执",
+				"phase":phase,"method":"microgrid","crew_active":false,"target_type":"facility","target_id":target_id,
+				"title":"%s #%d · 切换回执" % [str(grid.name),int(grid.id)],"remaining":0.0,"message":message})
 	var receipts: Array = sim.operation_receipts() if sim.has_method("operation_receipts") else []
 	for index in range(receipts.size()-1,-1,-1):
 		var receipt: Dictionary = receipts[index]
 		if str(receipt.get("phase","")) not in ["executed","rejected"]: continue
 		var action: String = str(receipt.get("action",""))
-		result.append({"id":int(receipt.get("command_id",-1)),"command_id":int(receipt.get("command_id",-1)),"phase":str(receipt.phase),
+		result.append({"id":int(receipt.get("command_id",-1)),"command_id":int(receipt.get("command_id",-1)),"key":"digital:receipt:%s:%d:%d:%s" % [action,int(receipt.get("command_id",-1)),int(receipt.get("target_id",-1)),str(receipt.get("elapsed_hours",0))],"source":"操作执行回执","phase":str(receipt.phase),"crew_active":false,
 			"method":str(receipt.get("method","field")),"target_type":"facility" if action=="facility" else "line", "target_id":int(receipt.get("target_id",-1)),
 			"title":"设施设置" if action=="facility" else ("线路巡检" if action=="inspect" else "线路开关"),"remaining":0.0,
 			"message":str(receipt.get("message","已完成。")),"elapsed_hours":float(receipt.get("elapsed_hours",0))})
+	for index in range(sim.lifecycle.receipts.size()-1,-1,-1):
+		var receipt: Dictionary=sim.lifecycle.receipts[index]
+		var cancelled: bool=str(receipt.get("status",""))=="cancelled"
+		result.append({"id":int(receipt.id),"command_id":int(receipt.id),"key":"lifecycle:%d:receipt" % int(receipt.id),"source":"资产检修回执",
+			"phase":"cancelled" if cancelled else "executed","method":"field","crew_active":false,"target_type":str(receipt.target_type),"target_id":int(receipt.target_id),
+			"title":str(sim.lifecycle.ACTIONS[receipt.action].name),"remaining":0.0,"elapsed_hours":float(receipt.finished_at),
+			"message":"目标已移除，检修任务已取消。" if cancelled else "现场作业已完成；核对设备状态与供电结果。"})
 	return result
 
 static func facility_marker(sim: RefCounted, id: int) -> Dictionary:

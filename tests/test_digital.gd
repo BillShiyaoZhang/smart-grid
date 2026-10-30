@@ -258,7 +258,7 @@ func _test_forecasts_and_persistence() -> void:
 	sim.step(9.2)
 	check(sim.digital.warning_sent and sim.digital.incidents.is_empty(), "scheduled network event receives an advance warning")
 	var path := "user://test_tidal-grid-digital-test.json"
-	check(sim.save_game(path).ok and Sim.SCHEMA_VERSION == 8, "cross-system simulation uses schema eight")
+	check(sim.save_game(path).ok and Sim.SCHEMA_VERSION == 9, "cross-system simulation uses schema nine")
 	var loaded = Sim.new()
 	check(loaded.load_game(path).ok, "digital topology and cached state load")
 	check(JSON.stringify(sim.digital.snapshot(), "", true, true) == JSON.stringify(loaded.digital.snapshot(), "", true, true), "device timers, observations, forecasts and queues round-trip exactly")

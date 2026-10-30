@@ -61,7 +61,7 @@ func _initialize() -> void:
 	check(before==JSON.stringify(sim.snapshot()),"reports are read only")
 	var saved: Dictionary=JSON.parse_string(JSON.stringify(sim.snapshot()))
 	var restored:=Sim.new()
-	check(restored.restore_snapshot(saved).ok,"JSON schema8 roundtrip valid")
+	check(restored.restore_snapshot(saved).ok,"JSON current-schema roundtrip valid")
 	check(restored.planning.snapshot()==saved.planning,"outage and journal state persisted")
 	before=JSON.stringify(restored.snapshot())
 	var bad: Dictionary=saved.duplicate(true)

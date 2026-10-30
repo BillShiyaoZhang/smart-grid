@@ -47,6 +47,8 @@ macOS 已安装 Godot 时，也可直接双击 `run_game.command` 启动游戏�
 
 ## 界面与信息层级
 
+地图现可切换 **运行、规划、运维、市场、资产、客户、数字** 七种职业视角，共用同一电网、对象检查器和操作队列。「部门总览」按职责呈现指标、最多五条优先事项与证据；入门／运营／工程三档信息深度独立于难度。新增健康×公开影响矩阵、可靠性趋势与事件贡献、事故复盘，以及同一24小时内的运行／单故障和继续／检修／更换差分比较。SAIDI／SAIFI／CMI采用明确的聚合负荷点口径；未知和过时状态保持区别。详见[职业视角与决策指南](docs/DEPARTMENTS.md)。
+
 顶部始终显示供电比例、同标尺供需条和缺口，资金、净收益与时间分组显示。底部「建造」展开五类设施托盘；「经营 M」「运维 N」「发展 T」按经营问题组织入口。地图当前重点卡可直接进入接线或检查，医院与客户的公开供电反馈和已核实故障分别标注。
 
 地图保留当前委托、底部工具栏与经营状态。右侧使用同一个工作区，在「对象」「诊断」「关注」「队列」之间切换：点击供电数字查看缺额、证据与下一步，点击告警定位对象，再查看适用处置。未知故障只显示待核实的原因，不会因打开诊断而被提前揭示。
@@ -158,6 +160,6 @@ Windows 可运行 `./tests/run_checks.ps1` 执行全部自动测试，或用 `-G
 
 ## 跨系统回归
 
-新增五套测试：`test_dispatch_integration.gd`（混合电源、光储来源、孤岛合约与重算守恒）、`test_thermal_integration.gd`（最低负荷、辅机保障、配套与检修）、`test_city_assets.gd`（人工建设归属、拆迁与退款、旧档迁移）、`test_digital_boundaries.gd`（设施命令、观测、历史数字化与攻击边界）、`test_facility_ui.gd`（真实按钮、排队回执与失败反馈）。均可按上面的 Godot `--headless --path . -s tests/<脚本>.gd` 命令运行。当前存档为 schema 8，兼容旧版本；详细验证见 [验证记录](docs/VALIDATION.md)。
+新增五套测试：`test_dispatch_integration.gd`（混合电源、光储来源、孤岛合约与重算守恒）、`test_thermal_integration.gd`（最低负荷、辅机保障、配套与检修）、`test_city_assets.gd`（人工建设归属、拆迁与退款、旧档迁移）、`test_digital_boundaries.gd`（设施命令、观测、历史数字化与攻击边界）、`test_facility_ui.gd`（真实按钮、排队回执与失败反馈）。均可按上面的 Godot `--headless --path . -s tests/<脚本>.gd` 命令运行。当前存档为 schema 9，兼容旧版本；详细验证见 [验证记录](docs/VALIDATION.md)。
 
 战役另有 `test_campaign.gd`（十五关真实操作与途中读档继续）、`test_campaign_boundaries.gd`（年代能力、固定购电、观测与存档边界）、`test_campaign_maps.gd`（地图与城市登记）、`test_campaign_game.gd`（真实界面与顺序解锁）。图形模式运行 `tests/render_campaign.gd` 可在 `.godot/campaign-qa/ui/` 生成四种分辨率的战役截图。

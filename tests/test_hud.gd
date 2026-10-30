@@ -113,11 +113,13 @@ func _run() -> void:
 		var rect := Rect2(Vector2.ZERO,root.get_visible_rect().size)
 		check(rect.encloses(hud.alert_button.get_global_rect()),"top-right navigation stays onscreen at "+str(resolution))
 		var area := 0.0
+		var panel_areas: Dictionary={}
 		for child in hud.get_children():
 			if child is PanelContainer and child.is_visible_in_tree():
 				check(rect.encloses(child.get_global_rect()),"default HUD panel fits "+str(resolution)+" "+str(child.name)+" "+str(child.get_global_rect())+" within "+str(rect))
 				area += child.get_global_rect().get_area()
-		check(area / rect.get_area() < .35,"visual operating HUD preserves at least 65 percent of the map at "+str(resolution))
+				panel_areas[child.name]=child.get_global_rect().get_area()
+		check(area / rect.get_area() < .35,"visual operating HUD preserves at least 65 percent of the map at "+str(resolution)+"; covered="+str(area/rect.get_area())+" "+str(panel_areas))
 		var map_center := Vector2(rect.size.x*.5,rect.size.y*.50)
 		var center_clear := true
 		for child in hud.get_children():

@@ -92,6 +92,8 @@ func forecast(sim: RefCounted, settings: Dictionary={}, hours: int=24) -> Dictio
 	var restored: Dictionary=projected.restore_snapshot(sim.snapshot())
 	if not restored.ok: return {"ok":false,"message":"当前状态无法建立推演副本。"}
 	var assumptions: Array[String]=["按15分钟步长推演当前运行方案，工程损耗采用参考近似。采用当前电价规则、公开城市需求与典型天气；未预知的灾害、网络事件和随机故障不作精确预报。"]
+	if projected.active_repairs()>0 or not projected.lifecycle.jobs.is_empty() or not projected.digital.pending_commands.is_empty():
+		assumptions.append("已受理的在途指令和工单继续按原队列执行，完成时可能覆盖本次假设设点；比较不会撤销这些操作。")
 	var unknown:=0
 	for b in projected.buildings:
 		var observed: Dictionary=sim.facility_observation(int(b.id))
@@ -101,6 +103,7 @@ func forecast(sim: RefCounted, settings: Dictionary={}, hours: int=24) -> Dictio
 			b.online=true
 			b.repair_remaining=0.0
 			b.lifecycle_busy=false
+			b.lifecycle_failure=false
 			if projected.evolution.is_storage(str(b.kind)):
 				b.energy_capacity=float(b.get("nominal_energy_capacity",b.energy_capacity))
 				b.soh=100.0
@@ -117,6 +120,9 @@ func forecast(sim: RefCounted, settings: Dictionary={}, hours: int=24) -> Dictio
 				b.energy_capacity=float(b.get("nominal_energy_capacity",b.energy_capacity))*float(b.soh)/100.0
 			b.ramp_mw=maxf(0.0,float(observed.ramp_mw)) if observed.get("ramp_mw")!=null else maxf(0.0,float(observed.output))
 			b.startup_remaining=float(observed.startup_remaining) if observed.get("startup_remaining")!=null else float(projected.evolution.STARTUP.get(str(b.kind),0.0))
+		# The internal cause flag is never telemetry. Observed online/health state
+		# already carries the visible operational constraint.
+		b.lifecycle_failure=false
 	for l in projected.lines:
 		var observed: Dictionary=sim.line_observation(int(l.id))
 		if str(observed.get("visibility","unknown")) not in ["verified","patrol"]:
@@ -124,6 +130,7 @@ func forecast(sim: RefCounted, settings: Dictionary={}, hours: int=24) -> Dictio
 			l.fault=false
 			l.repair_remaining=0.0
 			l.lifecycle_busy=false
+			l.lifecycle_failure=false
 			l.heat=0.0
 			l.health=100.0
 			l.trip_reason=""
@@ -132,6 +139,7 @@ func forecast(sim: RefCounted, settings: Dictionary={}, hours: int=24) -> Dictio
 			l.fault=bool(observed.get("fault",false))
 			l.health=float(observed.health)
 			l.heat=float(observed.heat)
+		l.lifecycle_failure=false
 	var meter_unknown:=0
 	var customer_report: Dictionary=sim.customers.report(sim)
 	for display in customer_report.customers:
@@ -193,16 +201,58 @@ func forecast(sim: RefCounted, settings: Dictionary={}, hours: int=24) -> Dictio
 		var target: Dictionary=projected.get_building(int(settings.outage_facility))
 		if target.is_empty(): return {"ok":false,"message":"设施不存在。"}
 		target.online=false
+	var maintenance_quote: Dictionary={}
+	if settings.has("maintenance"):
+		var instruction: Variant=settings.maintenance
+		if not instruction is Dictionary or instruction.get("target_type") not in ["facility","line"] or not _number(instruction.get("target_id"),1,1e9) or floorf(float(instruction.target_id))!=float(instruction.target_id) or not projected.lifecycle.ACTIONS.has(instruction.get("action")):
+			return {"ok":false,"message":"请选择有效检修对象和处置方式。"}
+		var target_type:=str(instruction.target_type)
+		var target_id:=int(instruction.target_id)
+		var action:=str(instruction.action)
+		maintenance_quote=projected.lifecycle.quote(projected,target_type,target_id,action)
+		if not maintenance_quote.ok: return {"ok":false,"message":"检修推演无法提交："+str(maintenance_quote.message)}
+		var request: Dictionary=projected.lifecycle.maintenance(projected,target_type,target_id,action)
+		if not request.ok: return {"ok":false,"message":"检修推演无法提交："+str(request.message)}
+		maintenance_quote=maintenance_quote.duplicate(true)
+		maintenance_quote.target_type=target_type
+		maintenance_quote.target_id=target_id
+		maintenance_quote.action=action
+		maintenance_quote.title=str(projected.lifecycle.ACTIONS[action].name)
+		maintenance_quote.initial_status="queued"
+		for job in projected.lifecycle.jobs:
+			if int(job.id)==int(request.id): maintenance_quote.initial_status=str(job.status)
+		assumptions.append("%s #%d 的%s按实际现场队、备件、路程及作业停运在副本中排队；报价不含等待空闲队伍的未定时长，不预报随机故障或保证可靠性提升。" % ["设施" if target_type=="facility" else "线路",target_id,maintenance_quote.title])
 	projected._solve(0.0)
 	var rows: Array=[]
-	var start_cash:=float(projected.cash)
+	# Include up-front planned maintenance, rather than hiding its cost by
+	# starting the cash comparison after the disposable work order was charged.
+	var start_cash:=float(sim.cash)
 	var start_served:=float(projected.total_served_mwh)
 	var start_demand:=float(projected.total_demand_mwh)
+	var start_carbon:=float(projected.carbon_tonnes)
 	var max_loading:=0.0
 	var min_voltage:=1.0
+	var min_reserve:=INF
+	var clean_energy:=0.0
+	var critical_points: Dictionary={}
+	var critical_point_hours:=0.0
 	var uncertainty:=0.08+minf(.32,float(unknown)/maxf(1.0,float(projected.buildings.size()))*.35)
+	assumptions.append("清洁供电、关键负荷点失供点时和备用余量采用15分钟参考采样；关键负荷按医院负荷点计，不代表户数。排放仅计本地发电，不含外购电隐含排放。方案参数假设从推演起点采用，实际控制仍须另行提交并等待执行。")
 	for offset in hours:
-		projected.step(1.0)
+		for _quarter in 4:
+			var previous_served:=float(projected.total_served_mwh)
+			projected.step(0.25)
+			var sample: Dictionary=projected.totals
+			clean_energy+=maxf(0.0,float(projected.total_served_mwh)-previous_served)*clampf(float(sample.get("renewable_supply_share",0.0)),0,1)
+			max_loading=maxf(max_loading,float(sample.max_loading))
+			min_voltage=minf(min_voltage,float(sample.get("min_voltage",1.0)))
+			var available_power:=0.0
+			for building in projected.buildings:
+				available_power+=float(building.available)
+				if building.kind=="hospital" and projected.customer_service_active(int(building.id)) and float(building.demand)>0.00001 and float(building.served)<float(building.demand)*0.98:
+					critical_points[int(building.id)]=true
+					critical_point_hours+=0.25
+			min_reserve=minf(min_reserve,available_power+float(sample.grid_capacity)-float(sample.demand))
 		var t: Dictionary=projected.totals
 		var demand:=float(t.demand)
 		var wind:=0.0
@@ -214,8 +264,17 @@ func forecast(sim: RefCounted, settings: Dictionary={}, hours: int=24) -> Dictio
 			available+=float(b.available)
 		max_loading=maxf(max_loading,float(t.max_loading))
 		min_voltage=minf(min_voltage,float(t.get("min_voltage",1.0)))
-		rows.append({"offset":offset+1,"day":int(projected.day),"hour":float(projected.time_hours),"demand":demand,"demand_low":demand*(1.0-uncertainty),"demand_high":demand*(1.0+uncertainty),"wind":wind,"solar":solar,"net_load":demand-wind-solar,"storage_mwh":float(t.battery_mwh),"imports":float(t.import_mw),"unserved":float(t.outage),"reserve_mw":available+float(t.grid_capacity)-demand,"max_loading":float(t.max_loading),"min_voltage":float(t.get("min_voltage",1.0)),"price":float(t.market_price)})
-	return {"ok":true,"rows":rows,"assumptions":assumptions,"confidence":"参考" if unknown>0 or meter_unknown>0 else "较高","unknown_facilities":unknown,"net_cash":float(projected.cash)-start_cash,"unserved_mwh":maxf(0.0,float(projected.total_demand_mwh)-start_demand-float(projected.total_served_mwh)+start_served),"max_loading":max_loading,"min_voltage":min_voltage,"settings":settings.duplicate(true)}
+		rows.append({"offset":offset+1,"day":int(projected.day),"hour":float(projected.time_hours),"demand":demand,"served":float(t.served),"generation":float(t.generation),"clean_served":float(t.served)*float(t.get("renewable_supply_share",0.0)),"carbon_tph":float(t.get("carbon",0.0)),"demand_low":demand*(1.0-uncertainty),"demand_high":demand*(1.0+uncertainty),"wind":wind,"solar":solar,"net_load":demand-wind-solar,"storage_mwh":float(t.battery_mwh),"imports":float(t.import_mw),"unserved":float(t.outage),"reserve_mw":available+float(t.grid_capacity)-demand,"max_loading":float(t.max_loading),"min_voltage":float(t.get("min_voltage",1.0)),"price":float(t.market_price)})
+	var served_energy:=maxf(0.0,float(projected.total_served_mwh)-start_served)
+	var demand_energy:=maxf(0.0,float(projected.total_demand_mwh)-start_demand)
+	var local_carbon:=maxf(0.0,float(projected.carbon_tonnes)-start_carbon)
+	return {"ok":true,"rows":rows,"assumptions":assumptions,"confidence":"参考" if unknown>0 or meter_unknown>0 else "较高","unknown_facilities":unknown,
+		"horizon_hours":hours,"sample_hours":0.25,"source_elapsed_hours":float(sim.elapsed_hours),"source_day":int(sim.day),"source_time_hours":float(sim.time_hours),
+		"net_cash":float(projected.cash)-start_cash,"served_mwh":served_energy,"demand_mwh":demand_energy,"unserved_mwh":maxf(0.0,demand_energy-served_energy),
+		"clean_served_mwh":clean_energy,"clean_supply_share":clean_energy/served_energy if served_energy>0.000001 else 0.0,"local_carbon_tonnes":local_carbon,
+		"local_carbon_kg_per_served_mwh":local_carbon*1000.0/served_energy if served_energy>0.000001 else null,
+		"critical_unserved_points":critical_points.size(),"critical_unserved_point_hours":critical_point_hours,"min_reserve_mw":min_reserve,
+		"max_loading":max_loading,"min_voltage":min_voltage,"maintenance_quote":maintenance_quote,"settings":settings.duplicate(true)}
 
 func compare(sim: RefCounted, plans: Array) -> Dictionary:
 	if plans.is_empty() or plans.size()>3: return {"ok":false,"message":"请选择1—3个运行方案。"}

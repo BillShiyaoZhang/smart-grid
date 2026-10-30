@@ -59,14 +59,20 @@ func _draw() -> void:
 		var flow: float = float(observation.get("flow",0)) if observation.get("flow") != null and current else 0.0
 		var fault: bool = current and observation.get("fault_known",false) and observation.get("fault",false)
 		var closed: bool = current and observation.get("closed",false)
+		var loading: float=absf(flow)/maxf(.1,float(line.capacity))
+		var focus_network: bool=game.hud.lens in ["operations","planning","market"]
 		if not electrical and not selected and not related and not fault and not (current and absf(flow)>.02): continue
 		# A dark outline preserves the route against both sunlit grass and storm light.
 		if current: draw_line(start,finish,Color("0a202ccc"),7 if selected else 5,true)
-		if current and absf(flow) / maxf(.1,float(line.capacity)) > .85: color = UI.AMBER
+		if focus_network and loading<.8 and not selected and not related: color=Color("658a8a88")
+		if current and loading >= .8: color = UI.AMBER
+		if current and loading>1.0: color=UI.RED
 		if fault: color = UI.RED
 		if selected: draw_line(start,finish,UI.TEXT,6,true)
 		if not current or not closed or fault: draw_dashed_line(start,finish,color,3 if selected else 2,7)
-		else: draw_line(start,finish,color,3.5 if selected else (3 if absf(flow)/maxf(.1,float(line.capacity))>.85 else 2),true)
+		else: draw_line(start,finish,color,4 if selected else clampf(1.5+sqrt(absf(flow))*.5,1.5,7),true)
+		if current and loading>=.8 and not selected and focus_network and game.zoom<65:
+			_label(start.lerp(finish,.5)+Vector2(5,16),"! %.0f%% · %.1f MW" % [loading*100,absf(flow)],color)
 		if fault:
 			var center: Vector2=start.lerp(finish,.5)
 			draw_circle(center,10,Color("142b35"))
@@ -140,11 +146,43 @@ func _draw() -> void:
 		var point: Vector2 = cluster.point
 		_draw_role(point,str(cluster.kind))
 		_label(point+Vector2(9,5),("×%d · !%d" % [cluster.count,cluster.outages]) if cluster.outages>0 else "×%d" % cluster.count,UI.AMBER if cluster.outages>0 else UI.TEXT)
+	_draw_lens_annotations()
 	var show_legend: bool=not (game.tool=="build" and size.y<650)
 	if electrical and show_legend:
 		_label(Vector2(100,size.y-96),"实线已核实 · 虚线未知/断开 · 箭头潮流 · × 已知故障",UI.MUTED)
 	elif game.overlay == "comm" and show_legend:
 		_label(Vector2(100,size.y-96),"通信：实线光纤 · 虚线无线 · ✓可信 · ?待核实",Color("81c9ee"))
+	elif game.hud.lens=="customers" and show_legend:
+		_label(Vector2(100,size.y-96),"用户反馈 · ✚ 关键负荷 · ! 失供 · 聚合负荷点口径",UI.MUTED)
+	elif game.hud.lens in ["assets","maintenance"] and show_legend:
+		_label(Vector2(100,size.y-96),"已知健康 × 公开影响 · ? 未核实 · 不能推断精确故障",UI.MUTED)
+
+func _draw_lens_annotations() -> void:
+	var lens: String=game.hud.lens
+	if lens in ["assets","maintenance"]:
+		for row in game.hud.lens_snapshot.get("assets",[]):
+			if row.get("target_type","facility")!="facility": continue
+			var b: Dictionary=game.sim.get_building(int(row.get("target_id",row.get("id",-1))))
+			if b.is_empty(): continue
+			var point:=_screen(game._cell_position(b.cell)+Vector3.UP*2.1)
+			if not Rect2(Vector2(0,135),Vector2(size.x,maxf(0,size.y-220))).has_point(point): continue
+			var health: Variant=row.get("health")
+			var historical: bool=row.get("confidence","")=="stale"
+			var color: Color=UI.MUTED if health==null or historical else (UI.RED if float(health)<50 else (UI.AMBER if float(health)<75 else UI.TEAL))
+			if health==null or float(health)<75 or float(row.get("criticality",0))>.8:
+				_label(point,("? 当前健康未知" if health==null or historical else "健康 %.0f%%" % float(health))+(" · ✚ 高影响" if float(row.get("criticality",0))>.8 else ""),color)
+	elif lens in ["customers","market","planning"]:
+		for b in game.sim.buildings:
+			var feedback: Dictionary=Presenter.customer_feedback(game.sim,int(b.id))
+			var point:=_screen(game._cell_position(b.cell)+Vector3.UP*2.1)
+			if not Rect2(Vector2(0,135),Vector2(size.x,maxf(0,size.y-220))).has_point(point): continue
+			if lens=="customers" and not feedback.is_empty() and game.zoom<65:
+				_label(point,("✚ " if b.kind=="hospital" else "")+str(b.name)+(" · 已供电" if feedback.powered else " · ! 报告失供"),UI.TEAL if feedback.powered else UI.AMBER)
+			elif lens=="market" and game.sim.evolution.is_terminal(str(b.kind)):
+				var observation: Dictionary=game.sim.facility_observation(int(b.id))
+				_label(point,"交易入口 · "+("%+.1f MW" % float(observation.output) if observation.trusted else "? 功率待核实"),Color("81c9ee"))
+			elif lens=="planning" and b.kind in ["home","factory","hospital"] and feedback.is_empty():
+				_label(point,"◇ 待开通服务 · 规划接入",UI.MUTED)
 
 func _draw_role(at: Vector2, kind: String) -> void:
 	var category: String=Presenter.category_for(kind)

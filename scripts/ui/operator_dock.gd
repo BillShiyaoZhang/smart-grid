@@ -2,6 +2,7 @@ extends VBoxContainer
 ## One persistent map workspace. Presentation reads never execute simulation commands.
 const UI = preload("res://scripts/ui/ui_kit.gd")
 const Presenter = preload("res://scripts/ui/grid_presenter.gd")
+const DepartmentDesk = preload("res://scripts/ui/department_desk.gd")
 var game: Node
 var host_hud: Control
 var tabs: TabBar
@@ -17,14 +18,15 @@ var watched: Array[int] = []
 var _signature := ""
 var _expanded_evidence: Dictionary={}
 var _show_all_causes := false
+var department_desk: Control
 
 func setup(owner_game: Node, owner_hud: Control) -> void:
 	game = owner_game
 	host_hud = owner_hud
 	size_flags_vertical = Control.SIZE_EXPAND_FILL
 	tabs = TabBar.new()
-	for title in ["对象", "诊断", "关注", "队列"]: tabs.add_tab(title)
-	tabs.tab_changed.connect(func(index: int): show_page(["object","diagnosis","watch","jobs"][index]))
+	for title in ["对象", "诊断", "关注", "队列", "部门"]: tabs.add_tab(title)
+	tabs.tab_changed.connect(func(index: int): show_page(["object","diagnosis","watch","jobs","department"][index]))
 	add_child(tabs)
 	var controls := UI.row(self,4)
 	search = LineEdit.new()
@@ -47,12 +49,16 @@ func setup(owner_game: Node, owner_hud: Control) -> void:
 	add_child(scroll)
 	body = UI.column(scroll,8)
 	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	department_desk=DepartmentDesk.new()
+	add_child(department_desk)
+	department_desk.setup(game,host_hud)
 	_sync_visibility()
 
 func show_page(value: String) -> void:
 	opened = true
 	page = value
-	var index: int = ["object","diagnosis","watch","jobs"].find(page)
+	if value not in ["object","diagnosis","watch","jobs","department"]: page="object"
+	var index: int = ["object","diagnosis","watch","jobs","department"].find(page)
 	if tabs.current_tab != index: tabs.current_tab = index
 	_signature = ""
 	_sync_visibility()
@@ -67,6 +73,7 @@ func close() -> void:
 
 func reset_session() -> void:
 	close()
+	if department_desk: department_desk.reset_session()
 	watched.clear()
 	search.text = ""
 	filter.select(0)
@@ -77,7 +84,8 @@ func reset_session() -> void:
 
 func _sync_visibility() -> void:
 	if scroll == null: return
-	scroll.visible = page != "object"
+	scroll.visible = page not in ["object","department"]
+	if department_desk: department_desk.visible=page=="department"
 	get_node("SearchControls").visible = page == "watch"
 	host_hud.inspector_scroll.visible = page == "object"
 	size_flags_vertical = Control.SIZE_EXPAND_FILL if page != "object" else Control.SIZE_SHRINK_BEGIN
@@ -107,6 +115,9 @@ func _target_button(parent: Node, title: String, kind: String, id: int) -> Butto
 
 func refresh() -> void:
 	if not opened or page == "object": return
+	if page=="department":
+		department_desk.refresh()
+		return
 	var data: Variant
 	match page:
 		"diagnosis": data = Presenter.diagnosis(game.sim)
@@ -201,33 +212,50 @@ func _act_on_cause(cause: Dictionary) -> void:
 
 func _jobs(rows: Array) -> void:
 	_text("草案 → 提交 → 执行 → 生效 / 拒绝",UI.MUTED)
-	var field_jobs: Array=rows.filter(func(job: Dictionary): return job.get("method","")=="field" and job.get("phase","")=="pending")
+	var field_jobs: Array=rows.filter(func(job: Dictionary): return bool(job.get("crew_active",job.get("method","")=="field" and job.get("phase","")=="pending")))
+	var displayed: Array[String]=[]
 	for index in 2:
 		var card: VBoxContainer=UI.card(body,Color("36515b"),10)
 		var heading := UI.row(card,6)
 		UI.label(heading,"▣ 队伍 %d" % (index+1),16)
 		UI.spacer(heading)
 		UI.badge(heading,"执行中" if index<field_jobs.size() else "空闲",UI.AMBER if index<field_jobs.size() else UI.TEAL)
-		if index<field_jobs.size(): _job_body(card,field_jobs[index])
+		if index<field_jobs.size():
+			displayed.append(str(field_jobs[index].get("key","")))
+			_job_body(card,field_jobs[index])
 	if rows.is_empty(): _text("没有在途命令或近期回执。",UI.MUTED)
 	for job in rows:
 		var phase: String = str(job.get("phase","pending"))
-		if job.get("method","")=="field" and phase=="pending": continue
+		if bool(job.get("crew_active",false)) and str(job.get("key","")) in displayed: continue
 		var failed: bool = phase in ["failed","rejected"]
 		var card: VBoxContainer=UI.card(body,UI.RED if failed else Color("36515b"),10)
-		UI.badge(card,str({"pending":"◷ 远程在途","executed":"✓ 已执行","rejected":"× 已拒绝"}.get(phase,phase)),UI.RED if failed else UI.TEAL)
+		var caption: String=str({"pending":"◷ 远程在途" if job.get("method","")=="remote" else "◷ 现场执行","queued":"◷ 等待现场队","executed":"✓ 已执行","rejected":"× 已拒绝","cancelled":"已取消","reported":"最新回执"}.get(phase,phase))
+		UI.badge(card,caption,UI.RED if failed else (UI.AMBER if phase=="queued" else UI.TEAL))
 		_job_body(card,job)
 
 func _job_body(parent: Node, job: Dictionary) -> void:
 	UI.label(parent,str(job.get("title","操作")),16)
+	UI.label(parent,str(job.get("source","操作工单")),12,UI.MUTED)
 	var remaining: float=float(job.get("remaining",0))
 	if job.get("phase","")=="pending":
 		var duration: float=float(job.get("duration",0))
-		var progress: Control=UI.metric(parent,"预计剩余",maxf(0,duration-remaining),maxf(.001,duration),"",UI.AMBER,duration>0,"%.0f 游戏分钟 · 尚未生效" % (remaining*60))
-		progress.show_value=false
+		var stage: String=str({"travel":"赶赴现场","work":"现场作业"}.get(str(job.get("work_stage","")),"在途")) if job.get("method","")=="field" else "远程在途"
+		var caption: String="%s · 预计剩余 %.0f 游戏分钟 · 尚未生效" % [stage,remaining*60]
+		if duration>0:
+			var progress: Control=UI.metric(parent,"预计剩余",maxf(0,duration-remaining),duration,"",UI.AMBER,true,caption)
+			progress.show_value=false
+		else:
+			var pending_label:=UI.label(parent,caption,14,UI.AMBER)
+			pending_label.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	elif job.get("phase","")=="queued":
+		var queued:=UI.label(parent,"等待空闲现场队 · 出发时间未定\n出发后预计还需 %.0f 游戏分钟；尚未生效" % (remaining*60),14,UI.AMBER)
+		queued.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
 	else:
 		var message := UI.label(parent,str(job.get("message","请核对实际生效值")),14,UI.MUTED)
 		message.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
+	if job.has("travel_remaining") and job.has("work_remaining"):
+		var stages:=UI.label(parent,"路程剩余 %.0f 分钟 · 作业剩余 %.0f 分钟" % [float(job.travel_remaining)*60,float(job.work_remaining)*60],12,UI.MUTED)
+		stages.autowrap_mode=TextServer.AUTOWRAP_WORD_SMART
 	if int(job.get("target_id",-1))>=0: _target_button(parent,"查看目标",str(job.get("target_type","building")),int(job.target_id))
 
 func _facilities(rows: Array) -> void:

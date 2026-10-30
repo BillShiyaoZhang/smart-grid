@@ -242,6 +242,8 @@ func _build_input(body: Node) -> void:
 	UI.button(body,"恢复默认快捷键",func(): _save_result(preferences.reset_bindings()); _refresh_bindings())
 
 func _build_accessibility(body: Node) -> void:
+	_choice(body,"信息深度","information_depth",["beginner","operator","engineer"],["入门 · 结果与下一步","运营 · 功率、证据与指标","工程 · 观测年龄与模型边界"])
+	_note(body,"信息深度只改变解释与专业参数的展开，不改变仿真规则或难度。")
 	scale_picker=_choice(body,"界面与字号比例","ui_scale",[1.0,1.25,1.5],["100%","125%","150%"])
 	contrast_toggle=_toggle(body,"高对比界面","high_contrast")
 	motion_toggle=_toggle(body,"减少天气、电流与菜单装饰动效","reduced_motion")

@@ -247,6 +247,32 @@ func _select_section(index: int) -> void:
 func _id(picker: OptionButton) -> int:
 	return picker.get_item_id(picker.selected) if picker.selected>=0 else -1
 
+func inherit_selection(facility_id: int,line_id: int=-1) -> void:
+	# Retain each object's draft before changing any picker or target category.
+	capture_drafts()
+	if line_id>=0 and not game.sim.get_line(line_id).is_empty():
+		target_type.select(1)
+		_signatures.erase("assets")
+		refresh()
+		_select_id(asset_picker,line_id)
+		_select_id(line_picker,line_id)
+	elif facility_id>=0 and not game.sim.get_building(facility_id).is_empty():
+		target_type.select(0)
+		_signatures.erase("assets")
+		refresh()
+		_select_id(asset_picker,facility_id)
+		_select_id(customer_picker,facility_id)
+		_select_id(station_picker,facility_id)
+	refresh()
+
+func _select_id(picker: OptionButton,id: int) -> void:
+	for i in picker.item_count:
+		if picker.get_item_id(i)==id:
+			if picker.selected!=i:
+				picker.select(i)
+				picker.item_selected.emit(i)
+			return
+
 func _fill(picker: OptionButton,key: String,rows: Array) -> void:
 	var signature:=str(rows)
 	if _signatures.get(key,"")==signature: return

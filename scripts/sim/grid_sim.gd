@@ -7,7 +7,8 @@ extends RefCounted
 signal changed
 signal event_logged(entry: Dictionary)
 
-const SCHEMA_VERSION := 8
+const SCHEMA_VERSION := 9
+const ReliabilityMetrics = preload("res://scripts/sim/reliability_metrics.gd")
 const PlanningModel = preload("res://scripts/sim/grid_planning.gd")
 const LifecycleModel = preload("res://scripts/sim/asset_lifecycle.gd")
 const EngineeringModel = preload("res://scripts/sim/grid_engineering.gd")
@@ -53,6 +54,7 @@ var lifecycle: RefCounted = LifecycleModel.new()
 var engineering: RefCounted = EngineeringModel.new()
 var customers: RefCounted = CustomerModel.new()
 var strategy: RefCounted = StrategyModel.new()
+var reliability_metrics: RefCounted = ReliabilityMetrics.new()
 var _is_projection := false
 var _day_ahead_budget := 0.0
 var _day_ahead_delivered := 0.0
@@ -110,6 +112,7 @@ func reset(seed_value: int = 42) -> void:
 	customers.reset()
 	strategy.reset()
 	planning.reset()
+	reliability_metrics.reset()
 	management.reset()
 	_scenario_map_id = 0
 	_scenario_map = {}
@@ -533,6 +536,7 @@ func demolish(id: int) -> Dictionary:
 	engineering.prune(self)
 	customers.prune(self)
 	strategy.prune(self)
+	reliability_metrics.reconcile(self)
 	_log("已拆除%s，按玩家实际投资回收 ¥%.0f；市政免费资产不产生建造退款。" % [building.name,refund], "info")
 	_refresh()
 	return _ok("拆除完成。", id)
@@ -804,6 +808,7 @@ func expand_region() -> Dictionary:
 	if campaign.active: return _fail("战役使用本章规划区域；八城沙盘可从自由运营开启。")
 	var result: Dictionary = region.activate(self)
 	if result.ok:
+		reliability_metrics.reconcile(self)
 		_log(result.message, "success")
 		_refresh()
 	return result
@@ -813,6 +818,7 @@ func explore_region() -> Dictionary:
 	if management.state.active and int(management.state.stage)<4: return _fail("先完成备用与风暴恢复，再逐城拓展服务。")
 	var result: Dictionary=region.activate(self,true)
 	if result.ok:
+		reliability_metrics.reconcile(self)
 		_log(result.message,"success")
 		_refresh()
 	return result
@@ -1126,7 +1132,9 @@ func _tick(dt: float) -> void:
 	var contract_was_active: bool = float(market.state.contract_remaining) > 0.0
 	market.settle(dt, settlement_day, totals)
 	strategy.settle(self,dt)
-	if not _is_projection: planning.advance(self,dt)
+	if not _is_projection:
+		planning.advance(self,dt)
+		reliability_metrics.advance(self,dt)
 	totals.satisfaction = float(market.state.satisfaction)
 	totals.income = last_income
 	totals.expenses = last_expenses
@@ -1652,6 +1660,7 @@ func snapshot() -> Dictionary:
 		"evolution": evolution.snapshot(), "region": region.snapshot(),
 		"campaign": campaign.snapshot(),
 		"management": management.snapshot(),
+		"reliability_metrics": reliability_metrics.snapshot(),
 		"planning": planning.snapshot(), "lifecycle": lifecycle.snapshot(),
 		"engineering": engineering.snapshot(), "customers": customers.snapshot(), "strategy": strategy.snapshot(),
 		"sandbox_goal": sandbox_goal, "sandbox_goal_hours": sandbox_goal_hours,
@@ -1738,6 +1747,13 @@ func restore_snapshot(data: Variant) -> Dictionary:
 	engineering=EngineeringModel.new()
 	customers=CustomerModel.new()
 	strategy=StrategyModel.new()
+	reliability_metrics=ReliabilityMetrics.new()
+	if int(data.schema_version)>=9:
+		reliability_metrics.restore(data.reliability_metrics)
+	else:
+		# Old saves did not record point interruptions. Start a declared new
+		# observation window rather than inventing history from energy totals.
+		reliability_metrics.reset(float(data.elapsed_hours))
 	if int(data.schema_version)>=8:
 		planning.restore(data.planning)
 		lifecycle.restore(data.lifecycle)
@@ -1806,6 +1822,9 @@ func _valid_save(data: Dictionary) -> bool:
 	# are floats, so identifiers also require an explicit integrality check.
 	if not _saved_integer(data.get("schema_version"), 1, SCHEMA_VERSION):
 		return false
+	if int(data.schema_version)>=9:
+		if not _saved_number(data.get("elapsed_hours"),0,1e15) or not _saved_integer(data.get("next_building_id"),1,1000000000): return false
+		if not ReliabilityMetrics.valid_snapshot(data.get("reliability_metrics"),float(data.elapsed_hours),int(data.next_building_id)): return false
 	if int(data.schema_version)>=8:
 		for key in ["planning","lifecycle","engineering","customers","strategy"]:
 			if not data.get(key) is Dictionary: return false
@@ -1997,6 +2016,7 @@ func _valid_save(data: Dictionary) -> bool:
 		for grid in data.customers.microgrids:
 			for id in grid.get("members",[]):
 				if not ids.has(int(id)): return false
+	if int(data.schema_version)>=9 and not ReliabilityMetrics.references_valid(data.reliability_metrics,ids,data.region): return false
 	return true
 
 func _saved_number(value: Variant, minimum: float, maximum: float) -> bool:

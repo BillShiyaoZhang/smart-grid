@@ -1,5 +1,25 @@
 # 验证记录
 
+## 职业视角与决策闭环（2026-10-30）
+
+最终在 Windows、Godot 4.7.2 完成 **50套测试、4,682项检查，0失败**。完整结果位于本地忽略目录 `.godot/visual-validation/departments-publish/results.json`。测试分别隔离APPDATA，不改玩家存档。
+
+| 新专项 | 检查数 | 主要证明范围 |
+| --- | --- | --- |
+| `test_attention_model` | 108 | 七视角、六结果、透明风险排序、来源、可信度、隐藏状态不变性及纯查询 |
+| `test_reliability_metrics` | 110 | 负荷点口径、CMI／ENS守恒、持续事件续跑、归档、旧档迁移、物理上界与引用校验、真实操作回执 |
+| `test_unified_jobs` | 37 | 检修与微电网纳入统一队列、两支实际队伍、等待不占泳道、回执与存档 |
+| `test_decision_delta` | 80 | 同时域差分、三图共轴、实际检修费用及停运、未知状态不泄漏、过期结果与真实键盘控制 |
+| `test_department_ui` | 155 | 七视角控件、同一对象、个人信息深度、风险／事故／矩阵定位、趋势切换、部门入口、历史隐藏页、独立草案、焦点与六种响应式布局 |
+
+原有45套回归继续覆盖潮流与经济守恒、交易、数字边界、历史战役、经营路线、会话安全、设施控制、键盘输入和原有图形布局。schema断言随正式存档版本升至9；旧版本迁移仍独立测试。HUD保留原有「至少65%地图面积可见」约束，没有放宽阈值。
+
+图形模式运行 `tests/render_departments.gd` 成功生成 **102张实机截图，0失败**，包含1280×720与1440×900的100%／125%／150%缩放，覆盖七视角、资产矩阵、可靠性趋势、SAIDI贡献、事故证据、队伍以及运行和检修两类三方案。比较表首行与首图另检查实际裁剪后的可见比例，避免只生成了文件却没有拍到目标。矩阵与几何记录位于 `.godot/department-qa/`，代表图保存于 `docs/screenshots/departments/`。已目视检查主地图、资产、低分辨率大字号趋势、方案差值与共轴图；编辑器资源导入亦完成，无解析或导入错误。
+
+复现：`./tests/run_checks.ps1 -RunName departments-publish`。图形截图用Godot非headless模式运行 `--path . --script tests/render_departments.gd`，并将APPDATA指向独立测试目录。
+
+可靠性明确采用聚合负荷点而非居民户数；资产影响为公开用途和拓扑代理，未知及过时健康不进入当前矩阵。推演范围为游戏中的24小时，未声称完成多年投资NPV、完整AC／N−1认证、多人分岗、发行导出或真人理解效率研究。功能与口径见[职业视角指南](DEPARTMENTS.md)。
+
 ## 起始构想补齐：规划、资产、输配电、用户侧与长期经营（2026-10-30）
 
 Windows、Godot 4.7.2、GL Compatibility / NVIDIA RTX 3070 Ti。全量回归 **45套、4,181项检查、0失败**，日志在 `.godot/visual-validation/expansion-release-validation/`。随后针对参考价格曲线、价格上限及原子存档校验的末期修正，分别重跑4套306项与3套232项，均0失败；这些是相关专项重跑，不与全量累加。对应日志为 `expansion-market-forecast-final/` 和 `expansion-save-boundaries-final/`。

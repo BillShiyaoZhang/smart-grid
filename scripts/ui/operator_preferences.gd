@@ -23,14 +23,14 @@ const DEFAULTS := {
 	"master_volume":0.8, "music_volume":0.5, "sfx_volume":0.75,
 	"ambience_volume":0.55, "alerts_volume":0.75, "mute_unfocused":true,
 	"pan_sensitivity":1.0, "zoom_sensitivity":1.0,
-	"ui_scale":1.0, "high_contrast":false, "reduced_motion":false,
+	"ui_scale":1.0, "high_contrast":false, "reduced_motion":false, "information_depth":"operator",
 	"pause_unfocused":true, "autosave_seconds":90
 }
 const SECTIONS := {
 	"display":["window_mode","window_resolution","vsync","max_fps","msaa_3d"],
 	"audio":["master_volume","music_volume","sfx_volume","ambience_volume","alerts_volume","mute_unfocused"],
 	"input":["pan_sensitivity","zoom_sensitivity"],
-	"accessibility":["ui_scale","high_contrast","reduced_motion"],
+	"accessibility":["ui_scale","high_contrast","reduced_motion","information_depth"],
 	"game":["pause_unfocused","autosave_seconds"]
 }
 const RESOLUTIONS := [Vector2i(1280,720),Vector2i(1440,900),Vector2i(1600,900),Vector2i(1920,1080)]
@@ -50,6 +50,7 @@ var zoom_sensitivity := 1.0
 var ui_scale := 1.0
 var high_contrast := false
 var reduced_motion := false
+var information_depth := "operator"
 var pause_unfocused := true
 var autosave_seconds := 90
 var bindings: Dictionary = DEFAULT_BINDINGS.duplicate()
@@ -96,6 +97,7 @@ func _integer(value: Variant) -> bool:
 func _valid_option(key: String, value: Variant) -> bool:
 	if not DEFAULTS.has(key): return false
 	match key:
+		"information_depth": return value is String and value in ["beginner","operator","engineer"]
 		"window_mode": return value is String and value in ["windowed","borderless"]
 		"window_resolution": return value is Vector2i and value in RESOLUTIONS
 		"vsync","mute_unfocused","high_contrast","reduced_motion","pause_unfocused": return value is bool
