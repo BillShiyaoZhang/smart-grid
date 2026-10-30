@@ -273,7 +273,7 @@ func connect_link(sim: RefCounted, a: int, b: int, kind: String = "fiber") -> Di
 	var cost := link_cost(sim, a, b, kind)
 	if float(sim.cash) < cost:
 		return fail("资金不足。")
-	sim.cash -= cost
+	sim.record_cash_change(-cost,"digital","通信与数字系统作业")
 	var link := _add_link(a, b, kind, sim)
 	sync_devices(sim)
 	for endpoint in [a,b]:
@@ -306,7 +306,7 @@ func repair_link(sim: RefCounted, id: int) -> Dictionary:
 		return fail("维修队正在作业或已全部派出。")
 	if float(sim.cash) < 650.0:
 		return fail("资金不足。")
-	sim.cash -= 650.0
+	sim.record_cash_change(-650.0,"maintenance","通信链路修复")
 	link.repair_remaining = 0.4 if link.kind == "wireless" else 1.0
 	link.repair_started_at=float(sim.elapsed_hours)
 	link.repair_duration=float(link.repair_remaining)
@@ -319,7 +319,7 @@ func upgrade_link(sim: RefCounted, id: int) -> Dictionary:
 		return fail("链路不存在或已达最高等级。")
 	if float(sim.cash) < 2000.0:
 		return fail("资金不足。")
-	sim.cash -= 2000.0
+	sim.record_cash_change(-2000.0,"digital","通信升级")
 	link.level += 1
 	link.latency_ms *= 0.62
 	return ok("通信链路升级，时延已降低。", id)
@@ -383,11 +383,17 @@ func _sample_facility(sim: RefCounted, building: Dictionary, source: String) -> 
 		"available":float(building.get("available",0)),"output":float(building.get("output",0)),"served":float(building.get("served",0)),
 		"charging":float(building.get("charging",0)),
 		"demand":float(building.get("demand",0)),"energy":float(building.get("energy",0)),"health":float(building.get("health",100)),
-		"fuel_cost":sim.evolution.fuel_cost(building),"status":sim.evolution.facility_status(sim,building)}
+		"soh":float(building.get("soh",100)),"throughput_mwh":float(building.get("throughput_mwh",0)),"voltage":float(building.get("voltage",1)),"network_loss_mw":float(building.get("network_loss_mw",0)),
+		"online":bool(building.online),"startup_remaining":float(building.get("startup_remaining",0)),"ramp_mw":float(building.get("ramp_mw",0)),
+		"transformer_loading":float(building.get("transformer_loading",0)),
+		"fuel_cost":sim.evolution.fuel_cost(building),"status":"设备劣化故障；巡检后安排检修" if bool(building.get("lifecycle_failure",false)) else sim.evolution.facility_status(sim,building)}
 
 func facility_observation(sim: RefCounted, id: int) -> Dictionary:
 	var result: Dictionary={"visibility":"unknown","trusted":false,"reason":"尚无可信设施遥测","age_hours":0.0,
 		"available":null,"output":null,"charging":null,"served":null,"demand":null,"energy":null,"health":null,"fuel_cost":null,
+		"soh":null,"throughput_mwh":null,"voltage":null,"network_loss_mw":null,
+		"online":null,"startup_remaining":null,"ramp_mw":null,
+		"transformer_loading":null,
 		"status":"遥测未确认；额定参数和已提交设定可查看"}
 	if sim.get_building(id).is_empty(): result.reason="设施不存在"; return result
 	var sample: Dictionary=facility_observations.get(id,{})
@@ -405,6 +411,7 @@ func facility_observation(sim: RefCounted, id: int) -> Dictionary:
 	result.reason="现场核实记录" if field_fresh else "可信设施遥测"
 	for key in ["available","output","served","demand","energy","health","fuel_cost","status"]: result[key]=sample[key]
 	result.charging=sample.get("charging",null)
+	for key in ["soh","throughput_mwh","voltage","network_loss_mw","online","startup_remaining","ramp_mw","transformer_loading"]: result[key]=sample.get(key,null)
 	return result
 
 func can_configure(sim: RefCounted, id: int) -> bool:
@@ -427,7 +434,7 @@ func queue_facility(sim: RefCounted, id: int, settings: Dictionary, method: Stri
 	else:
 		if sim.active_repairs()>=2: return fail("两支现场队均已派出。")
 		if float(sim.cash)<350.0: return fail("现场设置需要 ¥350。")
-		sim.cash-=350.0
+		sim.record_cash_change(-350.0,"field","现场设置派单")
 	var command: Dictionary={"id":next_command_id,"kind":"facility","building_id":id,"settings":settings.duplicate(true),"remaining":delay}
 	command.started_at=float(sim.elapsed_hours)
 	command.duration=delay
@@ -485,7 +492,7 @@ func queue_field(sim: RefCounted, line_id: int, kind: String) -> Dictionary:
 	var cost := 500.0 if kind == "patrol" else 350.0
 	if float(sim.cash) < cost:
 		return fail("资金不足。")
-	sim.cash -= cost
+	sim.record_cash_change(-cost,"digital","通信与数字系统作业")
 	var job := {"id": next_command_id, "line_id": line_id, "kind": kind,
 		"target_closed": not bool(line.closed), "remaining": 0.5 if kind == "patrol" else 0.35}
 	job.started_at=float(sim.elapsed_hours)
@@ -507,7 +514,7 @@ func upgrade_security(sim: RefCounted) -> Dictionary:
 	var cost: float = SECURITY_COSTS[level]
 	if float(sim.cash) < cost:
 		return fail("资金不足。")
-	sim.cash -= cost
+	sim.record_cash_change(-cost,"digital","通信与数字系统作业")
 	state.security_level = level + 1
 	return ok("网络安全能力已升级。", level + 1)
 
@@ -527,7 +534,7 @@ func recover(sim: RefCounted, id: int) -> Dictionary:
 		return fail("设备正在恢复中。")
 	if float(sim.cash) < 900.0:
 		return fail("资金不足。")
-	sim.cash -= 900.0
+	sim.record_cash_change(-900.0,"security","安全恢复")
 	device.isolated = true
 	device.recover_remaining = 0.4 if _soc_online(sim) else 0.75
 	return ok("补丁与恢复已开始，完成后重新建立可信连接。", id)
@@ -982,6 +989,9 @@ static func valid_snapshot(data: Variant, building_ids: Dictionary, line_ids: Di
 			for key in ["available","output","served","demand","energy","health","fuel_cost"]:
 				if not _number(sample.get(key),-1000000.0 if key=="output" else 0.0,1e9): return false
 			if sample.has("charging") and not _number(sample.charging,0,1e9): return false
+			for key in ["soh","throughput_mwh","voltage","network_loss_mw","startup_remaining","ramp_mw","transformer_loading"]:
+				if sample.has(key) and not _number(sample[key],0,1e12): return false
+			if sample.has("online") and not sample.online is bool: return false
 	if data.field_jobs.size() > 2:
 		return false
 	var incident_ids := {}

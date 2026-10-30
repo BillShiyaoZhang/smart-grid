@@ -5,6 +5,7 @@ const Shell = preload("res://scripts/ui/management_shell.gd")
 const Drafts = preload("res://scripts/ui/config_drafts.gd")
 const VisualChart = preload("res://scripts/ui/center_charts.gd")
 const UI = preload("res://scripts/ui/ui_kit.gd")
+const GridOperations = preload("res://scripts/ui/grid_operations_panel.gd")
 const TEAL := Color("77dbc0")
 const BLUE := Color("81c9ee")
 const CREAM := Color("f2eddb")
@@ -56,6 +57,8 @@ var _inputs_ready := false
 var _map_selection := Vector3i(-2,-2,-2)
 var readiness_chart: Control
 var queue_chart: Control
+var grid_operations: VBoxContainer
+var grid_operations_tab: Control
 
 func reset_session() -> void:
 	drafts.clear()
@@ -68,6 +71,7 @@ func reset_session() -> void:
 	if attack_kind!=null: attack_kind.select(0)
 	if link_from!=null: link_from.select(-1)
 	if link_to!=null: link_to.select(-1)
+	if grid_operations!=null: grid_operations.reset_session()
 
 func inherit_selection(building_id: int=-1,line_id: int=-1,comm_line_id: int=-1) -> void:
 	var selected := Vector3i(building_id,line_id,comm_line_id)
@@ -88,7 +92,7 @@ func open() -> void:
 	refresh(true)
 	show()
 func close() -> void:
-	_capture_policy()
+	_capture_drafts()
 	hide()
 	if drafts.dirty("security"): game._notify("安全策略草案已保留，尚未应用。")
 	game._update_hud()
@@ -390,6 +394,24 @@ func refresh(sync_inputs: bool=false) -> void:
 	upgrade_button.disabled=level>=2
 	cost_info.text="通信 ¥%.0f/h · 安全 ¥%.0f/h\n成本已计入经营账本的运维项。" % [sim.totals.get("communication_cost",0),sim.totals.get("security_cost",0)]
 	_refresh_incidents()
+	_refresh_grid_operations()
+
+func _refresh_grid_operations() -> void:
+	var sim: RefCounted=game.sim
+	var unlocked: bool=not sim.campaign.active and (sim.evolution.has_technology("regional_planning") or sim.lifecycle.enabled or sim.engineering.enabled or sim.customers.enabled)
+	if unlocked and grid_operations==null:
+		var tab:=_tab("资产与街区")
+		grid_operations_tab=tab.get_parent()
+		grid_operations=GridOperations.new()
+		tab.add_child(grid_operations)
+		grid_operations.setup(game,_commit,drafts)
+	if grid_operations==null: return
+	var index:=grid_operations_tab.get_index()
+	tabs.set_tab_hidden(index,not unlocked)
+	if not unlocked:
+		if tabs.current_tab==index: tabs.current_tab=0
+		return
+	grid_operations.refresh()
 
 func _effective_policy() -> Dictionary:
 	return {"mode":maxi(0,["open","segmented","zero_trust"].find(game.sim.digital.state.get("policy","open")))}
@@ -399,6 +421,7 @@ func _capture_policy() -> void:
 
 func _capture_drafts() -> void:
 	_capture_policy()
+	if grid_operations!=null and not game.sim.campaign.active and (game.sim.evolution.has_technology("regional_planning") or game.sim.lifecycle.enabled or game.sim.engineering.enabled or game.sim.customers.enabled): grid_operations.capture_drafts()
 
 func reset_policy_draft() -> void:
 	drafts.reset("security",_effective_policy())

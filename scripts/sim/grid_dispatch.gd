@@ -3,11 +3,38 @@ extends RefCounted
 
 static func solve_component(sim: RefCounted, ids: Array[int], dt: float) -> float:
 	var original_budget: float = sim._contract_budget
+	var original_da: float = float(sim.get("_day_ahead_budget")) if sim.get("_day_ahead_budget")!=null else 0.0
+	var engineering: RefCounted=sim.get("engineering")
+	var customers: RefCounted=sim.get("customers")
+	if customers!=null: customers.prepare_component(sim,ids,dt)
+	if engineering!=null and engineering.enabled:
+		_dispatch(sim,ids,{},dt)
+		sim._solve_dc(ids)
+		engineering.prepare_component(sim,ids)
+		sim._contract_budget=original_budget
+		if sim.get("_day_ahead_budget")!=null: sim.set("_day_ahead_budget",original_da)
 	var blocked: Dictionary = {}
 	var result: Dictionary = {}
 	for _attempt in ids.size()+1:
-		sim._contract_budget = original_budget
-		result = _dispatch(sim,ids,blocked,dt)
+		var losses: Dictionary={}
+		for id in ids: losses[id]=0.0
+		var iterations: int=(6 if bool(sim.get("_is_projection")) else 12) if engineering!=null and engineering.enabled else 1
+		for _iteration in iterations:
+			sim._contract_budget = original_budget
+			if sim.get("_day_ahead_budget")!=null: sim.set("_day_ahead_budget",original_da)
+			result = _dispatch(sim,ids,blocked,dt,losses)
+			if engineering==null or not engineering.enabled: break
+			sim._solve_dc(ids)
+			var estimated: Dictionary=engineering.estimate_losses(sim,ids)
+			var difference:=0.0
+			for id in ids:
+				difference+=absf(float(estimated[id])-float(losses[id]))
+				losses[id]=lerpf(float(losses[id]),float(estimated[id]),0.75)
+			if difference<0.000001: break
+		if engineering!=null and engineering.enabled:
+			sim._contract_budget=original_budget
+			if sim.get("_day_ahead_budget")!=null: sim.set("_day_ahead_budget",original_da)
+			result=_dispatch(sim,ids,blocked,dt,losses)
 		var changed := false
 		for b in result.generators:
 			if b.kind not in ["nuclear","fusion"] or blocked.has(int(b.id)) or float(b.available)<=0.000001: continue
@@ -21,7 +48,7 @@ static func solve_component(sim: RefCounted, ids: Array[int], dt: float) -> floa
 	for id in ids:
 		var b: Dictionary = sim.get_building(id)
 		if not sim.evolution.is_terminal(str(b.kind)): supplied += maxf(0.0,float(b.output))
-		if b.kind in ["solar","wind","hydro"]: renewable += maxf(0.0,float(b.output))
+		if b.kind in ["solar","wind","hydro"] or float(b.get("customer_generation_mw",0.0))>0.0: renewable += maxf(0.0,float(b.output))
 		elif sim.evolution.is_storage(str(b.kind)):
 			var fraction := clampf(float(b.get("renewable_energy_mwh",0.0))/maxf(0.000001,float(b.energy)),0.0,1.0)
 			renewable += float(b.output)*fraction
@@ -40,31 +67,48 @@ static func solve_component(sim: RefCounted, ids: Array[int], dt: float) -> floa
 		b.soc = float(b.energy)/float(b.energy_capacity) if float(b.energy_capacity)>0.0 else 0.0
 		b.voltage = 1.0 if b.powered else 0.0
 	sim._solve_dc(ids)
+	if engineering!=null: engineering.update_voltage(sim,ids)
+	if customers!=null: customers.commit_component(sim,ids,dt)
+	if sim.get("_day_ahead_delivered")!=null: sim.set("_day_ahead_delivered",float(sim.get("_day_ahead_delivered"))+float(result.get("da_used",0.0)))
 	return float(result.contract_used)
 
-static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt: float) -> Dictionary:
+static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt: float, losses: Dictionary = {}) -> Dictionary:
 	var generators: Array[Dictionary] = []
 	var renewables: Array[Dictionary] = []
 	var batteries: Array[Dictionary] = []
 	var loads: Array[Dictionary] = []
 	var terminals: Array[Dictionary] = []
 	var auxiliary_ids: Dictionary = {}
+	var deliverable: Dictionary={}
 	var demand := 0.0
+	var loss_request:=0.0
 	var transfer_capacity := 0.0
+	var strategy: RefCounted=sim.get("strategy")
 	for id in ids:
 		var b: Dictionary = sim.get_building(id)
 		b.output=0.0; b.served=0.0; b.charging=0.0; b.available=0.0
 		b.import_mw=0.0; b.export_mw=0.0
+		b.reserve_available_mw=0.0
+		b.day_ahead_import_mw=0.0
+		b.network_loss_mw=0.0
+		deliverable[id]=float(b.demand)*minf(float(b.get("delivery_limit",1.0)),float(b.get("customer_limit",1.0)))
+		loss_request+=float(losses.get(id,0.0))
 		if float(b.demand)>0.0:
 			loads.append(b)
-			if b.online: demand+=float(b.demand)
-		if not b.online: continue
-		if b.kind in ["solar","wind"]:
+			if b.online: demand+=float(deliverable[id])
+		if not b.online or bool(b.get("customer_grid_blocked",false)): continue
+		if b.kind in ["solar","wind"] or float(b.get("customer_generation_mw",0.0))>0.0:
 			if not b.get("enabled",true): continue
-			b.available=float(b.capacity)*(sim.solar_factor() if b.kind=="solar" else sim.wind_factor())*(.7+float(b.health)*.003)
+			b.available=float(b.get("customer_generation_mw",0.0)) if b.kind not in ["solar","wind"] else float(b.capacity)*(sim.solar_factor() if b.kind=="solar" else sim.wind_factor())*(.7+float(b.health)*.003)
+			if strategy!=null:
+				b.reserve_available_mw=float(b.available)*strategy.available_factor(sim,b)
+				b.available=strategy.generation_limit(sim,b,float(b.available))
 			renewables.append(b)
 		elif sim.evolution.is_generator(str(b.kind)):
 			b.available=0.0 if blocked.has(id) else sim.evolution.generator_available(sim,b,ids)
+			if strategy!=null:
+				b.reserve_available_mw=float(b.available)*strategy.available_factor(sim,b)
+				b.available=strategy.generation_limit(sim,b,float(b.available))
 			generators.append(b)
 			if b.kind in ["nuclear","fusion"] and (b.get("enabled",true) or float(b.get("ramp_mw",0.0))>0.000001):
 				var assignment: Dictionary = sim.evolution.support_assignment(sim,b,ids)
@@ -74,7 +118,8 @@ static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt:
 			if b.get("enabled",true): batteries.append(b)
 		elif sim.evolution.is_terminal(str(b.kind)):
 			terminals.append(b)
-			transfer_capacity+=float(b.grid_capacity)
+			b.operating_grid_capacity=float(b.grid_capacity)*float(b.get("delivery_limit",1.0))
+			transfer_capacity+=float(b.operating_grid_capacity)
 		if b.kind in ["condenser","hvdc"] and b.get("enabled",true): auxiliary_ids[id]=true
 	generators.sort_custom(func(a: Dictionary,b: Dictionary):
 		var ca: float = sim.evolution.marginal_cost(a)
@@ -90,7 +135,7 @@ static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt:
 	var arbitrage: bool = not arbitrage_batteries.is_empty()
 	var spot: float = sim.market.state.spot_price
 	var can_buy: bool = can_trade and spot<=float(sim.market.state.buy_limit)
-	var deficit := demand
+	var deficit := demand+loss_request
 	deficit -= _take_generation(sim,generators,deficit,INF,true)
 	deficit -= _take_renewables(renewables,deficit)
 	deficit -= _take_generation(sim,generators,deficit,0.000001)
@@ -98,6 +143,12 @@ static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt:
 	sim._contract_budget-=contract_used
 	var imports := contract_used
 	deficit-=contract_used
+	var da_used:=0.0
+	if can_trade and sim.get("_day_ahead_budget")!=null:
+		da_used=minf(deficit,minf(maxf(0.0,transfer_capacity-imports),float(sim.get("_day_ahead_budget"))))
+		sim.set("_day_ahead_budget",float(sim.get("_day_ahead_budget"))-da_used)
+		imports+=da_used
+		deficit-=da_used
 	var battery_discharge := 0.0
 	if arbitrage and spot>=float(sim.market.state.discharge_price):
 		battery_discharge=sim._discharge_batteries(arbitrage_batteries,deficit,dt,true)
@@ -113,7 +164,11 @@ static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt:
 	if can_buy:
 		var bought := minf(deficit,maxf(0.0,transfer_capacity-imports))
 		imports+=bought; deficit-=bought
-	var served_supply := maxf(0.0,demand-deficit)
+	var gross_supply := maxf(0.0,demand+loss_request-deficit)
+	var funded_loss: float=minf(loss_request,gross_supply)
+	var served_supply := maxf(0.0,gross_supply-funded_loss)
+	for id in ids:
+		sim.get_building(id).network_loss_mw=float(losses.get(id,0.0))*funded_loss/loss_request if loss_request>0.000001 else 0.0
 	var charging := 0.0
 	if battery_discharge<=0.000001:
 		# Already committed thermal energy has zero incremental fuel cost.
@@ -129,9 +184,14 @@ static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt:
 		if arbitrage and can_trade and deficit<=0.000001 and spot<=float(sim.market.state.charge_price):
 			var import_room := maxf(0.0,transfer_capacity-imports)
 			var prepaid := minf(import_room,float(sim._contract_budget))
-			charge=sim._charge_batteries(arbitrage_batteries,import_room if can_buy else prepaid,dt)
+			var prepaid_da: float=minf(maxf(0.0,import_room-prepaid),float(sim.get("_day_ahead_budget"))) if sim.get("_day_ahead_budget")!=null else 0.0
+			charge=sim._charge_batteries(arbitrage_batteries,import_room if can_buy else prepaid+prepaid_da,dt)
 			var paid_charge := minf(prepaid,charge)
 			sim._contract_budget-=paid_charge; contract_used+=paid_charge
+			if sim.get("_day_ahead_budget")!=null:
+				var da_charge: float=minf(maxf(0.0,charge-paid_charge),float(sim.get("_day_ahead_budget")))
+				sim.set("_day_ahead_budget",float(sim.get("_day_ahead_budget"))-da_charge)
+				da_used+=da_charge
 			imports+=charge; charging+=charge
 	var exports := 0.0
 	if can_trade and bool(operating.allow_export) and imports<=0.000001 and float(sim.market.state.export_price)>=float(sim.market.state.sell_floor):
@@ -149,33 +209,35 @@ static func _dispatch(sim: RefCounted, ids: Array[int], blocked: Dictionary, dt:
 	for b in renewables: b.curtailment_mw=maxf(0.0,float(b.available)-float(b.output))
 	for b in generators: b.curtailment_mw=maxf(0.0,sim.evolution.generator_minimum(b)-float(b.output))
 	for b in terminals:
-		var share := float(b.grid_capacity)/transfer_capacity if transfer_capacity>0.0 else 0.0
+		var share := float(b.get("operating_grid_capacity",b.grid_capacity))/transfer_capacity if transfer_capacity>0.0 else 0.0
 		b.import_mw=imports*share; b.export_mw=exports*share; b.output=(imports-exports)*share
+		b.day_ahead_import_mw=da_used*share
 	# Self-sustaining plant auxiliaries must be delivered before customer service.
 	var remaining := served_supply
 	for b in loads:
 		if b.online and auxiliary_ids.has(int(b.id)):
-			b.served=minf(float(b.demand),remaining); remaining-=float(b.served)
+			b.served=minf(float(deliverable[int(b.id)]),remaining); remaining-=float(b.served)
 	for b in loads:
 		if b.online and not auxiliary_ids.has(int(b.id)) and b.kind=="hospital":
-			b.served=minf(float(b.demand),remaining); remaining-=float(b.served)
+			b.served=minf(float(deliverable[int(b.id)]),remaining); remaining-=float(b.served)
 	var ordinary_demand := 0.0
 	for b in loads:
-		if b.online and b.kind!="hospital" and not auxiliary_ids.has(int(b.id)): ordinary_demand+=float(b.demand)
+		if b.online and b.kind!="hospital" and not auxiliary_ids.has(int(b.id)): ordinary_demand+=float(deliverable[int(b.id)])
 	for b in loads:
 		if b.online and b.kind!="hospital" and not auxiliary_ids.has(int(b.id)):
-			b.served=float(b.demand)*minf(1.0,remaining/ordinary_demand) if ordinary_demand>0.0 else 0.0
+			b.served=float(deliverable[int(b.id)])*minf(1.0,remaining/ordinary_demand) if ordinary_demand>0.0 else 0.0
 	var energized: bool = served_supply+charging+exports>0.001 or (can_trade and can_buy)
 	for id in ids:
 		var b: Dictionary = sim.get_building(id)
 		b.powered=energized and b.online and b.get("enabled",true) and (float(b.demand)<=0.0 or float(b.served)>=float(b.demand)*.98)
-	return {"generators":generators,"imports":imports,"contract_used":contract_used}
+		if b.online and float(b.get("customer_local_served_mw",0.0))>0.000001 and (float(b.demand)<=0.000001 or float(b.served)>=float(b.demand)*.98): b.powered=true
+	return {"generators":generators,"imports":imports,"contract_used":contract_used,"da_used":da_used}
 
 static func _take_generation(sim: RefCounted, generators: Array[Dictionary], requested: float, max_cost: float=INF, minimum_only: bool=false) -> float:
 	var total := 0.0
 	for b in generators:
 		if not minimum_only and sim.evolution.marginal_cost(b)>max_cost: continue
-		var limit: float = sim.evolution.generator_minimum(b) if minimum_only else b.available
+		var limit: float = minf(float(b.available),sim.evolution.generator_minimum(b)) if minimum_only else b.available
 		var take := minf(maxf(0.0,requested-total),maxf(0.0,limit-float(b.output)))
 		b.output+=take; total+=take
 	return total

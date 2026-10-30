@@ -7,6 +7,8 @@ const Drafts = preload("res://scripts/ui/config_drafts.gd")
 const UI = preload("res://scripts/ui/ui_kit.gd")
 const VisualChart = preload("res://scripts/ui/center_charts.gd")
 const FacilityEditor = preload("res://scripts/ui/facility_controls.gd")
+const DecisionWorkbench = preload("res://scripts/ui/decision_workbench.gd")
+var decision_workbench: Control
 const TEAL := Color("77dbc0")
 const BLUE := Color("81c9ee")
 const CREAM := Color("f2eddb")
@@ -95,6 +97,7 @@ var comparison_choose: Button
 var catalog_header_row: HBoxContainer
 
 func reset_session() -> void:
+	if decision_workbench!=null: decision_workbench.reset_session()
 	drafts.clear()
 	_displayed_facility=-1
 	_inherited_building=-1
@@ -162,6 +165,9 @@ func _build() -> void:
 	_build_technologies()
 	_build_facilities()
 	_build_region()
+	decision_workbench=DecisionWorkbench.new()
+	_tab("预测与推演").add_child(decision_workbench)
+	decision_workbench.setup(game,"planning")
 	message_label = _text(body,"研究解锁能力；配套、位置与调度决定效果。",MUTED,14)
 	resized.connect(_adapt_columns)
 	_adapt_columns()
@@ -534,6 +540,9 @@ func refresh(sync_inputs: bool=false) -> void:
 	if game == null or game.sim.get("evolution") == null:
 		return
 	var campaign_active: bool=game._campaign_active()
+	tabs.set_tab_hidden(3,campaign_active)
+	if campaign_active and tabs.current_tab==3: tabs.current_tab=0
+	decision_workbench.refresh()
 	if campaign_active: era_description.text=str(game.sim.campaign.chapter().years)+"  ·  本关可用技术"
 	scenario_toggle.visible=not campaign_active
 	if campaign_active: scenario_actions.hide()

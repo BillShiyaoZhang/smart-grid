@@ -39,7 +39,7 @@ static func facilities(sim: RefCounted, query: String="", filter: String="all") 
 		if not needle.is_empty() and needle not in (name_text+" "+kind+" "+str(id)).to_lower(): continue
 		var observed: Dictionary = sim.facility_observation(id)
 		var trusted: bool = bool(observed.get("trusted",false))
-		var fault: bool = trusted and float(observed.get("health",100))<=0.0
+		var fault: bool = trusted and (float(observed.get("health",100))<=0.0 or "劣化故障" in str(observed.status))
 		var feedback: Dictionary=customer_feedback(sim,id)
 		var outage: bool = (trusted and float(observed.get("demand",0))>float(observed.get("served",0))+.01) or (not feedback.is_empty() and not bool(feedback.powered))
 		var category: String = category_for(kind)
@@ -91,6 +91,12 @@ static func alerts(sim: RefCounted) -> Array[Dictionary]:
 	for facility in facilities(sim):
 		if facility.fault:
 			result.append(_item("facility_fault_%d" % int(facility.id),"critical",str(facility.name)+" · 设备故障","观测已核实设备损伤；定位后检查维修队。","facility",int(facility.id),"repair",str(facility.source)))
+		if not facility.trusted: continue
+		var measured: Dictionary=sim.facility_observation(int(facility.id))
+		if sim.engineering.enabled and measured.get("voltage")!=null and float(measured.voltage)>0 and (float(measured.voltage)<.95 or float(measured.voltage)>1.05):
+			result.append(_item("voltage_%d" % int(facility.id),"warning",str(facility.name)+" · 电压质量异常","可信测量 %.3f pu；检查馈线长度、线路等级、变电容量或本地储能。" % float(measured.voltage),"facility",int(facility.id),"inspect",str(facility.source)))
+		if sim.engineering.enabled and measured.get("transformer_loading")!=null and float(measured.transformer_loading)>.95:
+			result.append(_item("transformer_%d" % int(facility.id),"warning",str(facility.name)+" · 变电容量紧张","可信负载 %.0f%%；可增容、转移负荷或在下游部署灵活资源。" % (float(measured.transformer_loading)*100),"facility",int(facility.id),"inspect",str(facility.source)))
 	for incident in sim.digital.incidents:
 		if not bool(incident.get("detected",false)) or str(incident.get("status",""))!="active": continue
 		var target: int = int(incident.get("target_id",-1))
@@ -135,7 +141,7 @@ static func diagnosis(sim: RefCounted) -> Dictionary:
 		elif bool(facility.outage):
 			causes.append(_item("outage_%d" % id,"warning",name_text+" · 实际供电不足","可信观测显示 %.1f / %.1f MW；检查相连线路与本地可用电源。" % [facility.served,facility.demand],"facility",id,"inspect",str(facility.source)))
 	for alert in alerts(sim):
-		if str(alert.id).begins_with("line_"): causes.append(alert)
+		if str(alert.id).begins_with("line_") or str(alert.id).begins_with("voltage_") or str(alert.id).begins_with("transformer_"): causes.append(alert)
 	for line in sim.lines:
 		var observed: Dictionary = sim.line_observation(int(line.id))
 		if str(observed.get("visibility","")) in ["verified","patrol"] and not bool(observed.get("closed",true)) and not bool(observed.get("fault",false)):

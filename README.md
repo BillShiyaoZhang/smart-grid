@@ -14,6 +14,8 @@
 
 已加入电力交易中心：零售电价、现货购售电、联络站、储能策略、12 小时锁价合约和运营账本。具体玩法见 [电力市场指南](docs/MARKET.md)。
 
+现已加入 **24小时预测与方案推演、停电和完整现金复盘**；研究区域负荷规划后，可逐项投运 **资产寿命与风险检修、双电压输配电、街区光储充电与需求响应、微电网、工程融资、日前购电、备用与政策灾害情景**。用户侧协调还需要SCADA。新功能复用发展、运维和经营三个工作台，旧存档迁移时默认未投运，历史教学保持章节规则。上手与实际模型边界见 [经营扩展指南](docs/EXPANSION.md)。
+
 数字电网包含独立光纤/无线通信、UPS、可信遥测、延迟远程控制、现场巡检和抽象网络安全事件。操作与恢复流程见 [数字电网指南](docs/DIGITAL.md)。
 
 玩法已扩展为 **六代科技、24 项研究、29 种设施**。按 **T** 打开科技与区域规划：可选择爱迪生时代开局，管理核能配套、慢启停、保留电量和可信通信削峰，并主动开启 **48 × 48、八座城市**的动态区域。城市供电、电价、污染影响人口、产业分工与扩张，三类持续运营目标支持长期沙盘。具体边界与组合玩法见 [代际电网与区域指南](docs/GAMEPLAY.md)。
@@ -156,6 +158,6 @@ Windows 可运行 `./tests/run_checks.ps1` 执行全部自动测试，或用 `-G
 
 ## 跨系统回归
 
-新增五套测试：`test_dispatch_integration.gd`（混合电源、光储来源、孤岛合约与重算守恒）、`test_thermal_integration.gd`（最低负荷、辅机保障、配套与检修）、`test_city_assets.gd`（人工建设归属、拆迁与退款、旧档迁移）、`test_digital_boundaries.gd`（设施命令、观测、历史数字化与攻击边界）、`test_facility_ui.gd`（真实按钮、排队回执与失败反馈）。均可按上面的 Godot `--headless --path . -s tests/<脚本>.gd` 命令运行。当前存档为 schema 7，兼容旧版本；详细验证见 [验证记录](docs/VALIDATION.md)。
+新增五套测试：`test_dispatch_integration.gd`（混合电源、光储来源、孤岛合约与重算守恒）、`test_thermal_integration.gd`（最低负荷、辅机保障、配套与检修）、`test_city_assets.gd`（人工建设归属、拆迁与退款、旧档迁移）、`test_digital_boundaries.gd`（设施命令、观测、历史数字化与攻击边界）、`test_facility_ui.gd`（真实按钮、排队回执与失败反馈）。均可按上面的 Godot `--headless --path . -s tests/<脚本>.gd` 命令运行。当前存档为 schema 8，兼容旧版本；详细验证见 [验证记录](docs/VALIDATION.md)。
 
 战役另有 `test_campaign.gd`（十五关真实操作与途中读档继续）、`test_campaign_boundaries.gd`（年代能力、固定购电、观测与存档边界）、`test_campaign_maps.gd`（地图与城市登记）、`test_campaign_game.gd`（真实界面与顺序解锁）。图形模式运行 `tests/render_campaign.gd` 可在 `.godot/campaign-qa/ui/` 生成四种分辨率的战役截图。

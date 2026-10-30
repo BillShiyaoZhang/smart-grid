@@ -1,13 +1,18 @@
 class_name GridSimulation
 extends RefCounted
 ## Deterministic, headless grid game model. All powers are MW, energy is MWh.
-## The DC network uses a flat voltage and length-weighted reactance; it is a
-## gameplay approximation, not an AC engineering study.
+## The base network uses DC active power. Commissioned engineering adds
+## capacity, voltage and resistive-loss approximations for management play.
 
 signal changed
 signal event_logged(entry: Dictionary)
 
-const SCHEMA_VERSION := 7
+const SCHEMA_VERSION := 8
+const PlanningModel = preload("res://scripts/sim/grid_planning.gd")
+const LifecycleModel = preload("res://scripts/sim/asset_lifecycle.gd")
+const EngineeringModel = preload("res://scripts/sim/grid_engineering.gd")
+const CustomerModel = preload("res://scripts/sim/customer_energy.gd")
+const StrategyModel = preload("res://scripts/sim/strategic_economy.gd")
 const ManagementModel = preload("res://scripts/sim/management_model.gd")
 const CampaignModel = preload("res://scripts/sim/campaign.gd")
 const ScenarioMap = preload("res://scripts/sim/scenario_map.gd")
@@ -43,6 +48,14 @@ var evolution: RefCounted = EvolutionModel.new()
 var region: RefCounted = RegionModel.new()
 var campaign: RefCounted = CampaignModel.new()
 var management: RefCounted = ManagementModel.new()
+var planning: RefCounted = PlanningModel.new()
+var lifecycle: RefCounted = LifecycleModel.new()
+var engineering: RefCounted = EngineeringModel.new()
+var customers: RefCounted = CustomerModel.new()
+var strategy: RefCounted = StrategyModel.new()
+var _is_projection := false
+var _day_ahead_budget := 0.0
+var _day_ahead_delivered := 0.0
 var _scenario_map_id := 0
 var _scenario_map: Dictionary = {}
 var catalog: Dictionary = CATALOG.merged(EvolutionModel.EXTRA_CATALOG)
@@ -92,6 +105,11 @@ func _init() -> void:
 
 func reset(seed_value: int = 42) -> void:
 	campaign = CampaignModel.new()
+	lifecycle.reset()
+	engineering.reset()
+	customers.reset()
+	strategy.reset()
+	planning.reset()
 	management.reset()
 	_scenario_map_id = 0
 	_scenario_map = {}
@@ -153,6 +171,7 @@ func reset(seed_value: int = 42) -> void:
 	_update_weather()
 	_solve(0.0)
 	_log("欢迎来到海湾市。先连接东部工业园区，再建设更清洁、更可靠的电网。", "info")
+	planning.reset(cash)
 	changed.emit()
 
 func _add_building(kind: String, cell: Vector2i, metadata: Dictionary = {}) -> Dictionary:
@@ -172,6 +191,7 @@ func _add_building(kind: String, cell: Vector2i, metadata: Dictionary = {}) -> D
 	}
 	building.merge(metadata,true)
 	evolution.initialize_building(building)
+	lifecycle.initialize_building(building)
 	next_building_id += 1
 	buildings.append(building)
 	region.register_building(self,building,int(building.get("city_id",-1)))
@@ -183,6 +203,7 @@ func _add_line(a: int, b: int) -> Dictionary:
 		"flow": 0.0, "closed": true, "fault": false, "heat": 0.0,
 		"health": 100.0, "level": 1, "repair_remaining": 0.0, "trip_reason": ""}
 	next_line_id += 1
+	lifecycle.initialize_line(item)
 	lines.append(item)
 	return item
 
@@ -233,18 +254,33 @@ func preview_build(kind: String, cell: Vector2i) -> Dictionary:
 	if not building_at(cell).is_empty():
 		result.message="这里已有设施，请选择空地。"
 		return result
+	if strategy.cell_reserved(cell):
+		result.message="此地块已为在建工程预留。"
+		return result
+	result.base_cost=float(result.cost)
+	if strategy.enabled and kind in StrategyModel.PROJECT_HOURS:
+		result.cost=snappedf(float(result.cost)*(1.08 if cell.x>=18 or cell.y>=18 else 1.03),.01)
+		result.project_hours=float(StrategyModel.PROJECT_HOURS[kind])
 	if cash<float(result.cost):
 		result.message="资金不足。"
 		return result
 	result.ok=true
 	result.message="可建造；建成后需要连接电网。"
+	if result.has("project_hours"): result.message="工程费用 ¥%.0f（含场地），预计 %.2f 游戏小时后投运。" % [result.cost,result.project_hours]
 	return result
 
 func build(kind: String, cell: Vector2i) -> Dictionary:
 	var preview: Dictionary = preview_build(kind,cell)
 	if not preview.ok: return preview
+	if strategy.enabled and kind in StrategyModel.PROJECT_HOURS:
+		var project: Dictionary=strategy.start_project(self,kind,cell)
+		if project.ok:
+			project.project_id=project.id
+			project.id=-1
+			_refresh()
+		return project
 	var price: float = float(preview.cost)
-	cash -= price
+	record_cash_change(-price,"investment","设施与电网投资")
 	var building := _add_building(kind, cell)
 	construction_count += 1
 	record_campaign_action("build", int(building.id), {"kind":kind})
@@ -284,18 +320,33 @@ func preview_connection(a: int, b: int, kind: String="power") -> Dictionary:
 	if kind=="wireless" and float(result.distance)>max_range:
 		result.message="无线距离过远；普通网关 6 格，中继站 10 格。"
 		return result
+	if kind=="power" and not engineering.connection_allowed(self,a,b):
+		result.message="此连接跨越电压等级，请通过变电站衔接。"
+		return result
+	result.base_cost=float(result.cost)
+	if kind=="power" and strategy.enabled and float(result.distance)>8.0:
+		result.cost=snappedf(float(result.cost)*1.12,.01)
+		result.project_hours=.5+float(result.distance)*.08
 	if cash<float(result.cost):
 		result.message="资金不足。"
 		return result
 	result.ok=true
 	result.message="可连接电力线路。" if kind=="power" else "可建设独立通信链路。"
+	if result.has("project_hours"): result.message="骨干线路工程 ¥%.0f，预计 %.2f 小时后投运。" % [result.cost,result.project_hours]
 	return result
 
 func connect_buildings(a: int, b: int) -> Dictionary:
 	var preview: Dictionary = preview_connection(a,b)
 	if not preview.ok: return preview
+	if strategy.enabled and float(preview.distance)>8.0:
+		var project: Dictionary=strategy.start_line_project(self,a,b)
+		if project.ok:
+			project.project_id=project.id
+			project.id=-1
+			_refresh()
+		return project
 	var price: float = float(preview.cost)
-	cash -= price
+	record_cash_change(-price,"investment","设施与电网投资")
 	var line := _add_line(a, b)
 	record_campaign_action("connect", int(line.id), {"a":a,"b":b})
 	_log("新线路投运：%s ↔ %s。" % [get_building(a).name, get_building(b).name], "success")
@@ -320,7 +371,7 @@ func upgrade(id: int) -> Dictionary:
 	var price: float = catalog[building.kind].price * 0.65 * float(building.level)
 	if cash < price:
 		return _fail("资金不足。")
-	cash -= price
+	record_cash_change(-price,"investment","设施与电网投资")
 	evolution.apply_upgrade(building)
 	building.invested_capital = float(building.get("invested_capital",catalog[building.kind].price))+price
 	building.refund_basis = float(building.get("refund_basis",catalog[building.kind].price))+price
@@ -337,7 +388,7 @@ func upgrade_line(id: int) -> Dictionary:
 	var price := 4500.0 * float(line.level)
 	if cash < price:
 		return _fail("资金不足。")
-	cash -= price
+	record_cash_change(-price,"investment","设施与电网投资")
 	line.level += 1
 	line.capacity *= 1.6
 	line.health = 100.0
@@ -348,6 +399,7 @@ func upgrade_line(id: int) -> Dictionary:
 	return _ok("线路已增容。", id)
 
 func repair(id: int) -> Dictionary:
+	if lifecycle.enabled: return expansion_action("maintenance",{"target_type":"facility","id":id,"action":"overhaul"})
 	var building := get_building(id)
 	if building.is_empty():
 		return _fail("设施不存在。")
@@ -359,7 +411,7 @@ func repair(id: int) -> Dictionary:
 		return _fail("两支维修队都在作业，请稍候。")
 	if cash < 1200.0:
 		return _fail("资金不足。")
-	cash -= 1200.0
+	record_cash_change(-1200.0,"maintenance","设施检修派单")
 	building.repair_remaining = 0.65
 	building.repair_started_at=elapsed_hours
 	building.repair_duration=0.65
@@ -369,6 +421,7 @@ func repair(id: int) -> Dictionary:
 	return _ok("维修队已派出。", id)
 
 func repair_line(id: int) -> Dictionary:
+	if lifecycle.enabled: return expansion_action("maintenance",{"target_type":"line","id":id,"action":"overhaul"})
 	var line := get_line(id)
 	if line.is_empty():
 		return _fail("线路不存在。")
@@ -385,7 +438,7 @@ func repair_line(id: int) -> Dictionary:
 		return _fail("现场或遥测记录显示设备状态良好，可按需执行开关操作。")
 	if cash < 900.0:
 		return _fail("资金不足。")
-	cash -= 900.0
+	record_cash_change(-900.0,"maintenance","线路抢修派单")
 	line.repair_remaining = 0.6 if located else 1.1
 	line.repair_started_at=elapsed_hours
 	line.repair_duration=float(line.repair_remaining)
@@ -403,7 +456,7 @@ func active_repairs() -> int:
 	for link in digital.links:
 		if float(link.repair_remaining) > 0.0:
 			count += 1
-	return count
+	return count + lifecycle.active_jobs() + customers.active_jobs()
 
 func toggle_line(id: int) -> Dictionary:
 	if campaign.active:
@@ -441,11 +494,17 @@ func preview_demolition(id: int) -> Dictionary:
 			if not _campaign_line_role(str(role)) and int(campaign.roles[role]) == id:
 				result.message="这是本关工程需要保留的预置设施；可拆除自己新建的设施。"
 				return result
-	if float(building.repair_remaining) > 0:
+	if float(building.repair_remaining) > 0 or bool(building.get("lifecycle_busy",false)):
 		result.message="检修期间无法拆除。"
 		return result
+	for line in lines:
+		if int(line.id) in result.line_ids and bool(line.get("lifecycle_busy",false)):
+			result.message="相连线路现场作业期间无法拆除。"
+			return result
+	result.reserve_penalty=strategy.demolition_penalty(id)
 	result.ok=true
 	result.message="将拆除设施与相连的 %d 条电力、%d 条通信线路；回收 ¥%.0f。" % [result.line_ids.size(),result.communication_ids.size(),result.refund]
+	if float(result.reserve_penalty)>0: result.message+=" 备用承诺违约费用 ¥%.0f，净回收 ¥%.0f。" % [result.reserve_penalty,float(result.refund)-float(result.reserve_penalty)]
 	return result
 
 func demolish(id: int) -> Dictionary:
@@ -462,7 +521,7 @@ func demolish(id: int) -> Dictionary:
 			if (facility and target_id==id) or (not facility and target_id in preview.line_ids):
 				var action: String = "facility" if facility else ("remote_switch" if method=="remote" else ("inspect" if command.get("kind","")=="patrol" else "field_switch"))
 				record_campaign_action(action,target_id,{"phase":"rejected","command_id":int(command.id),"method":method,"message":"目标或相连线路已拆除，待执行操作已取消。"})
-	cash += refund
+	record_cash_change(refund,"disposal","资产拆除回收")
 	region.unregister_building(self,building,true)
 	for index in range(lines.size() - 1, -1, -1):
 		if int(lines[index].a) == id or int(lines[index].b) == id:
@@ -470,6 +529,10 @@ func demolish(id: int) -> Dictionary:
 	buildings.erase(building)
 	digital.prune(self)
 	region.prune(self)
+	lifecycle.prune(self)
+	engineering.prune(self)
+	customers.prune(self)
+	strategy.prune(self)
 	_log("已拆除%s，按玩家实际投资回收 ¥%.0f；市政免费资产不产生建造退款。" % [building.name,refund], "info")
 	_refresh()
 	return _ok("拆除完成。", id)
@@ -489,7 +552,7 @@ func research() -> Dictionary:
 	var price: float = RESEARCH_COSTS[research_level]
 	if cash < price:
 		return _fail("资金不足。")
-	cash -= price
+	record_cash_change(-price,"research","馈线遥测与自愈研究")
 	research_level += 1
 	record_campaign_action("research", research_level, {"level":research_level})
 	if research_level == 1:
@@ -567,6 +630,13 @@ func next_event_hours(max_hours: float=1.0) -> float:
 	if storm_warning_sent and next_storm_at>elapsed_hours: duration=minf(duration,next_storm_at-elapsed_hours)
 	if storm_active: duration=minf(duration,maxf(0.001,storm_remaining))
 	if float(market.state.contract_remaining)>0.000001: duration=minf(duration,float(market.state.contract_remaining))
+	for job in lifecycle.jobs:
+		if job.status=="travel": duration=minf(duration,maxf(.001,float(job.travel_remaining)))
+		if job.status=="work": duration=minf(duration,maxf(.001,float(job.work_remaining)))
+	for project in strategy.state.projects:
+		if project.status=="building": duration=minf(duration,maxf(.001,float(project.remaining)))
+	for grid in customers.microgrids:
+		if not grid.pending.is_empty(): duration=minf(duration,maxf(.001,float(grid.pending.remaining)))
 	if management.state.active and int(management.state.stage)<5:
 		duration=minf(duration,maxf(0.001,float(management_status().remaining_hours)))
 	return duration
@@ -900,11 +970,21 @@ func demand_response() -> Dictionary:
 	if not feature_enabled("demand_response"): return _fail("本关尚未开放需求响应。")
 	if research_level < 2:
 		return _fail("先研究自愈控制以解锁需求响应。")
+	if customers.enabled:
+		var accepted:=0
+		for key in customers.devices:
+			if get_building(int(key)).get("kind","")=="hospital": continue
+			var result: Dictionary=customers.demand_response(self,int(key),"shift",.2,2.0)
+			if result.ok: accepted+=1
+		if accepted==0: return _fail("没有可执行响应的签约街区；检查电表、授权、可信观测和在途响应。")
+		_log("已向%d个签约街区签发移峰；按实际响应补偿，结束后回补电量。" % accepted,"info")
+		_refresh()
+		return _ok("已签发%d个街区的移峰响应。" % accepted)
 	if demand_response_remaining > 0:
 		return _fail("需求响应正在执行。")
 	if cash < 1000.0:
 		return _fail("资金不足。")
-	cash -= 1000.0
+	record_cash_change(-1000.0,"demand_response","需求响应补偿")
 	demand_response_remaining = 2.0
 	record_campaign_action("response")
 	_log("需求响应启动：未来 2 游戏小时，可通过可信通信控制的普通用户负荷下降 20%。", "success")
@@ -949,15 +1029,17 @@ func step(hours: float) -> void:
 	var remaining := minf(hours, 48.0)
 	while remaining > 0.000001:
 		if campaign.active and (campaign.completed or campaign.failed): break
-		var dt := minf(remaining, 0.05)
+		var dt := minf(remaining, 0.25 if _is_projection else 0.05)
 		# Split every wholesale/retail band boundary as well as midnight.
-		for boundary in [7.0, 11.0, 15.0, 17.0, 21.0, 23.0, 24.0]:
+		for boundary in range(1,25):
 			var distance: float = boundary - time_hours
 			if distance > 0.000001:
 				dt = minf(dt, distance)
 				break
 		if float(market.state.contract_remaining) > 0.000001:
 			dt = minf(dt, float(market.state.contract_remaining))
+		var forward_boundary:=floorf(elapsed_hours+0.000000001)+1.0-elapsed_hours
+		if forward_boundary>0.000001: dt=minf(dt,forward_boundary)
 		_tick(dt)
 		remaining -= dt
 	changed.emit()
@@ -966,8 +1048,10 @@ func _tick(dt: float) -> void:
 	var settlement_day := day
 	_pricing_day = day
 	_pricing_hour = time_hours + dt * 0.5
-	elapsed_hours += dt
-	time_hours += dt
+	# Stable nanohour boundaries avoid platform JSON parsing moving an event by
+	# one floating-point ULP after a save/restore.
+	elapsed_hours = round((elapsed_hours+dt)*1e9)/1e9
+	time_hours = round((time_hours+dt)*1e9)/1e9
 	if time_hours >= 24.0:
 		time_hours -= 24.0
 		day += 1
@@ -1004,6 +1088,9 @@ func _tick(dt: float) -> void:
 				record_campaign_action("repair", int(line.id), {"kind":"line"})
 				_log("线路 #%d 抢修完成，已合闸恢复供电。" % line.id, "success")
 	_update_weather()
+	strategy.advance(self,dt)
+	customers.advance(self,dt)
+	lifecycle.advance(self,dt)
 	evolution.advance(self, dt)
 	digital.advance(self, dt)
 	if research_level >= 2 and feature_enabled("auto_restore"):
@@ -1014,12 +1101,13 @@ func _tick(dt: float) -> void:
 	# Protection evaluates a query first; commit storage energy exactly once,
 	# after any breaker trips, so bills and MWh match the final physical flow.
 	_solve(0.0)
+	engineering.advance(self,dt)
 	for line in lines:
 		var loading := absf(float(line.flow)) / maxf(0.1, float(line.capacity))
 		if line.closed and not line.fault and loading > 1.0:
 			line.heat += dt * (loading * loading - 1.0) * 2.0
 			line.health = maxf(10.0, float(line.health) - dt * (loading - 1.0) * 2.0)
-			if line.heat >= evolution.line_trip_threshold(self, line):
+			if line.heat >= evolution.line_trip_threshold(self, line) * (float(line.get("protection_delay",1.0)) if engineering.enabled else 1.0):
 				line.closed = false
 				line.trip_reason = "持续过载"
 				var observed := line_observation(int(line.id))
@@ -1030,12 +1118,15 @@ func _tick(dt: float) -> void:
 		else:
 			line.heat = maxf(0.0, float(line.heat) - dt * 0.8)
 	_solve(dt)
+	lifecycle.after_solve(self,dt)
 	digital.sample_verified(self)
 	last_income = float(totals.income)
 	last_expenses = float(totals.expenses)
-	cash += (last_income - last_expenses) * dt
+	record_cash_change((last_income - last_expenses) * dt,"operations","运营与市场结算")
 	var contract_was_active: bool = float(market.state.contract_remaining) > 0.0
 	market.settle(dt, settlement_day, totals)
+	strategy.settle(self,dt)
+	if not _is_projection: planning.advance(self,dt)
 	totals.satisfaction = float(market.state.satisfaction)
 	totals.income = last_income
 	totals.expenses = last_expenses
@@ -1160,10 +1251,13 @@ func market_forecast() -> Array[Dictionary]:
 		for offset in 24:
 			fixed.append({"day":day + int((time_hours + offset) / 24.0),"hour":fposmod(time_hours + offset,24.0),"spot":float(campaign.chapter().get("fixed_import_price",90.0)),"retail":145.0})
 		return fixed
-	return market.forecast(day, time_hours, weather)
+	return strategy.forecast_prices(self,market.forecast(day, time_hours, weather))
 
 func _update_market_prices(pricing_day: int, pricing_hour: float) -> void:
 	market.update_prices(pricing_day, pricing_hour, weather)
+	market.state.spot_price=strategy.spot_price(self,float(market.state.spot_price))
+	market.state.export_price=float(market.state.spot_price)*0.72
+	market.state.retail_price=minf(float(market.state.retail_price),strategy.retail_cap())
 	if campaign.active and not feature_enabled("market"):
 		# Regulated external supply uses the same physical delivery and ledger,
 		# without silently applying a modern time-varying wholesale price.
@@ -1178,6 +1272,9 @@ func _update_market_prices(pricing_day: int, pricing_hour: float) -> void:
 func _solve(dt: float) -> void:
 	_update_market_prices(_pricing_day if _pricing_day >= 0 else day, _pricing_hour if _pricing_hour >= 0.0 else time_hours)
 	_contract_budget = float(market.state.contract_mw) if float(market.state.contract_remaining) > 0.0 and bool(operating_policy().enabled) else 0.0
+	_day_ahead_budget = strategy.committed_mw(self) if bool(operating_policy().enabled) else 0.0
+	_day_ahead_delivered = 0.0
+	engineering.prepare(self)
 	var adjacency := {}
 	for building in buildings:
 		adjacency[int(building.id)] = []
@@ -1192,7 +1289,8 @@ func _solve(dt: float) -> void:
 		building.curtailment_mw = 0.0
 		building.grid_capacity = _terminal_capacity(building) if evolution.is_terminal(str(building.kind)) and building.online else 0.0
 		building.demand = evolution.demand_for(self, building) * demand_factor(str(building.kind)) * market.demand_multiplier(str(building.kind)) * region.demand_multiplier(building)
-		if demand_response_remaining > 0.0 and building.kind in ["home", "factory"]:
+		building.demand *= strategy.demand_factor(self,building)
+		if not customers.enabled and demand_response_remaining > 0.0 and building.kind in ["home", "factory"]:
 			if digital.control_reachable(self, int(building.id)):
 				building.demand *= 0.8
 	for line in lines:
@@ -1238,7 +1336,7 @@ func _solve(dt: float) -> void:
 		demand += float(building.demand)
 		served += float(building.served)
 		renewable_served += float(building.get("renewable_served_mw",0.0))
-		var customer_rate := minf(145.0, float(market.state.retail_price)) if building.kind == "hospital" else float(market.state.retail_price)
+		var customer_rate := minf(strategy.retail_cap(),minf(145.0, float(market.state.retail_price)) if building.kind == "hospital" else float(market.state.retail_price))
 		retail_income += float(building.served) * customer_rate
 		if not evolution.is_terminal(str(building.kind)):
 			generation += maxf(0.0, float(building.output))
@@ -1249,6 +1347,7 @@ func _solve(dt: float) -> void:
 		grid_capacity += float(building.grid_capacity)
 		if building.kind in ["solar", "wind", "hydro"]:
 			renewable += float(building.output)
+		if float(building.get("customer_generation_mw",0.0))>0.0: renewable+=maxf(0.0,float(building.output))
 		if evolution.is_generator(str(building.kind)):
 			var committed := maxf(float(building.output), minf(float(building.available), evolution.generator_minimum(building)))
 			fuel_cost += evolution.fuel_cost(building)
@@ -1262,7 +1361,7 @@ func _solve(dt: float) -> void:
 	peak_load = maxf(peak_load, demand)
 	var outage_cost := maxf(0.0, demand - served) * 60.0
 	var export_income := export_mw * float(market.state.export_price)
-	var import_cost := maxf(0.0, import_mw - contract_delivered) * float(market.state.spot_price)
+	var import_cost := maxf(0.0, import_mw - contract_delivered - _day_ahead_delivered) * float(market.state.spot_price)
 	var contract_cost := float(market.state.contract_mw) * float(market.state.contract_price) if float(market.state.contract_remaining) > 0.0 else 0.0
 	var comm: Dictionary = digital.summarize(self)
 	var billable_buildings:=0
@@ -1298,6 +1397,20 @@ func _solve(dt: float) -> void:
 		"comm_online_links": comm.online_links, "comm_total_links": comm.total_links,
 		"cyber_active": comm.cyber_active, "security_cost": comm.security_cost,
 		"communication_cost": comm.communication_cost, "remote_pending": comm.remote_pending, "located_faults": comm.located_faults}
+	var losses:=0.0
+	var min_voltage:=1.0
+	for b in buildings:
+		losses+=float(b.get("network_loss_mw",0.0))
+		if float(b.served)>0.0: min_voltage=minf(min_voltage,float(b.voltage))
+	totals.network_loss_mw=losses
+	totals.min_voltage=min_voltage
+	totals.day_ahead_import_mw=_day_ahead_delivered
+	totals.energy_balance_error=float(totals.energy_balance_error)-losses
+	var extra_rates: Dictionary=strategy.rates(self)
+	totals.income=float(totals.income)+float(extra_rates.get("income",0.0))
+	totals.expenses=float(totals.expenses)+float(extra_rates.get("expenses",0.0))
+	for key in extra_rates:
+		if key not in ["income","expenses"]: totals[key]=extra_rates[key]
 
 func _terminal_capacity(building: Dictionary) -> float:
 	return evolution.terminal_capacity(self, building)
@@ -1325,7 +1438,7 @@ func _discharge_batteries(batteries: Array[Dictionary], requested: float, dt: fl
 		var reserve: float=float(policy.reserve_soc) if not policy.legacy_custom else maxf(float(battery.get("reserve_soc", 0.0)), float(market.state.reserve_soc) if preserve_reserve else 0.0)
 		var floor_energy := float(battery.energy_capacity) * reserve
 		var energy_power: float = maxf(0.0, float(battery.energy) - floor_energy) * evolution.storage_efficiency(battery) / interval
-		var rated: float = float(battery.capacity) * evolution.storage_power_factor(self, battery)
+		var rated: float = maxf(0.0,float(battery.capacity) * evolution.storage_power_factor(self, battery)-strategy.reserved_mw(int(battery.id)))
 		var room := maxf(0.0, minf(rated, energy_power) - float(battery.output))
 		var power := minf(room, maxf(0.0, requested - total))
 		battery.output += power
@@ -1362,7 +1475,7 @@ func _solve_dc(ids: Array[int]) -> void:
 		row.fill(0.0)
 		matrix.append(row)
 		var building := get_building(ids[i])
-		injections.append(float(building.output) - float(building.served) - float(building.charging))
+		injections.append(float(building.output) - float(building.served) - float(building.charging) - float(building.get("network_loss_mw",0.0)))
 	for line in lines:
 		if not electrical_line_active(line) or not index.has(int(line.a)) or not index.has(int(line.b)):
 			continue
@@ -1445,7 +1558,7 @@ func _update_objectives() -> void:
 				objective.progress = 1.0 if restored_storms > 0 else (0.5 if storm_count > 0 else 0.0)
 		if float(objective.progress) >= 0.9999:
 			objective.done = true
-			cash += float(objective.reward)
+			record_cash_change(float(objective.reward),"reward","运营委托奖励")
 			_log("目标完成「%s」，获得城市发展基金 ¥%s。" % [objective.title, objective.reward], "success")
 
 func _refresh() -> void:
@@ -1468,6 +1581,56 @@ func _ok(message: String, id: int = -1) -> Dictionary:
 func _fail(message: String) -> Dictionary:
 	return {"ok": false, "message": message, "id": -1}
 
+func record_cash_change(amount: float, category: String, description: String) -> void:
+	if not is_finite(amount): return
+	if _is_projection:
+		cash+=amount
+		return
+	planning.record(self,amount,category,description)
+
+func commission_expansion(system: String) -> Dictionary:
+	if campaign.active: return _fail("历史教学使用章节指定的规则；在经营或区域沙盘中投运。")
+	if management.state.active and int(management.state.stage)<3: return _fail("先完成接网、昼夜供需和清洁盈利，再投运高级经营体系。")
+	if not evolution.has_technology("regional_planning"): return _fail("先研究区域负荷规划，再投运新的经营体系。")
+	var result: Dictionary
+	match system:
+		"lifecycle": result=lifecycle.enable(self)
+		"engineering": result=engineering.enable(self)
+		"customers":
+			if not evolution.has_technology("scada"): return _fail("用户侧协调还需要 SCADA 调度接口研究。")
+			result=customers.enable(self)
+		"strategy": result=strategy.enable(self)
+		_: return _fail("未知投运体系。")
+	if bool(result.ok): _refresh()
+	return result
+
+func planning_forecast(settings: Dictionary={}, hours: int=24) -> Dictionary:
+	return planning.forecast(self,settings,hours)
+
+func compare_operating_plans(plans: Array) -> Dictionary:
+	return planning.compare(self,plans)
+
+func operating_report() -> Dictionary:
+	return planning.report(self)
+
+func expansion_action(action: String, args: Dictionary={}) -> Dictionary:
+	if campaign.active: return _fail("本关使用情景指定的规则。")
+	var result: Dictionary
+	match action:
+		"maintenance": result=lifecycle.maintenance(self,str(args.get("target_type","facility")),int(args.get("id",-1)),str(args.get("action","inspect")),int(args.get("priority",0)))
+		"spares": result=lifecycle.restock(self,int(args.get("count",1)))
+		"priority": result=lifecycle.set_priority(int(args.get("id",-1)),int(args.get("priority",0)))
+		"cancel_maintenance": result=lifecycle.cancel(self,int(args.get("id",-1)))
+		"line_tier": result=engineering.configure_line(self,int(args.get("id",-1)),str(args.get("tier","distribution")),float(args.get("delay",1.0)))
+		"substation": result=engineering.configure_substation(self,int(args.get("id",-1)),float(args.get("capacity",40)),str(args.get("zone","馈线1")))
+		"customer": result=customers.configure(self,int(args.get("id",-1)),args.get("settings",{}))
+		"response": result=customers.demand_response(self,int(args.get("id",-1)),str(args.get("kind","shift")),float(args.get("fraction",.2)),float(args.get("hours",2)))
+		"microgrid_define": result=customers.define_microgrid(self,str(args.get("name","街区微电网")),args.get("members",[]),args.get("critical_ids",[]))
+		"microgrid_switch": result=customers.set_microgrid(self,int(args.get("id",-1)),bool(args.get("island",true)),str(args.get("method","field")))
+		_: return _fail("未知经营操作。")
+	if bool(result.get("ok",false)): _refresh()
+	return result
+
 func snapshot() -> Dictionary:
 	var saved_buildings: Array = []
 	for building in buildings:
@@ -1489,6 +1652,8 @@ func snapshot() -> Dictionary:
 		"evolution": evolution.snapshot(), "region": region.snapshot(),
 		"campaign": campaign.snapshot(),
 		"management": management.snapshot(),
+		"planning": planning.snapshot(), "lifecycle": lifecycle.snapshot(),
+		"engineering": engineering.snapshot(), "customers": customers.snapshot(), "strategy": strategy.snapshot(),
 		"sandbox_goal": sandbox_goal, "sandbox_goal_hours": sandbox_goal_hours,
 		"completed_sandbox_goals": completed_sandbox_goals.duplicate()}
 
@@ -1511,6 +1676,9 @@ func load_game(path: String = "user://bay_grid_save.json") -> Dictionary:
 		return _fail("无法读取存档。")
 	var data: Variant = JSON.parse_string(file.get_as_text())
 	file.close()
+	return restore_snapshot(data)
+
+func restore_snapshot(data: Variant) -> Dictionary:
 	if not data is Dictionary or not _saved_integer(data.get("schema_version"), 1, SCHEMA_VERSION):
 		return _fail("存档格式不兼容。")
 	if not _valid_save(data):
@@ -1565,6 +1733,21 @@ func load_game(path: String = "user://bay_grid_save.json") -> Dictionary:
 			city.erase("initial_demand_scale")
 	campaign = restored_campaign
 	management = restored_management
+	planning=PlanningModel.new()
+	lifecycle=LifecycleModel.new()
+	engineering=EngineeringModel.new()
+	customers=CustomerModel.new()
+	strategy=StrategyModel.new()
+	if int(data.schema_version)>=8:
+		planning.restore(data.planning)
+		lifecycle.restore(data.lifecycle)
+		engineering.restore(data.engineering)
+		customers.restore(data.customers)
+		strategy.restore(data.strategy)
+	else:
+		planning.reset(float(data.cash))
+	for b in buildings: lifecycle.initialize_building(b)
+	for l in lines: lifecycle.initialize_line(l)
 	sandbox_goal = str(data.get("sandbox_goal", ""))
 	sandbox_goal_hours = float(data.get("sandbox_goal_hours", 0.0))
 	if int(data.schema_version)<7 and not sandbox_goal.is_empty(): management.state.sandbox_best[sandbox_goal]=sandbox_goal_hours
@@ -1623,6 +1806,15 @@ func _valid_save(data: Dictionary) -> bool:
 	# are floats, so identifiers also require an explicit integrality check.
 	if not _saved_integer(data.get("schema_version"), 1, SCHEMA_VERSION):
 		return false
+	if int(data.schema_version)>=8:
+		for key in ["planning","lifecycle","engineering","customers","strategy"]:
+			if not data.get(key) is Dictionary: return false
+		if not data.get("campaign") is Dictionary: return false
+		if not PlanningModel.valid(data.get("planning")) or not LifecycleModel.valid_snapshot(data.get("lifecycle")): return false
+		if not EngineeringModel.valid(data.get("engineering")) or not CustomerModel.valid(data.get("customers")) or not StrategyModel.valid(data.get("strategy")): return false
+		if bool(data.get("campaign",{}).get("active",false)):
+			for key in ["lifecycle","engineering","customers","strategy"]:
+				if bool(data[key].enabled): return false
 	if int(data.schema_version) >= 2 and not MarketModel.valid_snapshot(data.get("market")):
 		return false
 	if int(data.schema_version) >= 6 and not CampaignModel.valid_snapshot(data.get("campaign")):
@@ -1633,6 +1825,9 @@ func _valid_save(data: Dictionary) -> bool:
 	for key in ["buildings", "lines", "objectives", "log_entries"]:
 		if not data.get(key) is Array:
 			return false
+	if int(data.schema_version)>=8:
+		for asset in data.buildings+data.lines:
+			if not asset is Dictionary or not LifecycleModel.validate_asset(asset): return false
 	var managed: bool=int(data.schema_version)>=7 and bool(data.get("management",{}).get("active",false))
 	if data.buildings.size() > 512 or data.lines.size() > 2000 or data.objectives.size() > (5 if managed else 4) or data.log_entries.size() > 40:
 		return false
@@ -1767,6 +1962,11 @@ func _valid_save(data: Dictionary) -> bool:
 		if not DigitalModel.valid_snapshot(data.get("digital"), ids, line_ids, float(data.elapsed_hours),int(data.schema_version)>=5):
 			return false
 		var crews: int = data.digital.field_jobs.size()
+		if int(data.schema_version)>=8:
+			for job in data.lifecycle.jobs:
+				if job.status in ["travel","work"]: crews+=1
+			for grid in data.customers.microgrids:
+				if not grid.pending.is_empty() and grid.pending.method=="field": crews+=1
 		for item in data.buildings + data.lines + data.digital.links:
 			if float(item.repair_remaining) > 0.0:
 				crews += 1
@@ -1784,6 +1984,19 @@ func _valid_save(data: Dictionary) -> bool:
 			if goal not in ["regional", "clean", "profitable"] or goal_ids.has(goal):
 				return false
 			goal_ids[goal] = true
+	if int(data.schema_version)>=8:
+		if not LifecycleModel.valid_references(data.lifecycle,data.buildings,data.lines,float(data.elapsed_hours)): return false
+		if not StrategyModel.references_valid(data.strategy,ids,line_ids,catalog): return false
+		if not EngineeringModel.references_valid(data.engineering,ids,line_ids) or not CustomerModel.references_valid(data.customers,ids,line_ids): return false
+		for key in data.engineering.lines:
+			if not line_ids.has(int(key)): return false
+		for key in data.engineering.substations:
+			if not ids.has(int(key)) or ids[int(key)].kind!="substation": return false
+		for key in data.customers.devices:
+			if not ids.has(int(key)) or ids[int(key)].kind not in ["home","factory","hospital"]: return false
+		for grid in data.customers.microgrids:
+			for id in grid.get("members",[]):
+				if not ids.has(int(id)): return false
 	return true
 
 func _saved_number(value: Variant, minimum: float, maximum: float) -> bool:

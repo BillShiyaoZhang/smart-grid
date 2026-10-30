@@ -805,7 +805,7 @@ func _handle_map_click(cell: Vector2i, screen_position: Vector2=Vector2.INF) -> 
 				selected_id=int(result.get("id",-1))
 				selected_line=-1
 				selected_comm_line=-1
-				_notify("建成尚需接网 · 选择接线工具连接电源或变电站")
+				_notify(str(result.message) if result.has("project_id") else "建成尚需接网 · 选择接线工具连接电源或变电站")
 			_sync_world(true)
 		else:
 			_notify("请在岛屿内的空地上建造",false)

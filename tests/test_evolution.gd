@@ -24,6 +24,8 @@ class TestGrid extends RefCounted:
 			if int(b.id) == id:
 				return b
 		return {}
+	func record_cash_change(amount: float, _category: String, _description: String) -> void:
+		cash+=amount
 	func _log(message: String, _severity: String = "info") -> void:
 		messages.append(message)
 	func add(kind: String, model: RefCounted, cell := Vector2i(2,2)) -> Dictionary:

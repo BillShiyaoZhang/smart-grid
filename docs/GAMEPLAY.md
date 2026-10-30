@@ -62,7 +62,7 @@
 
 ## 模型范围与参考
 
-仍采用固定电压、无损的简化 DC 有功潮流；没有真实 AC 无功、电压、热力学与水文学求解。设备效率、启停时间、人才名额、人口速度、费用和代际分组是可验证的玩法参数。HVDC 在当前版本表示外部市场换流接口，不是独立的多端直流网络。城市是有边界的动态沙盘，不是完整城市建设模拟。
+历史情景及未投运输配电管理的电网保留固定电压、无损的简化 DC 有功潮流；投运后增加双电压等级、变电容量、压降和由实际电源支付的线损，详见[经营扩展指南](EXPANSION.md)。没有完整 AC 无功、三相不平衡、热力学与水文学求解。设备效率、启停时间、人才名额、人口速度、费用和代际分组是玩法参数。HVDC 表示外部市场换流接口，不是独立的多端直流网络。城市是有边界的动态沙盘。
 
 设计参考：[DOE 抽水蓄能工作原理](https://www.energy.gov/cmei/water/how-pumped-storage-hydropower-works)、[EIA 电力储能说明](https://www.eia.gov/energyexplained/electricity/energy-storage-for-electricity-generation.php)、[DOE 核能连续供电的能力与约束](https://www.energy.gov/ne/articles/advantages-and-challenges-nuclear-powered-data-centers)、[核电站冷却](https://world-nuclear.org/Information-Library/Current-and-future-generation/Cooling-Power-Plants)。这些资料提供机制背景，游戏参数不代表真实设备规格。
 

@@ -5,6 +5,8 @@ const Shell = preload("res://scripts/ui/management_shell.gd")
 const Drafts = preload("res://scripts/ui/config_drafts.gd")
 const VisualChart = preload("res://scripts/ui/center_charts.gd")
 const UI = preload("res://scripts/ui/ui_kit.gd")
+const DecisionWorkbench = preload("res://scripts/ui/decision_workbench.gd")
+var decision_workbench: Control
 const TEAL := Color("77dbc0")
 const CREAM := Color("f2eddb")
 const MUTED := Color("95b0b6")
@@ -61,6 +63,7 @@ var intent_draft: Label
 var storage_intent_draft: Label
 
 func reset_session() -> void:
+	if decision_workbench!=null: decision_workbench.reset_session()
 	drafts.clear()
 	_inputs_ready=false
 	_ledger_signature=""
@@ -415,6 +418,14 @@ func _commit(result: Dictionary, section: String="") -> void:
 	message_label.add_theme_color_override("font_color",TEAL if result.get("ok",false) else ORANGE)
 
 func refresh(sync_inputs: bool=false) -> void:
+	if decision_workbench==null and game.sim.evolution.has_technology("regional_planning") and not game.sim.campaign.active:
+		decision_workbench=DecisionWorkbench.new()
+		_tab("长期经营与复盘").add_child(decision_workbench)
+		decision_workbench.setup(game,"economy")
+	if decision_workbench!=null:
+		tabs.set_tab_hidden(4,game.sim.campaign.active or not game.sim.evolution.has_technology("regional_planning"))
+		if tabs.is_tab_hidden(4) and tabs.current_tab==4: tabs.current_tab=0
+		decision_workbench.refresh()
 	if game == null or game.sim.get("market") == null:
 		return
 	var sim: RefCounted = game.sim
@@ -504,6 +515,7 @@ func _write_section(section: String, value: Dictionary) -> void:
 	syncing=false
 
 func _capture_drafts() -> void:
+	if decision_workbench!=null: decision_workbench.capture_drafts(drafts)
 	if not _inputs_ready: return
 	_capture_intents()
 	for section in ["trade","tariff","storage"]:
@@ -558,6 +570,10 @@ func _refresh_ledger() -> void:
 		var day: Dictionary=entries[-1]
 		for spec in [["retail_revenue","零售",1],["export_revenue","外售",1],["import_cost","购电",-1],["contract_cost","合约",-1],["fuel_cost","燃料",-1],["maintenance_cost","运维",-1],["outage_cost","失供",-1]]:
 			waterfall_rows.append({"label":spec[1],"value":float(day.get(spec[0],0))*float(spec[2])})
+		var base_net:=0.0
+		for row in waterfall_rows: base_net+=float(row.value)
+		var additional:=float(day.net)-base_net
+		if absf(additional)>.00001: waterfall_rows.append({"label":"附加结算","value":additional})
 	waterfall_chart.set_snapshot({"rows":waterfall_rows})
 	if entries.is_empty():
 		ledger_summary.text = "尚无结算。返回运营或推进一小时，开始积累账单。"

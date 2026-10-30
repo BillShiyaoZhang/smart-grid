@@ -102,7 +102,7 @@ func research(sim: RefCounted, id: String) -> Dictionary:
 			return _result(false,"需要先完成「%s」。" % TECHNOLOGIES[prerequisite].name)
 	if float(sim.cash) < float(tech.cost):
 		return _result(false,"研究资金不足。")
-	sim.cash -= float(tech.cost)
+	sim.record_cash_change(-float(tech.cost),"research","技术研发："+str(tech.name))
 	project = id
 	remaining_hours = float(tech.hours)
 	return _result(true,"「%s」研究启动，需 %.1f 游戏小时。" % [tech.name,tech.hours])

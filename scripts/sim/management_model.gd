@@ -111,7 +111,7 @@ func advance(sim: RefCounted, dt: float) -> void:
 		if stage<sim.objectives.size() and not bool(sim.objectives[stage].done):
 			sim.objectives[stage].done=true
 			sim.objectives[stage].progress=1.0
-			sim.cash+=float(sim.objectives[stage].reward)
+			sim.record_cash_change(float(sim.objectives[stage].reward),"reward","经营成果奖励")
 		state.stage=stage+1
 		if stage==3: sim.digital.next_attack_at=float(sim.elapsed_hours)+12.0
 		state.hold_hours=0.0
